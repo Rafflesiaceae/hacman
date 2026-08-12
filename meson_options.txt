@@ -1,0 +1,8 @@
+option('static', type: 'boolean', value: true,
+  description: 'Link the binary statically (default; pairs with a musl toolchain)')
+
+option('curl', type: 'string', value: 'curl',
+  description: 'curl executable used for HTTP requests (looked up in PATH if relative)')
+
+option('shell', type: 'string', value: '/bin/sh',
+  description: 'Shell used to run install scripts')

@@ -1,0 +1,222 @@
+/* Small, dependency-free helpers for hacman's fast path.
+ *
+ * Output goes through a hand-rolled formatter on top of write(2) instead of
+ * <stdio.h>: the fast path then touches no stdio buffers, no locale and no
+ * allocator. The slow (install) path is free to use stdio. */
+
+#include "hacman.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <string.h>
+#include <unistd.h>
+
+#define HM_OUT_CAP 4096
+
+static char   out_buf[HM_OUT_CAP];
+static size_t out_len;
+
+/* write(2) with EINTR/short-write handling. */
+static void hm_write_all(int fd, const char *s, size_t len)
+{
+    while (len > 0) {
+        ssize_t n = write(fd, s, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return; /* nothing useful left to do about a failing stdout */
+        }
+        s   += (size_t)n;
+        len -= (size_t)n;
+    }
+}
+
+static size_t fmt_ulong(char *dst, size_t cap, unsigned long v)
+{
+    char   tmp[24];
+    size_t n = 0, i = 0;
+
+    do {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v > 0 && n < sizeof(tmp));
+
+    while (n > 0 && i < cap) dst[i++] = tmp[--n];
+    return i;
+}
+
+/* Renders `fmt` into `dst`, truncating instead of overflowing.
+ * Supported conversions: %s %S %u %d %c %% (see hacman.h). */
+static size_t hm_vformat(char *dst, size_t cap, const char *fmt, va_list ap)
+{
+    size_t o = 0;
+
+    for (; *fmt != '\0' && o < cap; ++fmt) {
+        if (*fmt != '%') {
+            dst[o++] = *fmt;
+            continue;
+        }
+        ++fmt;
+        switch (*fmt) {
+        case 's': {
+            const char *s = va_arg(ap, const char *);
+            if (!s) s = "(null)";
+            while (*s != '\0' && o < cap) dst[o++] = *s++;
+            break;
+        }
+        case 'S': {
+            hm_str s = va_arg(ap, hm_str);
+            size_t i;
+            for (i = 0; i < s.len && o < cap; ++i) dst[o++] = s.ptr[i];
+            break;
+        }
+        case 'u':
+            o += fmt_ulong(dst + o, cap - o, va_arg(ap, unsigned long));
+            break;
+        case 'd': {
+            long v = va_arg(ap, long);
+            if (v < 0) {
+                dst[o++] = '-';
+                if (o < cap) o += fmt_ulong(dst + o, cap - o, (unsigned long)-v);
+            } else {
+                o += fmt_ulong(dst + o, cap - o, (unsigned long)v);
+            }
+            break;
+        }
+        case 'c':
+            dst[o++] = (char)va_arg(ap, int);
+            break;
+        case '%':
+            dst[o++] = '%';
+            break;
+        case '\0':
+            return o;
+        default:
+            dst[o++] = *fmt;
+            break;
+        }
+    }
+    return o;
+}
+
+void hm_out_flush(void)
+{
+    if (out_len > 0) {
+        hm_write_all(1, out_buf, out_len);
+        out_len = 0;
+    }
+}
+
+void hm_out(const char *fmt, ...)
+{
+    char    line[1024];
+    size_t  n;
+    va_list ap;
+
+    va_start(ap, fmt);
+    n = hm_vformat(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    if (n > HM_OUT_CAP - out_len) hm_out_flush();
+    if (n > HM_OUT_CAP) {
+        hm_write_all(1, line, n);
+        return;
+    }
+    memcpy(out_buf + out_len, line, n);
+    out_len += n;
+}
+
+void hm_err(const char *fmt, ...)
+{
+    char    line[1024];
+    size_t  n;
+    va_list ap;
+
+    hm_out_flush(); /* keep stdout/stderr ordering intact */
+
+    va_start(ap, fmt);
+    n = hm_vformat(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    hm_write_all(2, line, n);
+}
+
+int hm_str_eq(hm_str a, const char *lit)
+{
+    size_t i;
+    for (i = 0; i < a.len; ++i) {
+        if (lit[i] == '\0' || lit[i] != a.ptr[i]) return 0;
+    }
+    return lit[a.len] == '\0';
+}
+
+int hm_str_eq_str(hm_str a, hm_str b)
+{
+    return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0);
+}
+
+/* Copies `s` into `dst` as a NUL-terminated string. Returns the copied length,
+ * which is smaller than s.len if it did not fit. */
+size_t hm_str_copy(char *dst, size_t cap, hm_str s)
+{
+    size_t n = s.len;
+    if (cap == 0) return 0;
+    if (n > cap - 1) n = cap - 1;
+    if (n > 0) memcpy(dst, s.ptr, n);
+    dst[n] = '\0';
+    return n;
+}
+
+int hm_parse_ulong(hm_str s, unsigned long *out)
+{
+    unsigned long v = 0;
+    size_t        i;
+
+    if (s.len == 0) return -1;
+    for (i = 0; i < s.len; ++i) {
+        if (s.ptr[i] < '0' || s.ptr[i] > '9') return -1;
+        v = v * 10 + (unsigned long)(s.ptr[i] - '0');
+    }
+    *out = v;
+    return 0;
+}
+
+/* Slurps a whole file in as few syscalls as the kernel allows: one open(),
+ * read() until EOF, one close(). No stdio, no per-line allocation - the SIML
+ * parser is then fed slices of this single buffer. */
+long hm_read_all(const char *path, char *buf, size_t cap)
+{
+    int    fd    = 0;
+    int    close_fd = 0;
+    size_t total = 0;
+
+    if (path != NULL && strcmp(path, "-") != 0) {
+        fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            hm_err("hacman: %s: cannot open file\n", path);
+            return -1;
+        }
+        close_fd = 1;
+    }
+
+    for (;;) {
+        ssize_t n = read(fd, buf + total, cap - total);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            hm_err("hacman: %s: read failed\n", path ? path : "<stdin>");
+            if (close_fd) close(fd);
+            return -1;
+        }
+        if (n == 0) break;
+        total += (size_t)n;
+        if (total == cap) {
+            hm_err("hacman: %s: input too large (max %u bytes)\n",
+                   path ? path : "<stdin>", (unsigned long)cap);
+            if (close_fd) close(fd);
+            return -1;
+        }
+    }
+
+    if (close_fd) close(fd);
+    return (long)total;
+}
