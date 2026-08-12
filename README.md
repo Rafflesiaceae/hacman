@@ -1,19 +1,32 @@
 # hacman
 
-`hacman` watches a URL and installs what changed — or runs a command on a leash.
+`hacman` sets a program up, then gets out of the way.
 
 It reads **one project** in [SIML](vendor/siml/SPEC.rst) format — from a file, or
-from standard input when the file argument is `-` — and, on a schedule, either
-asks whether a URL changed and runs that project's install script when it did,
-or simply runs a command:
+from standard input when the file argument is `-` — makes sure the thing that
+file describes is set up, and then **execs the program it names**, forwarding
+every argument that followed the file:
+
+```sh
+alias cargo='hacman ~/.config/hacman/cargo-shim.siml'
+
+cargo build --release   # updates the toolchain at most once a week,
+                        # then becomes the real cargo with `build --release`
+```
+
+"Set up" is one of two things, on a schedule: check a URL and run an install
+script when it changed, or simply run a command.
 
 ```
-url: https://go.dev/VERSION?m=text      command: git pull --ff-only
-check: hash                             workdir: {{HOME}}/workspace/nixcfg
-schedule: daily                         schedule: 12h
-install: |
+url: https://go.dev/VERSION?m=text      command: rustup update stable
+check: hash                             workdir: {{HOME}}
+schedule: daily                         bin-path: {{HOME}}/.cargo/bin/cargo
+install: |                              schedule: weekly
   ...
 ```
+
+`bin-path` is optional: without it hacman just does the work and exits, which
+is what a `cron` line or a shell profile wants.
 
 One project per file: a file that describes a second project (a top-level
 sequence, another mapping, another `---` document) is rejected. Watching many
@@ -167,6 +180,30 @@ usage: hacman [OPTIONS] FILE
 generate-project | hacman -
 ```
 
+### Options before FILE, arguments after it
+
+hacman's own options must come **before** `FILE`. The first non-option argument
+is `FILE`, and everything after it belongs to the program named by `bin-path` —
+including arguments that look like hacman's own:
+
+```sh
+hacman -v proj.siml --plan -v      # -v is hacman's; --plan -v go to the program
+```
+
+When a project names a `bin-path`, hacman:
+
+- prints its own status output on **stderr**, so the program owns stdout;
+- `exec()`s the program once the setup succeeded — the program inherits the
+  terminal, and its exit status becomes hacman's;
+- hands over even when the schedule said "not yet", which is the common case:
+  the whole detour is two file reads and a comparison;
+- does **not** hand over when the setup failed (exit 2), or under `--plan`,
+  `--check-only`, `--dry-run` and `--adopt`, which report rather than act;
+- exits 127 if the program cannot be started at all.
+
+Passing arguments after `FILE` without a `bin-path` is an error, since there
+would be nowhere to forward them.
+
 Exit codes:
 
 | code | meaning |
@@ -175,9 +212,12 @@ Exit codes:
 | `1` | usage error or invalid configuration |
 | `2` | a check, an install or a command failed |
 | `10` | work is pending while `--check-only`/`--dry-run` |
+| `127` | the `bin-path` program could not be started |
+| *other* | whatever the `bin-path` program exited with |
 
 Output is quiet by default: one line when the project changed, plus whatever
-the install script prints. `-v` also reports an unchanged or skipped project.
+the install script or command prints. `-v` also reports an unchanged or skipped
+project. With a `bin-path`, all of hacman's own output moves to stderr.
 
 ---
 
@@ -213,6 +253,7 @@ See [`examples/`](examples/) for one file per check scheme.
 | `version-prefix` | for `check: version` | — | text immediately before the version |
 | `version-suffix` | no | end of line | text immediately after the version |
 | `install` | no | — | shell script to run when the URL changed |
+| `bin-path` | no | — | program to exec afterwards (see [above](#options-before-file-arguments-after-it)) |
 
 ### command projects
 
@@ -231,10 +272,12 @@ schedule: 12h
 | `workdir` | no | `{{HOME}}` | working directory; must expand to an absolute path |
 | `name` | no | the `command` | label used in output |
 | `schedule` | no | `daily` | when the command may run (below) |
+| `bin-path` | no | — | program to exec afterwards (see [above](#options-before-file-arguments-after-it)) |
 
-`workdir` supports `{{VAR}}` templating against the environment:
+`workdir` and `bin-path` support `{{VAR}}` templating against the environment:
 `{{HOME}}/workspace/nixcfg`. An unset variable is an error rather than an empty
-string, so a typo cannot silently point the command at `/workspace/nixcfg`.
+string, so a typo cannot silently point the command at `/workspace/nixcfg`, and
+both must expand to an absolute path.
 
 There is no `install` and no `check`: the command *is* the work, and its exit
 status is the whole verdict. hacman records the run **only if the command
@@ -394,7 +437,7 @@ src/config.c              SIML -> one hm_project, zero-copy
 src/plan.c                --plan serialisation
 src/cache.c               cache records: identity, load, atomic save
 src/check.c               HTTP via curl + the three check schemes
-src/install.c             slow path: install scripts and command runs
+src/install.c             slow path: install scripts, commands, exec
 src/util.c                write(2)-based output, string and file helpers
 vendor/siml/              vendored SIML parser (see vendor.py)
 ```
