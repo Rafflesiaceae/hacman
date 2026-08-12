@@ -121,7 +121,7 @@ int hm_state_load(hm_state *st, const char *path)
         changed = next_field(&cur, line_end, '\t');
         mark    = next_field(&cur, line_end, '\t');
 
-        if (name.len == 0 || st->count >= HM_MAX_PROJECTS) continue;
+        if (name.len == 0 || st->count >= HM_MAX_STATE_ENTRIES) continue;
 
         {
             hm_state_entry *e = &st->ent[st->count++];
@@ -150,7 +150,7 @@ hm_state_entry *hm_state_intern(hm_state *st, hm_str name)
     hm_state_entry *e = hm_state_find(st, name);
 
     if (e != NULL) return e;
-    if (st->count >= HM_MAX_PROJECTS) return NULL;
+    if (st->count >= HM_MAX_STATE_ENTRIES) return NULL;
 
     e = &st->ent[st->count++];
     memset(e, 0, sizeof(*e));

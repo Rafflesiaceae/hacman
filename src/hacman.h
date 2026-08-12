@@ -9,7 +9,7 @@
  * check path never calls malloc(), so there is no allocator to warm up and no
  * failure mode to handle. BSS pages are faulted in lazily by the kernel, so
  * generous limits cost nothing at startup. */
-#define HM_MAX_PROJECTS 128
+#define HM_MAX_STATE_ENTRIES 128              /* rows kept in the state table */
 #define HM_CONFIG_MAX   (1024u * 1024u)       /* .siml input                  */
 #define HM_STATE_MAX    (256u * 1024u)        /* state file                   */
 #define HM_BODY_MAX     (4u * 1024u * 1024u)  /* HTTP response body           */
@@ -38,6 +38,7 @@ typedef enum {
     HM_CHECK_VERSION    /* GET, compare a version substring from the body */
 } hm_check_kind;
 
+/* One project - and an input file describes exactly one of them. */
 typedef struct {
     hm_str        name;            /* defaults to url when not given       */
     hm_str        url;
@@ -48,7 +49,7 @@ typedef struct {
     hm_str        version_suffix;  /* HM_CHECK_VERSION: text after value   */
     hm_str        install;         /* raw block-scalar region, still indented */
     size_t        install_indent;  /* columns to strip from install lines  */
-    long          line;            /* line the entry started on            */
+    long          line;            /* line the project started on          */
 } hm_project;
 
 /* --- util.c ------------------------------------------------------------- */
@@ -65,20 +66,31 @@ int    hm_str_eq_str(hm_str a, hm_str b);
 size_t hm_str_copy(char *dst, size_t cap, hm_str s);
 int    hm_parse_ulong(hm_str s, unsigned long *out);
 
-/* Reads a whole file (or fd 0 when path is NULL or "-") into `buf`.
+/* Reads a whole file (or standard input when path is "-") into `buf`.
  * Returns the byte count, or -1 on error (message already printed). */
 long hm_read_all(const char *path, char *buf, size_t cap);
 
 /* --- config.c ----------------------------------------------------------- */
 
-/* Parses `len` bytes of SIML into `out`. All resulting slices point into
- * `buf`, which must stay alive for as long as the projects are used.
- * Returns the project count, or -1 on error (message already printed). */
+/* Parses `len` bytes of SIML describing exactly one project into `out`. All
+ * resulting slices point into `buf`, which must stay alive for as long as the
+ * project is used. Returns 0, or -1 on error (message already printed). */
 int hm_config_parse(const char *buf, size_t len, const char *origin,
-                    hm_project *out, int max);
+                    hm_project *out);
 
 const char *hm_check_name(hm_check_kind k);
 void        hm_sched_describe(const hm_project *p, char *out, size_t cap);
+
+/* Walks the install script one de-indented line at a time. Initialise
+ * `*cursor` to p->install.ptr; returns 0 once the block is exhausted. */
+int hm_install_next_line(const hm_project *p, const char **cursor, hm_str *out);
+
+/* --- plan.c ------------------------------------------------------------- */
+
+/* Serialises what hacman would do with this project, as SIML. The plan
+ * depends on the input file alone - never on the state file, the clock or the
+ * network - so it is stable enough to diff against a golden file. */
+void hm_plan_print(const hm_project *p);
 
 /* --- state.c ------------------------------------------------------------ */
 
@@ -90,7 +102,7 @@ typedef struct {
 } hm_state_entry;
 
 typedef struct {
-    hm_state_entry ent[HM_MAX_PROJECTS];
+    hm_state_entry ent[HM_MAX_STATE_ENTRIES];
     int            count;
     int            dirty;
     const char    *path;

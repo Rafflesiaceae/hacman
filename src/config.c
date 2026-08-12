@@ -1,4 +1,4 @@
-/* SIML -> hm_project[] on the fast path.
+/* SIML -> one hm_project, on the fast path.
  *
  * Two properties matter here, both for startup cost:
  *   1. the input is read once into a single buffer (see hm_read_all) and the
@@ -6,7 +6,11 @@
  *      per line, no allocation;
  *   2. every config value is stored as an hm_str pointing back into that same
  *      buffer, including the `install:` block, which is remembered as a raw
- *      region and only de-indented if an install actually happens. */
+ *      region and only de-indented if an install actually happens.
+ *
+ * An input file describes exactly one project: anything that would introduce a
+ * second one - a top-level sequence, a second mapping, a second document - is
+ * an error. */
 
 #include "hacman.h"
 
@@ -59,11 +63,10 @@ static hm_str slice(siml_slice s)
 typedef struct {
     const char *buf;
     const char *origin;
-    hm_project *out;
-    int         max;
-    int         count;
-    hm_project *cur;
-    int         depth;         /* open containers                        */
+    hm_project *out;           /* the one project being built            */
+    int         started;       /* its mapping has been opened            */
+    int         finished;      /* ... and closed again                   */
+    hm_project *cur;           /* non-NULL while inside that mapping     */
     int         in_install;    /* inside the `install:` block scalar     */
     const char *block_start;   /* first raw byte of the install block    */
     const char *block_end;     /* one past its last raw byte             */
@@ -201,13 +204,13 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
 
 static int begin_project(hm_cfg *c, long line)
 {
-    hm_project *p;
+    hm_project *p = c->out;
 
-    if (c->count >= c->max) {
-        cfg_err(c, line, "too many projects");
+    if (c->started) {
+        cfg_err(c, line, "input must describe exactly one project");
         return -1;
     }
-    p = &c->out[c->count];
+    c->started = 1;
     memset(p, 0, sizeof(*p));
     p->check      = HM_CHECK_ETAG;
     p->sched_kind = HM_SCHED_EVERY;
@@ -220,7 +223,6 @@ static int begin_project(hm_cfg *c, long line)
 static int finish_project(hm_cfg *c)
 {
     hm_project *p = c->cur;
-    int         i;
 
     if (p->url.len == 0) {
         cfg_err(c, p->line, "entry is missing 'url'");
@@ -235,15 +237,8 @@ static int finish_project(hm_cfg *c)
         cfg_err(c, p->line, "check: version requires 'version-prefix'");
         return -1;
     }
-    for (i = 0; i < c->count; ++i) {
-        if (hm_str_eq_str(c->out[i].name, p->name)) {
-            cfg_err(c, p->line, "duplicate project name");
-            return -1;
-        }
-    }
-
-    c->count += 1;
-    c->cur    = NULL;
+    c->finished = 1;
+    c->cur      = NULL;
     return 0;
 }
 
@@ -267,7 +262,7 @@ static void block_line(hm_cfg *c, const siml_event *ev)
 }
 
 int hm_config_parse(const char *buf, size_t len, const char *origin,
-                    hm_project *out, int max)
+                    hm_project *out)
 {
     hm_line_reader reader;
     siml_parser    parser;
@@ -278,7 +273,6 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
     c.buf    = buf;
     c.origin = origin;
     c.out    = out;
-    c.max    = max;
 
     reader.buf = buf;
     reader.len = len;
@@ -291,21 +285,29 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
 
         switch (t) {
         case SIML_EVENT_STREAM_START:
-        case SIML_EVENT_DOCUMENT_START:
         case SIML_EVENT_DOCUMENT_END:
         case SIML_EVENT_COMMENT:
             break;
 
-        case SIML_EVENT_SEQUENCE_START:
-            if (c.cur != NULL) {
-                cfg_err(&c, ev.line, "sequences are not supported inside an entry");
+        case SIML_EVENT_DOCUMENT_START:
+            /* A second document would be a second project. */
+            if (c.started) {
+                cfg_err(&c, ev.line, "input must describe exactly one project");
                 return -1;
             }
-            c.depth += 1;
             break;
 
+        case SIML_EVENT_SEQUENCE_START:
+            if (c.cur != NULL) {
+                cfg_err(&c, ev.line, "sequences are not supported inside a project");
+            } else {
+                cfg_err(&c, ev.line,
+                        "input must describe exactly one project, written as a "
+                        "plain mapping (no leading '- ')");
+            }
+            return -1;
+
         case SIML_EVENT_SEQUENCE_END:
-            c.depth -= 1;
             break;
 
         case SIML_EVENT_MAPPING_START:
@@ -357,7 +359,11 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
             break;
 
         case SIML_EVENT_STREAM_END:
-            return c.count;
+            if (!c.finished) {
+                hm_err("hacman: %s: input describes no project\n", origin);
+                return -1;
+            }
+            return 0;
 
         case SIML_EVENT_ERROR:
         default:
@@ -366,4 +372,31 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
             return -1;
         }
     }
+}
+
+/* Yields the install script one line at a time, with the block indentation
+ * that SIML stripped from the raw region put back to use: `*cursor` starts at
+ * p->install.ptr and walks to the end of the block.
+ *
+ * Both the plan writer and the installer go through this, so the script they
+ * describe and the script that runs can never drift apart. */
+int hm_install_next_line(const hm_project *p, const char **cursor, hm_str *out)
+{
+    const char *end = p->install.ptr + p->install.len;
+    const char *cur = *cursor;
+    const char *nl;
+    const char *eol;
+    size_t      strip = 0;
+
+    if (p->install.len == 0 || cur == NULL || cur >= end) return 0;
+
+    nl  = (const char *)memchr(cur, '\n', (size_t)(end - cur));
+    eol = (nl != NULL) ? nl : end;
+
+    while (strip < p->install_indent && cur + strip < eol && cur[strip] == ' ') ++strip;
+
+    out->ptr = cur + strip;
+    out->len = (size_t)(eol - (cur + strip));
+    *cursor  = (nl != NULL) ? nl + 1 : end;
+    return 1;
 }

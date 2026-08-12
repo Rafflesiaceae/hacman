@@ -1,0 +1,7 @@
+# A single-line install script is fine too, as is a schedule that only ever
+# runs under `hacman --force`.
+name: go
+url: https://go.dev/VERSION?m=text
+check: hash
+schedule: never
+install: echo "go moved, see https://go.dev/dl/"

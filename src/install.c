@@ -52,23 +52,17 @@ static FILE *temp_file(const char *what, char *path_out, size_t cap)
 /* Writes the install block out as a runnable script.
  *
  * The parser kept the block as a raw region of the config buffer, complete
- * with its original indentation, so undoing that indentation is done here -
- * off the fast path - one line at a time. */
+ * with its original indentation; hm_install_next_line() undoes that here, off
+ * the fast path, and is the same iterator `--plan` prints from. */
 static int write_script(const hm_project *p, FILE *fp, const char *path)
 {
-    const char *cur = p->install.ptr;
-    const char *end = p->install.ptr + p->install.len;
+    const char *cursor = p->install.ptr;
+    hm_str      line;
 
     fputs("#!" HM_SHELL "\n", fp);
-    while (cur < end) {
-        const char *nl  = (const char *)memchr(cur, '\n', (size_t)(end - cur));
-        const char *eol = (nl != NULL) ? nl : end;
-        size_t      strip = 0;
-
-        while (strip < p->install_indent && cur + strip < eol && cur[strip] == ' ') ++strip;
-        fwrite(cur + strip, 1, (size_t)(eol - (cur + strip)), fp);
+    while (hm_install_next_line(p, &cursor, &line)) {
+        fwrite(line.ptr, 1, line.len, fp);
         fputc('\n', fp);
-        cur = (nl != NULL) ? nl + 1 : end;
     }
 
     if (fclose(fp) != 0) {
