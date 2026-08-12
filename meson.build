@@ -66,7 +66,7 @@ hacman_sources = files(
   'src/util.c',
   'src/config.c',
   'src/plan.c',
-  'src/state.c',
+  'src/cache.c',
   'src/check.c',
   'src/install.c',
 )

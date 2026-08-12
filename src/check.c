@@ -147,21 +147,6 @@ static int last_header(const char *buf, size_t len, const char *name, hm_str *ou
     return found;
 }
 
-/* FNV-1a: a few lines, no table, fast enough to saturate the pipe. */
-static void hash_hex(const char *data, size_t len, char *out17)
-{
-    static const char hex[] = "0123456789abcdef";
-    unsigned long long h = 1469598103934665603ULL;
-    size_t i;
-
-    for (i = 0; i < len; ++i) {
-        h ^= (unsigned char)data[i];
-        h *= 1099511628211ULL;
-    }
-    for (i = 0; i < 16; ++i) out17[i] = hex[(h >> (60 - 4 * i)) & 0xF];
-    out17[16] = '\0';
-}
-
 static const char *find_sub(const char *hay, size_t hay_len, hm_str needle)
 {
     size_t i;
@@ -257,7 +242,7 @@ int hm_check(const hm_project *p, int timeout_secs, hm_check_result *res)
         return -1;
     }
     case HM_CHECK_HASH:
-        hash_hex(body_buf, len, res->mark);
+        hm_hash_hex(body_buf, len, res->mark);
         res->body     = body_buf;
         res->body_len = len;
         return 0;

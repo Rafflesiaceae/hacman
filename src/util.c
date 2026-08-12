@@ -171,6 +171,22 @@ size_t hm_str_copy(char *dst, size_t cap, hm_str s)
     return n;
 }
 
+/* FNV-1a: a few lines, no table, and fast enough for both response bodies and
+ * cache identities. */
+void hm_hash_hex(const char *data, size_t len, char *out17)
+{
+    static const char hex[] = "0123456789abcdef";
+    unsigned long long h = 1469598103934665603ULL;
+    size_t i;
+
+    for (i = 0; i < len; ++i) {
+        h ^= (unsigned char)data[i];
+        h *= 1099511628211ULL;
+    }
+    for (i = 0; i < 16; ++i) out17[i] = hex[(h >> (60 - 4 * i)) & 0xF];
+    out17[16] = '\0';
+}
+
 int hm_parse_ulong(hm_str s, unsigned long *out)
 {
     unsigned long v = 0;
