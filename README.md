@@ -1,14 +1,19 @@
 # hacman
 
-`hacman` watches URLs and installs what changed.
+`hacman` watches a URL and installs what changed.
 
-It reads a list of projects in [SIML](vendor/siml/SPEC.rst) format — from a file,
-or from standard input when the file argument is `-` — asks (per project, on a
-schedule) whether the URL changed, and runs that project's install script when
-it did.
+It reads **one project** in [SIML](vendor/siml/SPEC.rst) format — from a file, or
+from standard input when the file argument is `-` — asks, on a schedule, whether
+the URL changed, and runs that project's install script when it did.
+
+One project per file: a file that describes a second project (a top-level
+sequence, another mapping, another `---` document) is rejected. Watching many
+things means many files, and a loop:
 
 ```sh
-hacman ~/.config/hacman/projects.siml
+hacman ~/.config/hacman/ripgrep.siml
+
+for f in ~/.config/hacman/*.siml; do hacman "$f"; done
 ```
 
 ```
@@ -55,11 +60,11 @@ Rules the fast path follows, and that changes to it must keep:
   says it is due; no state file is written unless something actually changed;
   no process is forked unless there is something to fetch.
 
-Measured on this repository (glibc-static build, 4 projects, none due):
+Measured on this repository (glibc-static build, project not due):
 
 ```
-$ strace -c hacman projects.siml    # 22 syscalls total, no network
-                                    # (the same build linked dynamically: 37)
+$ strace -c hacman ripgrep.siml    # 22 syscalls total, no network
+                                   # (the same build linked dynamically: 37)
 ```
 
 The scheduling decision is deliberately made *before* the network is touched,
@@ -110,7 +115,7 @@ meson test -C build
 Meson options: `-Dstatic=`, `-Dcurl=` (HTTP client, default `curl`),
 `-Dshell=` (install-script interpreter, default `/bin/sh`).
 
-Tests are offline — they serve fixtures over `file://` URLs:
+Tests need no network (see [Tests](#tests)):
 
 ```sh
 ./tests.sh
@@ -136,22 +141,20 @@ usage: hacman [OPTIONS] FILE
 
   -c, --check-only    check only, never install (exit 10 if changes found)
   -n, --dry-run       report what would be installed, change nothing
-  -f, --force         ignore schedules and check every project now
+  -f, --force         ignore the schedule and check now
   -a, --adopt         record the current remote state without installing
-  -l, --list          print the parsed project list and exit
-  -o, --only NAME     only act on NAME (repeatable)
+  -p, --plan          print what FILE resolves to, as SIML, and exit
   -s, --state PATH    state file (default: $XDG_STATE_HOME/hacman/state.tsv)
   -t, --timeout SECS  per-request timeout (default: 15)
-  -v, --verbose       report unchanged and skipped projects too
+  -v, --verbose       report an unchanged or skipped project too
   -h, --help          show this help
   -V, --version       show the version
 ```
 
-`FILE` is required; pass `-` to read the project list from standard input, so
-`hacman` still composes:
+`FILE` is required; pass `-` to read the project from standard input:
 
 ```sh
-cat a.siml b.siml | hacman -
+generate-project | hacman -
 ```
 
 Exit codes:
@@ -163,29 +166,28 @@ Exit codes:
 | `2` | a check or an install failed |
 | `10` | changes found while `--check-only`/`--dry-run` |
 
-Output is quiet by default: one line per changed project, plus whatever the
-install script prints. `-v` also reports unchanged and skipped projects.
+Output is quiet by default: one line when the project changed, plus whatever
+the install script prints. `-v` also reports an unchanged or skipped project.
 
 ---
 
-## The project list
+## The project file
 
-A SIML document containing one mapping per project, either as a sequence:
+A SIML document that is one mapping — the project:
 
 ```
-- name: ripgrep
-  url: https://api.github.com/repos/BurntSushi/ripgrep/releases/latest
-  check: version
-  version-prefix: "tag_name": "
-  version-suffix: "
-  schedule: daily
-  install: |
-    set -eu
-    echo "installing ripgrep $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+name: ripgrep
+url: https://api.github.com/repos/BurntSushi/ripgrep/releases/latest
+check: version
+version-prefix: "tag_name": "
+version-suffix: "
+schedule: daily
+install: |
+  set -eu
+  echo "installing ripgrep $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
 ```
 
-…or as a single mapping, or as several `---`-separated documents. See
-[`examples/projects.siml`](examples/projects.siml).
+See [`examples/`](examples/) for one file per check scheme.
 
 | key | required | default | meaning |
 |---|---|---|---|
@@ -197,8 +199,37 @@ A SIML document containing one mapping per project, either as a sequence:
 | `version-suffix` | no | end of line | text immediately after the version |
 | `install` | no | — | shell script to run when the URL changed |
 
-Unknown keys, missing `url`s and duplicate names are hard errors, reported with
-a line number. Use `hacman --list` to see how a file was understood.
+Unknown keys, a missing `url` and anything that would introduce a second
+project are hard errors, reported with a line number. Use `hacman --plan` to
+see how a file was understood.
+
+### `--plan`: what a file resolves to
+
+`hacman --plan FILE` prints the project with every default filled in, together
+with the steps that would follow from it — and stops there. It reads neither
+the state file, nor the clock, nor the network, so the same input always plans
+to the same bytes:
+
+```
+$ hacman --plan examples/nixpkgs-unstable.siml
+name: nixpkgs-unstable
+url: https://channels.nixos.org/nixpkgs-unstable/git-revision
+check: etag
+request: HEAD https://channels.nixos.org/nixpkgs-unstable/git-revision
+compare: the ETag header, or Last-Modified when absent
+schedule: 6h
+check-when: 21600 seconds after the last check
+install-shell: /bin/sh -e <script>
+install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS]
+install: |
+  set -eu
+  echo "nixpkgs-unstable moved to $HACMAN_VERSION"
+  nix flake update --flake "$HOME/workspace/nixcfg"
+```
+
+The plan is itself SIML, and its `install:` block is exactly what the installer
+writes into the script it runs. That determinism is what the golden-file tests
+in [`tests/`](tests/) assert against.
 
 ### Schedule schemes — *when* to look
 
@@ -228,13 +259,13 @@ script.
 Change is decided against what was recorded on the previous successful run:
 
 - A project hacman has never seen counts as **changed**, so a fresh checkout
-  installs everything on its first run. Use `--adopt` to record the current
-  state instead ("this is already installed").
+  installs on its first run. Use `--adopt` to record the current state instead
+  ("this is already installed").
 - A **failed check** does not update the recorded check time, so the next run
   retries instead of waiting out the schedule.
 - A **failed install** records neither the new marker nor the check time: the
-  next run tries that project again, whatever its schedule says. The generated
-  script is kept and its path is printed.
+  next run tries again, whatever the schedule says. The generated script is
+  kept and its path is printed.
 
 ### The install script
 
@@ -257,7 +288,8 @@ This is where hacman deliberately stops being clever: an update is whatever
 
 ### State
 
-`hacman` records what it last saw in a tab-separated table, by default
+`hacman` records what it last saw in a tab-separated table shared by all
+project files, by default
 `$XDG_STATE_HOME/hacman/state.tsv` (falling back to
 `~/.local/state/hacman/state.tsv`); `--state` and `$HACMAN_STATE` override it.
 
@@ -273,7 +305,7 @@ actually changed — a run where every project is skipped writes nothing.
 ### SIML gotchas
 
 SIML is strict, which is what makes it fast to parse. Two rules surprise people
-writing project lists by hand:
+writing project files by hand:
 
 - **No blank lines** outside of block scalars, and no trailing whitespace. Use
   comment lines to separate entries.
@@ -290,13 +322,27 @@ Comments (`# text`, with the space) are allowed, `#` alone is not.
 ```
 build.sh                  static-musl build wrapper
 meson.build               build definition
-tests.sh                  offline test suite (also `meson test`)
-examples/projects.siml    annotated project list
+tests.sh                  test suite (also `meson test`)
+tests/*.siml, *.gold      golden-file fixtures for `hacman --plan`
+examples/*.siml           one annotated project per file
 src/main.c                fast path: args, schedule decision, orchestration
-src/config.c              SIML -> hm_project[], zero-copy
+src/config.c              SIML -> one hm_project, zero-copy
+src/plan.c                --plan serialisation
 src/state.c               state table load/save
 src/check.c               HTTP via curl + the three check schemes
 src/install.c             slow path: script materialisation and execution
 src/util.c                write(2)-based output, string and file helpers
 vendor/siml/              vendored SIML parser (see vendor.py)
 ```
+
+### Tests
+
+```sh
+./tests.sh              # golden plans + the offline pipeline
+GOLD=update ./tests.sh  # rewrite tests/*.gold after an intended change
+```
+
+Every `tests/<name>.siml` is resolved with `hacman --plan` and diffed against
+`tests/<name>.gold`; a fixture named `xfail_*.siml` must be rejected instead,
+and its `.gold` holds the expected error. The behavioural half of the suite
+serves fixtures over `file://` URLs, so it needs no network.
