@@ -187,14 +187,16 @@ int hm_parse_ulong(hm_str s, unsigned long *out)
 
 /* Slurps a whole file in as few syscalls as the kernel allows: one open(),
  * read() until EOF, one close(). No stdio, no per-line allocation - the SIML
- * parser is then fed slices of this single buffer. */
+ * parser is then fed slices of this single buffer.
+ *
+ * `path` is a file name, or "-" for standard input. */
 long hm_read_all(const char *path, char *buf, size_t cap)
 {
     int    fd    = 0;
     int    close_fd = 0;
     size_t total = 0;
 
-    if (path != NULL && strcmp(path, "-") != 0) {
+    if (strcmp(path, "-") != 0) {
         fd = open(path, O_RDONLY);
         if (fd < 0) {
             hm_err("hacman: %s: cannot open file\n", path);
@@ -207,7 +209,7 @@ long hm_read_all(const char *path, char *buf, size_t cap)
         ssize_t n = read(fd, buf + total, cap - total);
         if (n < 0) {
             if (errno == EINTR) continue;
-            hm_err("hacman: %s: read failed\n", path ? path : "<stdin>");
+            hm_err("hacman: %s: read failed\n", path);
             if (close_fd) close(fd);
             return -1;
         }
@@ -215,7 +217,7 @@ long hm_read_all(const char *path, char *buf, size_t cap)
         total += (size_t)n;
         if (total == cap) {
             hm_err("hacman: %s: input too large (max %u bytes)\n",
-                   path ? path : "<stdin>", (unsigned long)cap);
+                   path, (unsigned long)cap);
             if (close_fd) close(fd);
             return -1;
         }

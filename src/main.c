@@ -45,11 +45,11 @@ typedef struct {
 } hm_opts;
 
 static const char usage_text[] =
-"usage: hacman [OPTIONS] [FILE]\n"
+"usage: hacman [OPTIONS] FILE\n"
 "\n"
 "Checks the URLs described by a SIML project list and runs each project's\n"
-"install script when its URL changed. FILE defaults to standard input; \"-\"\n"
-"reads standard input explicitly.\n"
+"install script when its URL changed. FILE is the project list; \"-\" reads it\n"
+"from standard input.\n"
 "\n"
 "options:\n"
 "  -c, --check-only    check only, never install (exit 10 if changes found)\n"
@@ -220,11 +220,17 @@ int main(int argc, char **argv)
     rc = parse_args(argc, argv, &o);
     if (rc != 0) return (rc > 0) ? HM_EXIT_OK : HM_EXIT_USAGE;
 
+    if (o.file == NULL) {
+        hm_err("hacman: no project list given (use '-' to read standard input)\n%s",
+               usage_text);
+        return HM_EXIT_USAGE;
+    }
+
     len = hm_read_all(o.file, config_buf, sizeof(config_buf));
     if (len < 0) return HM_EXIT_USAGE;
 
     count = hm_config_parse(config_buf, (size_t)len,
-                            (o.file && strcmp(o.file, "-") != 0) ? o.file : "<stdin>",
+                            (strcmp(o.file, "-") != 0) ? o.file : "<stdin>",
                             projects, HM_MAX_PROJECTS);
     if (count < 0) return HM_EXIT_USAGE;
 

@@ -2,9 +2,10 @@
 
 `hacman` watches URLs and installs what changed.
 
-It reads a list of projects in [SIML](vendor/siml/SPEC.rst) format — from a file
-or from standard input — asks (per project, on a schedule) whether the URL
-changed, and runs that project's install script when it did.
+It reads a list of projects in [SIML](vendor/siml/SPEC.rst) format — from a file,
+or from standard input when the file argument is `-` — asks (per project, on a
+schedule) whether the URL changed, and runs that project's install script when
+it did.
 
 ```sh
 hacman ~/.config/hacman/projects.siml
@@ -131,7 +132,7 @@ actually due.
 ## Usage
 
 ```
-usage: hacman [OPTIONS] [FILE]
+usage: hacman [OPTIONS] FILE
 
   -c, --check-only    check only, never install (exit 10 if changes found)
   -n, --dry-run       report what would be installed, change nothing
@@ -146,10 +147,11 @@ usage: hacman [OPTIONS] [FILE]
   -V, --version       show the version
 ```
 
-`FILE` defaults to standard input, so `hacman` composes:
+`FILE` is required; pass `-` to read the project list from standard input, so
+`hacman` still composes:
 
 ```sh
-cat a.siml b.siml | hacman
+cat a.siml b.siml | hacman -
 ```
 
 Exit codes:

@@ -103,9 +103,12 @@ expect "check: version needs a prefix" 1 "$BIN" --list "$TMP/noprefix.siml"
 printf 'url: https://example.com/x\nschedule: 5x\n' >"$TMP/badsched.siml"
 expect "invalid schedule is rejected" 1 "$BIN" --list "$TMP/badsched.siml"
 
-# Reading from stdin must work exactly like reading from a file.
-expect "stdin input" 0 bash -c "printf 'url: https://example.com/x\n' | '$BIN' --list"
+# Standard input is read only when the file argument is exactly "-".
+expect "stdin input via -" 0 bash -c "printf 'url: https://example.com/x\n' | '$BIN' --list -"
 contains "stdin project is listed" "https://example.com/x"
+
+expect "a missing file argument is a usage error" 1 bash -c "printf 'url: https://example.com/x\n' | '$BIN' --list"
+contains "missing file argument is explained" "no project list given"
 
 # Multiple SIML documents contribute their entries to one list.
 printf -- 'name: one\nurl: https://example.com/1\n---\nname: two\nurl: https://example.com/2\n' >"$TMP/docs.siml"
