@@ -1,0 +1,11 @@
+name: manual-only
+url: https://example.com/manual
+check: hash
+request: GET https://example.com/manual
+compare: an FNV-1a hash of the whole response body
+schedule: never
+check-when: only with --force
+install-shell: /bin/sh -e <script>
+install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
+install: |
+  echo "only ever runs under --force"

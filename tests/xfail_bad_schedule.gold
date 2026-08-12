@@ -1,0 +1,1 @@
+hacman: tests/xfail_bad_schedule.siml:2: schedule must be always, never, hourly, daily, weekly, monthly or <n>[smhdw]

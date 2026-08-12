@@ -1,0 +1,6 @@
+name: nixpkgs-unstable
+url: https://channels.nixos.org/nixpkgs-unstable/git-revision
+check: etag
+schedule: always
+install: |
+  nix flake update --flake "$HOME/workspace/nixcfg"

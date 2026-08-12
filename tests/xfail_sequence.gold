@@ -1,0 +1,1 @@
+hacman: tests/xfail_sequence.siml:1: input must describe exactly one project, written as a plain mapping (no leading '- ')

@@ -1,0 +1,1 @@
+hacman: tests/xfail_nested_mapping.siml:3: nested mappings are not supported

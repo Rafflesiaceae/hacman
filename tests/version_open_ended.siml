@@ -1,0 +1,6 @@
+name: go
+url: https://go.dev/VERSION?m=text
+check: version
+version-prefix: go
+schedule: hourly
+install: echo "go moved to $HACMAN_VERSION"

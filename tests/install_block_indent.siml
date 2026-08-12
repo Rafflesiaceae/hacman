@@ -1,0 +1,13 @@
+name: indented
+url: https://example.com/x
+check: hash
+schedule: 2w
+install: |
+  set -eu
+  for target in one two; do
+    if [ -e "$target" ]; then
+      echo "  keeping $target"
+
+      continue
+    fi
+  done

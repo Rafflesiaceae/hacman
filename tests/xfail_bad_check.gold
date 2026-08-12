@@ -1,0 +1,1 @@
+hacman: tests/xfail_bad_check.siml:2: check must be one of: etag, hash, version

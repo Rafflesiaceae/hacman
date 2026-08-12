@@ -1,0 +1,5 @@
+# A leading comment is ignored, as is an inline one.
+name: commented
+url: https://example.com/x   # the URL to watch
+# So is a comment between fields.
+schedule: monthly

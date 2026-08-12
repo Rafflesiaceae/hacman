@@ -1,0 +1,8 @@
+name: half-hourly
+url: https://example.com/feed
+check: etag
+request: HEAD https://example.com/feed
+compare: the ETag header, or Last-Modified when absent
+schedule: 30m
+check-when: 1800 seconds after the last check
+install: (none - a change would only be reported)

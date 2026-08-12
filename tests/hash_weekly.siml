@@ -1,0 +1,6 @@
+name: hosts-blocklist
+url: https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+check: hash
+schedule: weekly
+install: |
+  sudo install -Dm644 "$HACMAN_RESPONSE" /etc/hosts.blocklist

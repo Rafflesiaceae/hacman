@@ -1,0 +1,8 @@
+name: commented
+url: https://example.com/x
+check: etag
+request: HEAD https://example.com/x
+compare: the ETag header, or Last-Modified when absent
+schedule: 30d
+check-when: 2592000 seconds after the last check
+install: (none - a change would only be reported)

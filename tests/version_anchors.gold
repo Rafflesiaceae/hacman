@@ -1,0 +1,13 @@
+name: ripgrep
+url: https://api.github.com/repos/BurntSushi/ripgrep/releases/latest
+check: version
+version-prefix: "tag_name": "
+version-suffix: "
+request: GET https://api.github.com/repos/BurntSushi/ripgrep/releases/latest
+compare: the text between version-prefix and version-suffix
+schedule: 1d
+check-when: 86400 seconds after the last check
+install-shell: /bin/sh -e <script>
+install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
+install: |
+  echo "installing ripgrep $HACMAN_VERSION (was ${HACMAN_PREVIOUS:-none})"

@@ -1,0 +1,1 @@
+hacman: tests/xfail_unknown_key.siml:2: unknown key 'bogus'

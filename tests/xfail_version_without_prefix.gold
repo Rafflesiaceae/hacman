@@ -1,0 +1,1 @@
+hacman: tests/xfail_version_without_prefix.siml:1: check: version requires 'version-prefix'

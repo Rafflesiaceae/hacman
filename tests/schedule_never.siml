@@ -1,0 +1,5 @@
+name: manual-only
+url: https://example.com/manual
+check: hash
+schedule: never
+install: echo "only ever runs under --force"

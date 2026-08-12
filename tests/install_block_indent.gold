@@ -1,0 +1,18 @@
+name: indented
+url: https://example.com/x
+check: hash
+request: GET https://example.com/x
+compare: an FNV-1a hash of the whole response body
+schedule: 2w
+check-when: 1209600 seconds after the last check
+install-shell: /bin/sh -e <script>
+install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
+install: |
+  set -eu
+  for target in one two; do
+    if [ -e "$target" ]; then
+      echo "  keeping $target"
+
+      continue
+    fi
+  done

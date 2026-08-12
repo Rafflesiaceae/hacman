@@ -1,0 +1,12 @@
+name: go
+url: https://go.dev/VERSION?m=text
+check: version
+version-prefix: go
+request: GET https://go.dev/VERSION?m=text
+compare: the text from version-prefix to the end of that line
+schedule: 1h
+check-when: 3600 seconds after the last check
+install-shell: /bin/sh -e <script>
+install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
+install: |
+  echo "go moved to $HACMAN_VERSION"
