@@ -1,0 +1,8 @@
+# A command project: no URL, no install script - the command *is* the work.
+# hacman only runs it when the schedule allows, and only records the run if the
+# command succeeded, so a failure is retried on the next invocation.
+# Any other file naming this command with this workdir shares that record.
+name: nixcfg-pull
+command: git pull --ff-only && nix flake update
+workdir: {{HOME}}/workspace/nixcfg
+schedule: 12h

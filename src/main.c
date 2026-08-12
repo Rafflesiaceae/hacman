@@ -1,15 +1,15 @@
-/* hacman - watch a URL, install what changed.
+/* hacman - watch a URL and install what changed, or run a command on a leash.
  *
  * One input file describes one project. main() is the fast path and is written
  * to keep the work between exec() and the first decision as small as possible:
  *
  *   read the .siml file (one open/read/close)
  *     -> parse it into a static struct (zero copies, zero allocations)
- *       -> read the state table (one open/read/close)
- *         -> decide from the schedule whether to check at all
+ *       -> read this project's cache record (one open/read/close)
+ *         -> decide from the schedule whether to do anything at all
  *
- * The HTTP request only happens if the schedule says the project is due, and
- * only an actual change reaches the slow path in install.c. */
+ * Nothing beyond that happens unless the schedule says the project is due, and
+ * nothing is recorded unless the work that followed actually succeeded. */
 
 #include "hacman.h"
 
@@ -26,11 +26,11 @@
 
 static char       config_buf[HM_CONFIG_MAX];
 static hm_project project;
-static hm_state   state;
+static hm_cache   cache;
 
 typedef struct {
     const char *file;
-    const char *state_path;
+    const char *cache_dir;
     int         check_only;
     int         dry_run;
     int         force;
@@ -44,23 +44,24 @@ static const char usage_text[] =
 "usage: hacman [OPTIONS] FILE\n"
 "\n"
 "Checks the URL described by a SIML project file and runs its install script\n"
-"when that URL changed. FILE describes exactly one project; \"-\" reads it from\n"
-"standard input.\n"
+"when that URL changed, or - for a file that describes a command instead -\n"
+"runs that command no more often than its schedule allows. FILE describes\n"
+"exactly one project; \"-\" reads it from standard input.\n"
 "\n"
 "options:\n"
-"  -c, --check-only    check only, never install (exit 10 if changes found)\n"
-"  -n, --dry-run       report what would be installed, change nothing\n"
-"  -f, --force         ignore the schedule and check now\n"
-"  -a, --adopt         record the current remote state without installing\n"
+"  -c, --check-only    check only, never install or run (exit 10 if due)\n"
+"  -n, --dry-run       report what would happen, change nothing\n"
+"  -f, --force         ignore the schedule and act now\n"
+"  -a, --adopt         record the current state without installing or running\n"
 "  -p, --plan          print what FILE resolves to, as SIML, and exit\n"
-"  -s, --state PATH    state file (default: $XDG_STATE_HOME/hacman/state.tsv)\n"
+"      --cache DIR     cache directory (default: ~/.cache/hacman)\n"
 "  -t, --timeout SECS  per-request timeout (default: 15)\n"
 "  -v, --verbose       report an unchanged or skipped project too\n"
 "  -h, --help          show this help\n"
 "  -V, --version       show the version\n"
 "\n"
-"exit codes: 0 ok, 1 usage/config error, 2 a check or install failed,\n"
-"            10 changes found with --check-only/--dry-run\n";
+"exit codes: 0 ok, 1 usage/config error, 2 a check, install or command failed,\n"
+"            10 work is pending with --check-only/--dry-run\n";
 
 /* "45s", "12m", "3h07m", "5d" - enough to answer "when will it check again?" */
 static void fmt_duration(long secs, char *out, size_t cap)
@@ -130,9 +131,9 @@ static int parse_args(int argc, char **argv, hm_opts *o)
             hm_out("hacman %s\n", HM_VERSION);
             hm_out_flush();
             return 1;
-        } else if (opt_is(a, "-s", "--state")) {
-            if (++i >= argc) { hm_err("hacman: --state needs a path\n"); return -1; }
-            o->state_path = argv[i];
+        } else if (strcmp(a, "--cache") == 0) {
+            if (++i >= argc) { hm_err("hacman: --cache needs a directory\n"); return -1; }
+            o->cache_dir = argv[i];
         } else if (opt_is(a, "-t", "--timeout")) {
             unsigned long v;
             hm_str        s;
@@ -153,8 +154,8 @@ static int parse_args(int argc, char **argv, hm_opts *o)
 }
 
 /* The scheduling decision - the whole point of the fast path. Returns 1 when
- * the project must be checked now, 0 when its schedule says "not yet". */
-static int is_due(const hm_project *p, const hm_state_entry *e, long now,
+ * the project must be acted on now, 0 when its schedule says "not yet". */
+static int is_due(const hm_project *p, const hm_cache *c, long now,
                   const hm_opts *o, long *wait_out)
 {
     long elapsed;
@@ -165,21 +166,44 @@ static int is_due(const hm_project *p, const hm_state_entry *e, long now,
         *wait_out = -1;
         return 0;
     }
-    if (e == NULL || e->last_check == 0) return 1; /* never checked */
+    if (c->last_check == 0) return 1; /* never done */
 
-    elapsed = now - e->last_check;
-    if (elapsed < 0) return 1; /* clock moved backwards; check rather than stall */
+    elapsed = now - c->last_check;
+    if (elapsed < 0) return 1; /* clock moved backwards; act rather than stall */
     if (elapsed >= p->sched_interval) return 1;
 
     *wait_out = p->sched_interval - elapsed;
     return 0;
 }
 
+/* A command project: run it, and remember that only if it succeeded. */
+static int run_command_project(const hm_project *p, hm_opts *o, long now)
+{
+    if (o->check_only || o->dry_run) {
+        hm_out("due      %S\n", p->name);
+        hm_out_flush();
+        return HM_EXIT_CHANGED;
+    }
+
+    if (!o->adopt) {
+        if (o->verbose) hm_out("run      %S\n", p->name);
+        hm_out_flush();
+        if (hm_command_run(p) != 0) {
+            /* Nothing is written: the last run stays whatever it was, so the
+             * next invocation tries again. */
+            return HM_EXIT_FAILED;
+        }
+    }
+
+    cache.last_check  = now;
+    cache.last_change = now;
+    return (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK;
+}
+
 int main(int argc, char **argv)
 {
     hm_opts           o;
     const hm_project *p = &project;
-    hm_state_entry   *e;
     hm_check_result   res;
     char              old_mark[HM_MARK_MAX + 1];
     long              len, now, wait = 0;
@@ -203,66 +227,64 @@ int main(int argc, char **argv)
         return HM_EXIT_USAGE;
     }
 
-    /* --plan answers "what does this file mean?" and stops there: no state, no
+    /* The cache record is addressed by what the project *is*, so this also
+     * settles which record two different files share. */
+    hm_cache_init(&cache, p, hm_cache_dir(o.cache_dir));
+
+    /* --plan answers "what does this file mean?" and stops there: no reads, no
      * clock, no network, so its output is reproducible. */
     if (o.plan) {
-        hm_plan_print(p);
+        hm_plan_print(p, &cache);
         hm_out_flush();
         return HM_EXIT_OK;
     }
 
-    if (hm_state_load(&state, o.state_path ? o.state_path : hm_state_default_path()) != 0) {
-        return HM_EXIT_USAGE;
-    }
+    if (hm_cache_load(&cache) != 0) return HM_EXIT_USAGE;
 
     now = (long)time(NULL);
 
-    e = hm_state_find(&state, p->name);
-    if (!is_due(p, e, now, &o, &wait)) {
+    if (!is_due(p, &cache, now, &o, &wait)) {
         if (o.verbose) {
             char left[32];
             if (wait < 0) {
                 hm_out("skip     %S (schedule: never)\n", p->name);
             } else {
                 fmt_duration(wait, left, sizeof(left));
-                hm_out("skip     %S (next check in %s)\n", p->name, left);
+                hm_out("skip     %S (next run in %s)\n", p->name, left);
             }
         }
         hm_out_flush();
-        return HM_EXIT_OK; /* nothing checked, nothing written */
+        return HM_EXIT_OK; /* nothing done, nothing written */
     }
 
-    if (hm_check(p, o.timeout, &res) != 0) {
-        /* Deliberately do not touch last_check: a failed request must not push
-         * the next attempt into the future. */
-        hm_out_flush();
-        return HM_EXIT_FAILED;
-    }
-
-    e = hm_state_intern(&state, p->name);
-    if (e == NULL) {
-        hm_err("hacman: state table is full\n");
-        return HM_EXIT_FAILED;
-    }
-
-    hm_str_copy(old_mark, sizeof(old_mark), (hm_str){ e->mark, strlen(e->mark) });
-    /* A project hacman has never seen counts as changed, so a fresh checkout
-     * installs on its first run. Use --adopt to record instead. */
-    changed = (old_mark[0] == '\0') || strcmp(old_mark, res.mark) != 0;
-
-    if (!o.dry_run && !o.check_only) {
-        e->last_check = now;
-        state.dirty   = 1;
-    }
-
-    if (!changed) {
-        if (o.verbose) hm_out("ok       %S (%s)\n", p->name, res.mark);
-        rc = (hm_state_save(&state) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK;
+    if (p->kind == HM_KIND_COMMAND) {
+        rc = run_command_project(p, &o, now);
         hm_out_flush();
         return rc;
     }
 
-    if (old_mark[0] == '\0') {
+    if (hm_check(p, o.timeout, &res) != 0) {
+        /* Nothing is recorded: a failed request must not push the next attempt
+         * into the future. */
+        hm_out_flush();
+        return HM_EXIT_FAILED;
+    }
+
+    hm_str_copy(old_mark, sizeof(old_mark),
+                (hm_str){ cache.mark, strlen(cache.mark) });
+    /* A project hacman has never seen counts as changed, so a fresh checkout
+     * installs on its first run. Use --adopt to record instead. */
+    changed = !cache.known || strcmp(old_mark, res.mark) != 0;
+
+    if (!changed) {
+        if (o.verbose) hm_out("ok       %S (%s)\n", p->name, res.mark);
+        cache.last_check = now;
+        rc = (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK;
+        hm_out_flush();
+        return rc;
+    }
+
+    if (!cache.known) {
         hm_out("new      %S %s\n", p->name, res.mark);
     } else {
         hm_out("changed  %S %s -> %s\n", p->name, old_mark, res.mark);
@@ -273,31 +295,21 @@ int main(int argc, char **argv)
         return HM_EXIT_CHANGED;
     }
 
-    if (o.adopt) {
-        hm_str_copy(e->mark, sizeof(e->mark), (hm_str){ res.mark, strlen(res.mark) });
-        e->last_change = now;
-        state.dirty    = 1;
-        rc = (hm_state_save(&state) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK;
-        hm_out_flush();
-        return rc;
+    if (!o.adopt) {
+        /* --- slow path ----------------------------------------------- */
+        hm_out_flush(); /* the install script writes to the same terminal */
+        if (hm_install(p, old_mark, res.mark, &res) != 0) {
+            /* Nothing is written, so the next run repeats check and install. */
+            return HM_EXIT_FAILED;
+        }
     }
 
-    /* --- slow path --------------------------------------------------- */
-    hm_out_flush(); /* the install script writes to the same terminal */
-    if (hm_install(p, old_mark, res.mark, &res) != 0) {
-        /* Neither the mark nor the check time is kept, so the next run retries
-         * whatever the schedule says. */
-        e->last_check = 0;
-        state.dirty   = 1;
-        (void)hm_state_save(&state);
-        return HM_EXIT_FAILED;
-    }
+    hm_str_copy(cache.mark, sizeof(cache.mark),
+                (hm_str){ res.mark, strlen(res.mark) });
+    cache.last_check  = now;
+    cache.last_change = now;
 
-    hm_str_copy(e->mark, sizeof(e->mark), (hm_str){ res.mark, strlen(res.mark) });
-    e->last_change = now;
-    state.dirty    = 1;
-
-    rc = (hm_state_save(&state) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK;
+    rc = (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK;
     hm_out_flush();
     return rc;
 }

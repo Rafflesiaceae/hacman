@@ -14,6 +14,7 @@
 
 #include "hacman.h"
 
+#include <stdlib.h>  /* getenv() for {{VAR}} expansion */
 #include <string.h>
 
 #include "siml.h"
@@ -67,6 +68,10 @@ typedef struct {
     int         started;       /* its mapping has been opened            */
     int         finished;      /* ... and closed again                   */
     hm_project *cur;           /* non-NULL while inside that mapping     */
+    int         seen_check;    /* keys that are only valid for one kind  */
+    int         seen_version;
+    int         seen_install;
+    int         seen_workdir;
     int         in_install;    /* inside the `install:` block scalar     */
     const char *block_start;   /* first raw byte of the install block    */
     const char *block_end;     /* one past its last raw byte             */
@@ -175,7 +180,21 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
             return -1;
         }
         p->url = value;
+    } else if (hm_str_eq(key, "command")) {
+        if (value.len > HM_COMMAND_MAX) {
+            cfg_err(c, line, "command is too long");
+            return -1;
+        }
+        p->command = value;
+    } else if (hm_str_eq(key, "workdir")) {
+        if (value.len > HM_PATH_MAX) {
+            cfg_err(c, line, "workdir is too long");
+            return -1;
+        }
+        c->seen_workdir = 1;
+        p->workdir      = value;
     } else if (hm_str_eq(key, "check")) {
+        c->seen_check = 1;
         if (parse_check(p, value) != 0) {
             cfg_err(c, line, "check must be one of: etag, hash, version");
             return -1;
@@ -187,10 +206,13 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
             return -1;
         }
     } else if (hm_str_eq(key, "version-prefix")) {
+        c->seen_version   = 1;
         p->version_prefix = value;
     } else if (hm_str_eq(key, "version-suffix")) {
+        c->seen_version   = 1;
         p->version_suffix = value;
     } else if (hm_str_eq(key, "install")) {
+        c->seen_install   = 1;
         /* Inline form: `install: make install`. The block form is handled by
          * the BLOCK_SCALAR_* events. */
         p->install        = value;
@@ -214,29 +236,122 @@ static int begin_project(hm_cfg *c, long line)
     memset(p, 0, sizeof(*p));
     p->check      = HM_CHECK_ETAG;
     p->sched_kind = HM_SCHED_EVERY;
-    p->sched_interval = 86400L; /* daily, unless the entry says otherwise */
+    /* Nothing hacman watches is worth asking about more than once a day, so
+     * the default schedule is a full 24h; anything shorter is opt-in. */
+    p->sched_interval = 86400L;
     p->line       = line;
     c->cur        = p;
     return 0;
+}
+
+/* Expands {{VAR}} references from the environment.
+ *
+ * This is the one place a config value is not simply borrowed from the input
+ * buffer: a working directory has to be a real path before it can be entered,
+ * and before it can identify a cache record. */
+static int expand_template(hm_cfg *c, hm_str tpl, char *out, size_t cap, long line)
+{
+    size_t i = 0, o = 0;
+
+    while (i < tpl.len) {
+        if (i + 1 < tpl.len && tpl.ptr[i] == '{' && tpl.ptr[i + 1] == '{') {
+            char        name[64];
+            size_t      n = 0;
+            const char *value;
+
+            i += 2;
+            while (i < tpl.len && tpl.ptr[i] != '}' && n + 1 < sizeof(name)) {
+                name[n++] = tpl.ptr[i++];
+            }
+            name[n] = '\0';
+            if (i + 1 >= tpl.len || tpl.ptr[i] != '}' || tpl.ptr[i + 1] != '}') {
+                cfg_err(c, line, "unterminated '{{' in workdir");
+                return -1;
+            }
+            i += 2;
+
+            value = getenv(name);
+            if (value == NULL || value[0] == '\0') {
+                hm_err("hacman: %s:%d: workdir refers to {{%s}}, which is not "
+                       "set in the environment\n", c->origin, line, name);
+                return -1;
+            }
+            while (*value != '\0' && o + 1 < cap) out[o++] = *value++;
+            continue;
+        }
+        if (o + 1 < cap) out[o++] = tpl.ptr[i];
+        ++i;
+    }
+    out[o] = '\0';
+
+    /* A relative directory would mean something different per caller, while
+     * the cache record it identifies would not. */
+    if (out[0] != '/') {
+        cfg_err(c, line, "workdir must expand to an absolute path");
+        return -1;
+    }
+    return 0;
+}
+
+/* Clamps a name defaulted from a url or command: it is display text, so
+ * shortening it beats rejecting the project over it. */
+static hm_str default_name(hm_str from)
+{
+    if (from.len > HM_NAME_MAX) from.len = HM_NAME_MAX;
+    return from;
 }
 
 static int finish_project(hm_cfg *c)
 {
     hm_project *p = c->cur;
 
-    if (p->url.len == 0) {
-        cfg_err(c, p->line, "entry is missing 'url'");
+    if (p->url.len == 0 && p->command.len == 0) {
+        cfg_err(c, p->line, "project needs either 'url' or 'command'");
         return -1;
     }
-    if (p->name.len == 0) p->name = p->url; /* name is optional */
-    if (p->name.len > HM_NAME_MAX) {
-        cfg_err(c, p->line, "name (defaulted from url) is too long");
+    if (p->url.len > 0 && p->command.len > 0) {
+        cfg_err(c, p->line, "'url' and 'command' are mutually exclusive");
         return -1;
     }
-    if (p->check == HM_CHECK_VERSION && p->version_prefix.len == 0) {
-        cfg_err(c, p->line, "check: version requires 'version-prefix'");
-        return -1;
+
+    if (p->command.len > 0) {
+        /* A command project runs something on a schedule: there is nothing to
+         * compare, and the command is the work, so there is nothing to install
+         * afterwards either. */
+        p->kind = HM_KIND_COMMAND;
+        if (c->seen_check || c->seen_version) {
+            cfg_err(c, p->line, "'check' and 'version-*' only apply to a 'url'");
+            return -1;
+        }
+        if (c->seen_install) {
+            cfg_err(c, p->line,
+                    "a 'command' project has no 'install': the command is the work");
+            return -1;
+        }
+        if (p->name.len == 0) p->name = default_name(p->command);
+
+        /* Without a working directory, run where the user lives. */
+        if (p->workdir.len == 0) {
+            p->workdir.ptr = "{{HOME}}";
+            p->workdir.len = 8;
+        }
+        if (expand_template(c, p->workdir, p->workdir_path,
+                            sizeof(p->workdir_path), p->line) != 0) {
+            return -1;
+        }
+    } else {
+        p->kind = HM_KIND_URL;
+        if (c->seen_workdir) {
+            cfg_err(c, p->line, "'workdir' only applies to a 'command'");
+            return -1;
+        }
+        if (p->name.len == 0) p->name = default_name(p->url);
+        if (p->check == HM_CHECK_VERSION && p->version_prefix.len == 0) {
+            cfg_err(c, p->line, "check: version requires 'version-prefix'");
+            return -1;
+        }
     }
+
     c->finished = 1;
     c->cur      = NULL;
     return 0;

@@ -1,10 +1,11 @@
-/* The slow path.
+/* The slow path: actually doing the work.
  *
- * Everything here runs only after a project has been found to have changed, so
- * it optimises for ergonomics instead of speed: it uses stdio, writes real
- * files to $TMPDIR, hands the install script to a shell with a documented set
- * of HACMAN_* variables, and lets the script's output stream straight to the
- * terminal. Set HACMAN_KEEP_TEMP=1 to keep the generated files for debugging. */
+ * For a url project that is the install script, run only once a change has
+ * been found; for a command project it is the command itself, run only once
+ * the schedule allows. Either way this is where ergonomics beats speed: it
+ * uses stdio, writes real files to $TMPDIR, hands the script to a shell with a
+ * documented set of HACMAN_* variables, and lets the output stream straight to
+ * the terminal. Set HACMAN_KEEP_TEMP=1 to keep the generated files. */
 
 #include "hacman.h"
 
@@ -175,4 +176,60 @@ cleanup:
         fprintf(stderr, "hacman: %s: kept %s\n", name, script_path);
     }
     return rc;
+}
+
+/* Runs a command project: `sh -c <command>`, in its working directory.
+ *
+ * No temporary file and no script: a single command is already the simplest
+ * thing a shell can be handed. The caller records the run only if this
+ * returns 0, so a failing command is retried on the next run. */
+int hm_command_run(const hm_project *p)
+{
+    char  command[HM_COMMAND_MAX + 1];
+    char  name[HM_NAME_MAX + 1];
+    pid_t pid;
+    int   status = 0;
+
+    hm_str_copy(command, sizeof(command), p->command);
+    hm_str_copy(name, sizeof(name), p->name);
+
+    fflush(stdout);
+
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "hacman: fork() failed: %s\n", strerror(errno));
+        return -1;
+    }
+    if (pid == 0) {
+        if (chdir(p->workdir_path) != 0) {
+            fprintf(stderr, "hacman: %s: cannot enter %s: %s\n",
+                    name, p->workdir_path, strerror(errno));
+            _exit(127);
+        }
+        setenv("HACMAN_NAME", name, 1);
+        setenv("HACMAN_WORKDIR", p->workdir_path, 1);
+
+        execl(HM_SHELL, HM_SHELL, "-c", command, (char *)NULL);
+        fprintf(stderr, "hacman: cannot execute %s: %s\n", HM_SHELL, strerror(errno));
+        _exit(127);
+    }
+
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            fprintf(stderr, "hacman: waitpid() failed: %s\n", strerror(errno));
+            return -1;
+        }
+    }
+
+    if (WIFSIGNALED(status)) {
+        fprintf(stderr, "hacman: %s: command killed by signal %d\n",
+                name, WTERMSIG(status));
+        return -1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "hacman: %s: command failed with exit code %d\n",
+                name, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        return -1;
+    }
+    return 0;
 }

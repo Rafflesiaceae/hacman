@@ -1,11 +1,14 @@
 /* `hacman --plan` - what this input file resolves to.
  *
  * The plan is the parsed project with every default filled in, plus the steps
- * that would follow from it: the request that would be made, what would be
- * compared, and the script that would run with which environment. It is
- * derived from the input file alone - it never reads the state file, the clock
- * or the network - so the same file always plans to the same bytes, which is
- * what makes it usable as a golden-file fixture (see tests/).
+ * that would follow from it: the request that would be made or the command
+ * that would run, what would be compared, which cache record answers "was this
+ * done already", and the script that would run with which environment.
+ *
+ * It is derived from the input file and the environment alone - it never reads
+ * the cache, the clock or the network - so the same file always plans to the
+ * same bytes, which is what makes it usable as a golden-file fixture (see
+ * tests/).
  *
  * The output is itself SIML, so it can be read back by anything that already
  * speaks the input format. */
@@ -77,27 +80,40 @@ static void print_install(const hm_project *p)
     }
 }
 
-void hm_plan_print(const hm_project *p)
+void hm_plan_print(const hm_project *p, const hm_cache *c)
 {
     char sched[32];
 
     hm_sched_describe(p, sched, sizeof(sched));
 
     hm_out("name: %S\n", p->name);
-    hm_out("url: %S\n", p->url);
-    print_check(p);
+    if (p->kind == HM_KIND_COMMAND) {
+        hm_out("command: %S\n", p->command);
+        hm_out("workdir: %s\n", p->workdir_path);
+        hm_out("run: %s -c <command>, in workdir\n", HM_SHELL);
+        hm_out("record-when: the command exits 0\n");
+    } else {
+        hm_out("url: %S\n", p->url);
+        print_check(p);
+    }
     hm_out("schedule: %s\n", sched);
     switch (p->sched_kind) {
     case HM_SCHED_ALWAYS:
-        hm_out("check-when: on every run\n");
+        hm_out("check-when: on every invocation\n");
         break;
     case HM_SCHED_NEVER:
         hm_out("check-when: only with --force\n");
         break;
     case HM_SCHED_EVERY:
-        hm_out("check-when: %u seconds after the last check\n",
+        hm_out("check-when: %u seconds after the last run\n",
                (unsigned long)p->sched_interval);
         break;
     }
-    print_install(p);
+
+    /* Which record decides "already done", and what it stands for: two files
+     * that plan to the same identity share one last-run. */
+    hm_out("cache-identity: %s\n", c->identity);
+    hm_out("cache-file: %s\n", c->path);
+
+    if (p->kind == HM_KIND_URL) print_install(p);
 }
