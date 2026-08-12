@@ -12,7 +12,11 @@
 #include <string.h>
 #include <unistd.h>
 
-#define HM_OUT_CAP 4096
+#define HM_OUT_CAP  4096
+/* Longest single hm_out()/hm_err() call. Formatting truncates rather than
+ * overflowing, so this has to stay above the longest message (the usage
+ * text). */
+#define HM_LINE_CAP 4096
 
 static char   out_buf[HM_OUT_CAP];
 static size_t out_len;
@@ -109,7 +113,7 @@ void hm_out_flush(void)
 
 void hm_out(const char *fmt, ...)
 {
-    char    line[1024];
+    char    line[HM_LINE_CAP];
     size_t  n;
     va_list ap;
 
@@ -128,7 +132,7 @@ void hm_out(const char *fmt, ...)
 
 void hm_err(const char *fmt, ...)
 {
-    char    line[1024];
+    char    line[HM_LINE_CAP];
     size_t  n;
     va_list ap;
 
