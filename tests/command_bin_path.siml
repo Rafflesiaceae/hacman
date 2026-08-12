@@ -1,0 +1,6 @@
+# A shim: hacman keeps the tool up to date, then becomes it.
+name: rustup-updated-cargo
+command: rustup update stable
+workdir: {{HOME}}
+bin-path: {{HOME}}/.cargo/bin/cargo
+schedule: weekly

@@ -186,6 +186,12 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
             return -1;
         }
         p->command = value;
+    } else if (hm_str_eq(key, "bin-path")) {
+        if (value.len > HM_PATH_MAX) {
+            cfg_err(c, line, "bin-path is too long");
+            return -1;
+        }
+        p->bin = value;
     } else if (hm_str_eq(key, "workdir")) {
         if (value.len > HM_PATH_MAX) {
             cfg_err(c, line, "workdir is too long");
@@ -249,7 +255,8 @@ static int begin_project(hm_cfg *c, long line)
  * This is the one place a config value is not simply borrowed from the input
  * buffer: a working directory has to be a real path before it can be entered,
  * and before it can identify a cache record. */
-static int expand_template(hm_cfg *c, hm_str tpl, char *out, size_t cap, long line)
+static int expand_template(hm_cfg *c, hm_str tpl, const char *what,
+                           char *out, size_t cap, long line)
 {
     size_t i = 0, o = 0;
 
@@ -265,15 +272,16 @@ static int expand_template(hm_cfg *c, hm_str tpl, char *out, size_t cap, long li
             }
             name[n] = '\0';
             if (i + 1 >= tpl.len || tpl.ptr[i] != '}' || tpl.ptr[i + 1] != '}') {
-                cfg_err(c, line, "unterminated '{{' in workdir");
+                hm_err("hacman: %s:%d: unterminated '{{' in %s\n",
+                       c->origin, line, what);
                 return -1;
             }
             i += 2;
 
             value = getenv(name);
             if (value == NULL || value[0] == '\0') {
-                hm_err("hacman: %s:%d: workdir refers to {{%s}}, which is not "
-                       "set in the environment\n", c->origin, line, name);
+                hm_err("hacman: %s:%d: %s refers to {{%s}}, which is not set "
+                       "in the environment\n", c->origin, line, what, name);
                 return -1;
             }
             while (*value != '\0' && o + 1 < cap) out[o++] = *value++;
@@ -284,10 +292,11 @@ static int expand_template(hm_cfg *c, hm_str tpl, char *out, size_t cap, long li
     }
     out[o] = '\0';
 
-    /* A relative directory would mean something different per caller, while
-     * the cache record it identifies would not. */
+    /* A relative path would mean something different per caller, while the
+     * cache record it identifies - or the program it names - would not. */
     if (out[0] != '/') {
-        cfg_err(c, line, "workdir must expand to an absolute path");
+        hm_err("hacman: %s:%d: %s must expand to an absolute path\n",
+               c->origin, line, what);
         return -1;
     }
     return 0;
@@ -335,7 +344,7 @@ static int finish_project(hm_cfg *c)
             p->workdir.ptr = "{{HOME}}";
             p->workdir.len = 8;
         }
-        if (expand_template(c, p->workdir, p->workdir_path,
+        if (expand_template(c, p->workdir, "workdir", p->workdir_path,
                             sizeof(p->workdir_path), p->line) != 0) {
             return -1;
         }
@@ -350,6 +359,13 @@ static int finish_project(hm_cfg *c)
             cfg_err(c, p->line, "check: version requires 'version-prefix'");
             return -1;
         }
+    }
+
+    /* The program this project sets up, if it names one. */
+    if (p->bin.len > 0 &&
+        expand_template(c, p->bin, "bin-path", p->bin_path,
+                        sizeof(p->bin_path), p->line) != 0) {
+        return -1;
     }
 
     c->finished = 1;

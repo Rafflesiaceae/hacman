@@ -1,4 +1,10 @@
-/* hacman - watch a URL and install what changed, or run a command on a leash.
+/* hacman - set a program up, then get out of the way.
+ *
+ * hacman is a shim: `hacman [OPTIONS] FILE [ARGS...]` makes sure the thing FILE
+ * describes is set up - a URL checked and installed, or a command run - and
+ * then execs the program named by bin-path with everything that followed FILE.
+ * Options therefore have to come *before* FILE; every argument after it belongs
+ * to the program, including the ones that look like hacman's own.
  *
  * One input file describes one project. main() is the fast path and is written
  * to keep the work between exec() and the first decision as small as possible:
@@ -30,6 +36,7 @@ static hm_cache   cache;
 
 typedef struct {
     const char *file;
+    char      **prog_argv;   /* &argv[FILE], reused as the program's argv */
     const char *cache_dir;
     int         check_only;
     int         dry_run;
@@ -41,12 +48,16 @@ typedef struct {
 } hm_opts;
 
 static const char usage_text[] =
-"usage: hacman [OPTIONS] FILE\n"
+"usage: hacman [OPTIONS] FILE [ARGS...]\n"
 "\n"
 "Checks the URL described by a SIML project file and runs its install script\n"
 "when that URL changed, or - for a file that describes a command instead -\n"
 "runs that command no more often than its schedule allows. FILE describes\n"
 "exactly one project; \"-\" reads it from standard input.\n"
+"\n"
+"When the project names a bin-path, hacman execs it once the setup is done and\n"
+"forwards ARGS to it. Options must therefore come before FILE - everything\n"
+"after FILE belongs to the program.\n"
 "\n"
 "options:\n"
 "  -c, --check-only    check only, never install or run (exit 10 if due)\n"
@@ -105,13 +116,15 @@ static int parse_args(int argc, char **argv, hm_opts *o)
     for (i = 1; i < argc; ++i) {
         const char *a = argv[i];
 
+        /* The first non-option is FILE, and it ends hacman's own arguments:
+         * the rest is the program's, however it is spelled. */
         if (a[0] != '-' || strcmp(a, "-") == 0) {
-            if (o->file != NULL) {
-                hm_err("hacman: only one input file may be given\n");
-                return -1;
-            }
-            o->file = a;
-        } else if (opt_is(a, "-c", "--check-only")) {
+            o->file      = a;
+            o->prog_argv = &argv[i];
+            return 0;
+        }
+
+        if (opt_is(a, "-c", "--check-only")) {
             o->check_only = 1;
         } else if (opt_is(a, "-n", "--dry-run")) {
             o->dry_run = 1;
@@ -176,6 +189,22 @@ static int is_due(const hm_project *p, const hm_cache *c, long now,
     return 0;
 }
 
+/* Last step of every path: flush what hacman had to say and, if the project
+ * names a program, become it.
+ *
+ * Only a run that got as far as "the program is set up" execs: a failure would
+ * hand over a program that may be missing or half-updated, and the inspection
+ * modes are meant to report rather than to act. */
+static int finish(const hm_project *p, const hm_opts *o, int rc)
+{
+    hm_out_flush();
+
+    if (rc != HM_EXIT_OK || p->bin_path[0] == '\0') return rc;
+    if (o->plan || o->check_only || o->dry_run || o->adopt) return rc;
+
+    return hm_exec_bin(p, o->prog_argv); /* only returns if exec failed */
+}
+
 /* A command project: run it, and remember that only if it succeeded. */
 static int run_command_project(const hm_project *p, hm_opts *o, long now)
 {
@@ -227,6 +256,15 @@ int main(int argc, char **argv)
         return HM_EXIT_USAGE;
     }
 
+    if (project.bin_path[0] != '\0') {
+        /* As a shim, hacman must leave stdout to the program it execs. */
+        hm_out_target(2);
+    } else if (o.prog_argv[1] != NULL) {
+        hm_err("hacman: %s: arguments after FILE need a 'bin-path' to forward "
+               "them to\n", o.file);
+        return HM_EXIT_USAGE;
+    }
+
     /* The cache record is addressed by what the project *is*, so this also
      * settles which record two different files share. */
     hm_cache_init(&cache, p, hm_cache_dir(o.cache_dir));
@@ -234,6 +272,7 @@ int main(int argc, char **argv)
     /* --plan answers "what does this file mean?" and stops there: no reads, no
      * clock, no network, so its output is reproducible. */
     if (o.plan) {
+        hm_out_target(1);
         hm_plan_print(p, &cache);
         hm_out_flush();
         return HM_EXIT_OK;
@@ -253,21 +292,19 @@ int main(int argc, char **argv)
                 hm_out("skip     %S (next run in %s)\n", p->name, left);
             }
         }
-        hm_out_flush();
-        return HM_EXIT_OK; /* nothing done, nothing written */
+        /* Nothing done, nothing written - and straight on to the program,
+         * which is the common case for a shim. */
+        return finish(p, &o, HM_EXIT_OK);
     }
 
     if (p->kind == HM_KIND_COMMAND) {
-        rc = run_command_project(p, &o, now);
-        hm_out_flush();
-        return rc;
+        return finish(p, &o, run_command_project(p, &o, now));
     }
 
     if (hm_check(p, o.timeout, &res) != 0) {
         /* Nothing is recorded: a failed request must not push the next attempt
          * into the future. */
-        hm_out_flush();
-        return HM_EXIT_FAILED;
+        return finish(p, &o, HM_EXIT_FAILED);
     }
 
     hm_str_copy(old_mark, sizeof(old_mark),
@@ -279,9 +316,8 @@ int main(int argc, char **argv)
     if (!changed) {
         if (o.verbose) hm_out("ok       %S (%s)\n", p->name, res.mark);
         cache.last_check = now;
-        rc = (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK;
-        hm_out_flush();
-        return rc;
+        return finish(p, &o, (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED
+                                                          : HM_EXIT_OK);
     }
 
     if (!cache.known) {
@@ -290,17 +326,14 @@ int main(int argc, char **argv)
         hm_out("changed  %S %s -> %s\n", p->name, old_mark, res.mark);
     }
 
-    if (o.check_only || o.dry_run) {
-        hm_out_flush();
-        return HM_EXIT_CHANGED;
-    }
+    if (o.check_only || o.dry_run) return finish(p, &o, HM_EXIT_CHANGED);
 
     if (!o.adopt) {
         /* --- slow path ----------------------------------------------- */
         hm_out_flush(); /* the install script writes to the same terminal */
         if (hm_install(p, old_mark, res.mark, &res) != 0) {
             /* Nothing is written, so the next run repeats check and install. */
-            return HM_EXIT_FAILED;
+            return finish(p, &o, HM_EXIT_FAILED);
         }
     }
 
@@ -309,7 +342,6 @@ int main(int argc, char **argv)
     cache.last_check  = now;
     cache.last_change = now;
 
-    rc = (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK;
-    hm_out_flush();
-    return rc;
+    return finish(p, &o, (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED
+                                                      : HM_EXIT_OK);
 }

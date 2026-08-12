@@ -455,6 +455,101 @@ else
 fail "the default workdir was $(cat "$marker.home"), expected $TMP/fake-home"
 fi
 
+# --- shim behaviour ------------------------------------------------------
+
+shim_cache="$TMP/cache-shim"
+mkdir -p "$TMP/bin"
+setup_log="$TMP/setup.log"
+: >"$setup_log"
+
+# Prints one argument per line, so argument boundaries are checked too.
+cat >"$TMP/bin/prog" <<'EOF'
+#!/bin/sh
+echo "prog-ran"
+for a in "$@"; do echo "arg:$a"; done
+EOF
+chmod +x "$TMP/bin/prog"
+
+cat >"$TMP/shim.siml" <<EOF
+name: shimmed
+command: echo setup >>"$setup_log"
+workdir: {{TMPDIR_FOR_TEST}}
+bin-path: $TMP/bin/prog
+schedule: 6h
+EOF
+
+expect "the shim sets up and then execs" 0 \
+    "$BIN" -v --cache "$shim_cache" "$TMP/shim.siml" --flag "two words"
+contains "the setup ran" "run      shimmed"
+contains "the program ran" "prog-ran"
+contains "an option-looking argument is forwarded" "arg:--flag"
+contains "argument boundaries survive" "arg:two words"
+tests=$((tests + 1))
+if [ "$(wc -l <"$setup_log")" = "1" ]; then
+    echo "[test] ok: the setup ran once"
+else
+    fail "the setup ran $(wc -l <"$setup_log") times"
+fi
+
+# The common case: nothing to do, so hacman is just a fast detour.
+expect "a project that is not due still execs" 0 \
+    "$BIN" --cache "$shim_cache" "$TMP/shim.siml" again
+contains "the program ran again" "prog-ran"
+contains "its argument came through" "arg:again"
+tests=$((tests + 1))
+if [ "$(wc -l <"$setup_log")" = "1" ]; then
+    echo "[test] ok: the skipped setup did not run"
+else
+    fail "the setup ran although the project was not due"
+fi
+
+# hacman's own options are only its own before FILE.
+expect "options after FILE belong to the program" 0 \
+    "$BIN" --cache "$shim_cache" "$TMP/shim.siml" --plan -v
+contains "--plan after FILE was forwarded" "arg:--plan"
+missing "--plan after FILE did not print a plan" "cache-identity:"
+
+# As a shim, hacman must not write to the program's stdout.
+tests=$((tests + 1))
+if [ "$("$BIN" -v --cache "$shim_cache" "$TMP/shim.siml" x 2>/dev/null)" = "prog-ran
+arg:x" ]; then
+    echo "[test] ok: status output stays off the program's stdout"
+else
+    fail "hacman wrote to the program's stdout"
+fi
+
+# The program's exit status becomes hacman's.
+printf '#!/bin/sh\nexit 3\n' >"$TMP/bin/failprog"
+chmod +x "$TMP/bin/failprog"
+sed "s|^bin-path: .*|bin-path: $TMP/bin/failprog|" "$TMP/shim.siml" >"$TMP/shim-fail.siml"
+expect "the program's exit status is passed through" 3 \
+    "$BIN" --cache "$shim_cache" "$TMP/shim-fail.siml"
+
+sed "s|^bin-path: .*|bin-path: $TMP/bin/absent|" "$TMP/shim.siml" >"$TMP/shim-absent.siml"
+expect "a missing program exits 127" 127 "$BIN" --cache "$shim_cache" "$TMP/shim-absent.siml"
+contains "the missing program is named" "cannot execute"
+
+# A failed setup must not hand over a program that may be stale or missing.
+cat >"$TMP/shim-badsetup.siml" <<EOF
+name: bad-setup
+command: exit 5
+workdir: {{TMPDIR_FOR_TEST}}
+bin-path: $TMP/bin/prog
+schedule: always
+EOF
+expect "a failed setup does not exec" 2 "$BIN" --cache "$shim_cache" "$TMP/shim-badsetup.siml"
+missing "the program was not started" "prog-ran"
+
+# Forwarding needs somewhere to forward to.
+expect "arguments without a bin-path are an error" 1 \
+    "$BIN" --cache "$shim_cache" "$TMP/cmd-a.siml" surplus
+contains "the missing bin-path is explained" "need a 'bin-path'"
+
+# Inspection modes report instead of handing over.
+expect "--plan does not exec" 0 "$BIN" --cache "$shim_cache" --plan "$TMP/shim.siml"
+missing "--plan did not start the program" "prog-ran"
+contains "--plan describes the hand-over" "exec: bin-path"
+
 unset TMPDIR_FOR_TEST
 
 echo "[test] ran ${tests} assertions"

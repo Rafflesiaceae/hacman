@@ -1,0 +1,1 @@
+hacman: tests/xfail_bin_path_relative.siml:1: bin-path must expand to an absolute path

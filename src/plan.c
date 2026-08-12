@@ -115,5 +115,10 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
     hm_out("cache-identity: %s\n", c->identity);
     hm_out("cache-file: %s\n", c->path);
 
+    if (p->bin_path[0] != '\0') {
+        hm_out("bin-path: %s\n", p->bin_path);
+        hm_out("exec: bin-path, with every argument that followed FILE\n");
+    }
+
     if (p->kind == HM_KIND_URL) print_install(p);
 }

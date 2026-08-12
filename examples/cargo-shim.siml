@@ -1,0 +1,9 @@
+# hacman as a shim: keep the toolchain fresh, then become cargo.
+# Put this behind an alias or a wrapper script:
+#   alias cargo='hacman ~/.config/hacman/cargo-shim.siml'
+# `cargo build --release` then updates stable at most once a week and forwards
+# `build --release` to the real cargo, whose exit status becomes hacman's.
+name: cargo
+command: rustup update stable
+bin-path: {{HOME}}/.cargo/bin/cargo
+schedule: weekly

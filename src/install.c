@@ -233,3 +233,25 @@ int hm_command_run(const hm_project *p)
     }
     return 0;
 }
+
+/* Becomes the program this project sets up.
+ *
+ * `argv` is the tail of hacman's own argv starting at the FILE slot, so
+ * overwriting that slot with the resolved bin-path yields exactly the argument
+ * vector the program should see - already NUL-terminated, with no copying and
+ * no limit on how many arguments may be forwarded.
+ *
+ * execv() replaces the process, so the program inherits the terminal and its
+ * exit status becomes hacman's. This only returns if the program could not be
+ * started at all. */
+int hm_exec_bin(const hm_project *p, char **argv)
+{
+    argv[0] = (char *)p->bin_path;
+
+    fflush(stdout);
+    execv(p->bin_path, argv);
+
+    fprintf(stderr, "hacman: cannot execute %s: %s\n",
+            p->bin_path, strerror(errno));
+    return 127;
+}

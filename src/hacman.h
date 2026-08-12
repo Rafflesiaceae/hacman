@@ -62,6 +62,10 @@ typedef struct {
     long          sched_interval;  /* seconds, for HM_SCHED_EVERY          */
     hm_str        version_prefix;  /* HM_CHECK_VERSION: text before value  */
     hm_str        version_suffix;  /* HM_CHECK_VERSION: text after value   */
+    hm_str        bin;             /* raw {{VAR}} template, "" if unset     */
+    /* The program this project sets up. When set, hacman execs it once the
+     * setup is done, forwarding everything that followed FILE. */
+    char          bin_path[HM_PATH_MAX + 1];
     hm_str        install;         /* raw block-scalar region, still indented */
     size_t        install_indent;  /* columns to strip from install lines  */
     long          line;            /* line the project started on          */
@@ -72,9 +76,13 @@ typedef struct {
 /* Minimal formatter used instead of <stdio.h> on the fast path.
  * Conversions: %s (const char *), %S (hm_str), %u (unsigned long),
  *              %d (long), %c (int), %% */
-void hm_out(const char *fmt, ...);   /* buffered stdout            */
+void hm_out(const char *fmt, ...);   /* buffered status output     */
 void hm_err(const char *fmt, ...);   /* unbuffered stderr          */
 void hm_out_flush(void);
+
+/* Redirects hm_out() to `fd`. hacman's own chatter moves to stderr when it is
+ * acting as a shim, so the program it execs owns stdout. */
+void hm_out_target(int fd);
 
 int    hm_str_eq(hm_str a, const char *lit);
 int    hm_str_eq_str(hm_str a, hm_str b);
@@ -171,5 +179,10 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
 /* Slow path for HM_KIND_COMMAND: runs `command` with the shell, in `workdir`.
  * Returns 0 on success, -1 if the command failed or could not be run. */
 int hm_command_run(const hm_project *p);
+
+/* Replaces this process with the project's bin-path, passing `argv` (whose
+ * first slot this fills in). Only ever returns on failure, with the exit code
+ * hacman should use. */
+int hm_exec_bin(const hm_project *p, char **argv);
 
 #endif /* HACMAN_H_INCLUDED */

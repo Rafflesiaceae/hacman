@@ -20,6 +20,7 @@
 
 static char   out_buf[HM_OUT_CAP];
 static size_t out_len;
+static int    out_fd = 1;
 
 /* write(2) with EINTR/short-write handling. */
 static void hm_write_all(int fd, const char *s, size_t len)
@@ -103,10 +104,16 @@ static size_t hm_vformat(char *dst, size_t cap, const char *fmt, va_list ap)
     return o;
 }
 
+void hm_out_target(int fd)
+{
+    hm_out_flush();
+    out_fd = fd;
+}
+
 void hm_out_flush(void)
 {
     if (out_len > 0) {
-        hm_write_all(1, out_buf, out_len);
+        hm_write_all(out_fd, out_buf, out_len);
         out_len = 0;
     }
 }
@@ -123,7 +130,7 @@ void hm_out(const char *fmt, ...)
 
     if (n > HM_OUT_CAP - out_len) hm_out_flush();
     if (n > HM_OUT_CAP) {
-        hm_write_all(1, line, n);
+        hm_write_all(out_fd, line, n);
         return;
     }
     memcpy(out_buf + out_len, line, n);

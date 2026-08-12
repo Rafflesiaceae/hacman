@@ -1,0 +1,11 @@
+name: rustup-updated-cargo
+command: rustup update stable
+workdir: /home/hacman-test
+run: /bin/sh -c <command>, in workdir
+record-when: the command exits 0
+schedule: 1w
+check-when: 604800 seconds after the last run
+cache-identity: cmd /home/hacman-test $ rustup update stable
+cache-file: /home/hacman-test/.cache/hacman/cmd-7a576453b3287f16
+bin-path: /home/hacman-test/.cargo/bin/cargo
+exec: bin-path, with every argument that followed FILE

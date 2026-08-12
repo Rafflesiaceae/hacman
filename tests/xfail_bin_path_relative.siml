@@ -1,0 +1,2 @@
+command: echo hi
+bin-path: bin/tool
