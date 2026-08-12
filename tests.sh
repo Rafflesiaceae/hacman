@@ -6,7 +6,8 @@
 #   1. golden-file tests over ./tests/*.siml - each input is resolved with
 #      `hacman --plan` and its combined output must match the .gold file next
 #      to it. An input named xfail_*.siml must be rejected (exit 1); any other
-#      input must plan successfully (exit 0). Regenerate with:
+#      input must plan successfully (exit 0). Plans expand {{VAR}} templates and
+#      name cache files, so they run against a fixed HOME. Regenerate with:
 #
 #          GOLD=update ./tests.sh
 #
@@ -50,6 +51,13 @@ fail() {
 # the .gold files - are stable.
 cd "$ROOT_DIR" || exit 1
 
+# A plan resolves {{HOME}} and names a cache file, so it is only reproducible
+# against a fixed environment.
+plan() {
+    env -u XDG_CACHE_HOME -u HACMAN_CACHE -u HACMAN_TEST_UNSET \
+        HOME=/home/hacman-test "$BIN" --plan "$@"
+}
+
 for siml in tests/*.siml; do
     [ -e "$siml" ] || continue
     gold="${siml%.siml}.gold"
@@ -60,7 +68,7 @@ for siml in tests/*.siml; do
         *)       want=0 ;;
     esac
 
-    got="$("$BIN" --plan "$siml" 2>&1)"
+    got="$(plan "$siml" 2>&1)"
     got_rc=$?
 
     if [ "$GOLD" = "update" ]; then
@@ -95,7 +103,7 @@ done
 for siml in examples/*.siml; do
     [ -e "$siml" ] || continue
     tests=$((tests + 1))
-    if out="$("$BIN" --plan "$siml" 2>&1)"; then
+    if out="$(plan "$siml" 2>&1)"; then
         echo "[test] ok: $siml plans"
     else
         fail "$siml: does not plan"
@@ -164,7 +172,7 @@ contains "missing file argument is explained" "no project file given"
 # --- check and install pipeline -----------------------------------------
 
 payload="$TMP/payload.txt"
-state="$TMP/state.tsv"
+cache="$TMP/cache"
 echo "version 1.0.0" >"$payload"
 
 cat >"$TMP/hash.siml" <<EOF
@@ -180,25 +188,25 @@ install: |
   fi
 EOF
 
-expect "first run installs" 0 "$BIN" --state "$state" "$TMP/hash.siml"
+expect "first run installs" 0 "$BIN" --cache "$cache" "$TMP/hash.siml"
 contains "first run reports new" "new      demo"
 contains "install script ran" "install name=demo prev=none"
 contains "response file is passed" "body=version 1.0.0"
 
-expect "unchanged run is quiet" 0 "$BIN" --state "$state" "$TMP/hash.siml"
+expect "unchanged run is quiet" 0 "$BIN" --cache "$cache" "$TMP/hash.siml"
 missing "no install on unchanged" "install name=demo"
 
-expect "unchanged run is verbose on demand" 0 "$BIN" -v --state "$state" "$TMP/hash.siml"
+expect "unchanged run is verbose on demand" 0 "$BIN" -v --cache "$cache" "$TMP/hash.siml"
 contains "verbose reports ok" "ok       demo"
 
 echo "version 1.0.1" >"$payload"
-expect "changed run installs again" 0 "$BIN" --state "$state" "$TMP/hash.siml"
+expect "changed run installs again" 0 "$BIN" --cache "$cache" "$TMP/hash.siml"
 contains "change is reported with both marks" "changed  demo"
 contains "previous mark reaches the script" "prev="
 
 # --- schedules -----------------------------------------------------------
 
-sched_state="$TMP/sched.tsv"
+sched_cache="$TMP/cache-sched"
 cat >"$TMP/sched.siml" <<EOF
 name: scheduled
 url: file://$payload
@@ -207,15 +215,15 @@ schedule: 6h
 install: echo "installed"
 EOF
 
-expect "scheduled first run checks" 0 "$BIN" --state "$sched_state" "$TMP/sched.siml"
+expect "scheduled first run checks" 0 "$BIN" --cache "$sched_cache" "$TMP/sched.siml"
 contains "scheduled first run is a change" "new      scheduled"
 
 echo "version 1.0.2" >"$payload"
-expect "schedule suppresses the next check" 0 "$BIN" -v --state "$sched_state" "$TMP/sched.siml"
-contains "skip mentions the wait" "skip     scheduled (next check in"
+expect "schedule suppresses the next check" 0 "$BIN" -v --cache "$sched_cache" "$TMP/sched.siml"
+contains "skip mentions the wait" "skip     scheduled (next run in"
 missing "no install while skipped" "installed"
 
-expect "--force ignores the schedule" 0 "$BIN" -f --state "$sched_state" "$TMP/sched.siml"
+expect "--force ignores the schedule" 0 "$BIN" -f --cache "$sched_cache" "$TMP/sched.siml"
 contains "forced run installs" "installed"
 
 cat >"$TMP/never.siml" <<EOF
@@ -225,9 +233,9 @@ check: hash
 schedule: never
 install: echo "installed"
 EOF
-expect "schedule: never does nothing" 0 "$BIN" -v --state "$TMP/never.tsv" "$TMP/never.siml"
+expect "schedule: never does nothing" 0 "$BIN" -v --cache "$TMP/cache-never" "$TMP/never.siml"
 contains "never is reported as such" "skip     manual (schedule: never)"
-expect "schedule: never yields to --force" 0 "$BIN" -f --state "$TMP/never.tsv" "$TMP/never.siml"
+expect "schedule: never yields to --force" 0 "$BIN" -f --cache "$TMP/cache-never" "$TMP/never.siml"
 contains "forced manual project installs" "installed"
 
 # --- version extraction --------------------------------------------------
@@ -244,7 +252,7 @@ version-suffix: "
 schedule: always
 install: echo "got \$HACMAN_VERSION"
 EOF
-expect "version extraction" 0 "$BIN" --state "$TMP/version.tsv" "$TMP/version.siml"
+expect "version extraction" 0 "$BIN" --cache "$TMP/cache-version" "$TMP/version.siml"
 contains "version is extracted between the anchors" "got 14.1.1"
 
 cat >"$TMP/badversion.siml" <<EOF
@@ -255,18 +263,18 @@ version-prefix: nothing-like-this
 schedule: always
 install: echo "unreachable"
 EOF
-expect "missing version-prefix fails the check" 2 "$BIN" --state "$TMP/bad.tsv" "$TMP/badversion.siml"
+expect "missing version-prefix fails the check" 2 "$BIN" --cache "$TMP/cache-bad" "$TMP/badversion.siml"
 contains "missing prefix is explained" "version-prefix not found"
 
 # --- modes ---------------------------------------------------------------
 
 echo "version 2.0.0" >"$payload"
-expect "--check-only reports changes as exit 10" 10 "$BIN" -c --state "$state" "$TMP/hash.siml"
+expect "--check-only reports changes as exit 10" 10 "$BIN" -c --cache "$cache" "$TMP/hash.siml"
 missing "--check-only does not install" "install name=demo"
-expect "--dry-run also reports exit 10" 10 "$BIN" -n --state "$state" "$TMP/hash.siml"
-expect "--adopt records without installing" 0 "$BIN" -a --state "$state" "$TMP/hash.siml"
+expect "--dry-run also reports exit 10" 10 "$BIN" -n --cache "$cache" "$TMP/hash.siml"
+expect "--adopt records without installing" 0 "$BIN" -a --cache "$cache" "$TMP/hash.siml"
 missing "--adopt does not install" "install name=demo"
-expect "adopted state is now unchanged" 0 "$BIN" -v --state "$state" "$TMP/hash.siml"
+expect "adopted state is now unchanged" 0 "$BIN" -v --cache "$cache" "$TMP/hash.siml"
 contains "adopted project reads as ok" "ok       demo"
 
 # --- failure handling ----------------------------------------------------
@@ -280,10 +288,10 @@ install: |
   echo "about to fail"
   exit 3
 EOF
-expect "failing install exits 2" 2 "$BIN" --state "$TMP/fail.tsv" "$TMP/fail.siml"
+expect "failing install exits 2" 2 "$BIN" --cache "$TMP/cache-fail" "$TMP/fail.siml"
 contains "failure names the exit code" "exit code 3"
 # The check time is dropped on failure, so the schedule must not hide a retry.
-expect "failed install is retried immediately" 2 "$BIN" --state "$TMP/fail.tsv" "$TMP/fail.siml"
+expect "failed install is retried immediately" 2 "$BIN" --cache "$TMP/cache-fail" "$TMP/fail.siml"
 contains "retry runs the script again" "about to fail"
 
 cat >"$TMP/missing.siml" <<EOF
@@ -293,7 +301,7 @@ check: hash
 schedule: always
 install: echo "unreachable"
 EOF
-expect "unreachable url exits 2" 2 "$BIN" --state "$TMP/missing.tsv" "$TMP/missing.siml"
+expect "unreachable url exits 2" 2 "$BIN" --cache "$TMP/cache-missing" "$TMP/missing.siml"
 contains "unreachable url is reported" "request failed"
 
 # --- the plan describes the script that actually runs --------------------
@@ -310,14 +318,14 @@ install: |
     fi
   done
 EOF
-expect "indentation inside the block is preserved" 0 "$BIN" --state "$TMP/indent.tsv" "$TMP/indent.siml"
+expect "indentation inside the block is preserved" 0 "$BIN" --cache "$TMP/cache-indent" "$TMP/indent.siml"
 contains "nested shell block ran" "nested 2"
 
 # The plan prints the same lines the installer writes into its script, so the
 # script kept by HACMAN_KEEP_TEMP must match the plan's install block.
 "$BIN" --plan "$TMP/indent.siml" | sed -n '/^install: |$/,$p' | tail -n +2 | sed 's/^  //' >"$TMP/planned.sh"
-rm -f "$TMP/indent.tsv"
-kept="$(HACMAN_KEEP_TEMP=1 "$BIN" --state "$TMP/indent.tsv" "$TMP/indent.siml" 2>&1 |
+rm -rf "$TMP/cache-indent"
+kept="$(HACMAN_KEEP_TEMP=1 "$BIN" --cache "$TMP/cache-indent" "$TMP/indent.siml" 2>&1 |
         sed -n 's/^hacman: indented: kept //p')"
 tests=$((tests + 1))
 if [ -n "$kept" ] && diff -u <(tail -n +2 "$kept") "$TMP/planned.sh" >"$TMP/diff" 2>&1; then
@@ -327,6 +335,127 @@ else
     sed 's/^/    | /' "$TMP/diff" >&2
 fi
 [ -n "$kept" ] && rm -f "$kept"
+
+# --- command projects ----------------------------------------------------
+
+cmd_cache="$TMP/cache-cmd"
+marker="$TMP/ran.log"
+: >"$marker"
+export TMPDIR_FOR_TEST="$TMP"
+
+cat >"$TMP/cmd-a.siml" <<EOF
+name: first-file
+command: echo "ran in \$(pwd)" >>"$marker"
+workdir: {{TMPDIR_FOR_TEST}}
+schedule: 6h
+EOF
+
+# The same command and workdir, spelled in a second file under another name.
+sed 's/^name: first-file$/name: second-file/' "$TMP/cmd-a.siml" >"$TMP/cmd-b.siml"
+
+expect "command project runs" 0 "$BIN" --cache "$cmd_cache" -v "$TMP/cmd-a.siml"
+contains "verbose announces the run" "run      first-file"
+tests=$((tests + 1))
+if [ "$(wc -l <"$marker")" = "1" ] && grep -q "ran in $TMP" "$marker"; then
+echo "[test] ok: the command ran in its workdir"
+else
+fail "the command did not run in its workdir"
+sed 's/^/    | /' "$marker" >&2
+fi
+
+expect "command respects its schedule" 0 "$BIN" --cache "$cmd_cache" -v "$TMP/cmd-a.siml"
+contains "second invocation is skipped" "skip     first-file (next run in"
+
+# The record is keyed by command+workdir, so the other file is skipped too.
+expect "another file with the same command shares the record" 0 \
+"$BIN" --cache "$cmd_cache" -v "$TMP/cmd-b.siml"
+contains "the shared record skips the second file" "skip     second-file (next run in"
+tests=$((tests + 1))
+if [ "$(wc -l <"$marker")" = "1" ]; then
+echo "[test] ok: the shared record prevented a second run"
+else
+fail "the command ran again despite the shared record"
+fi
+
+tests=$((tests + 1))
+if [ "$(find "$cmd_cache" -type f | wc -l)" = "1" ]; then
+echo "[test] ok: both files use one cache record"
+else
+fail "expected exactly one cache record"
+find "$cmd_cache" -type f | sed 's/^/    | /' >&2
+fi
+
+expect "--force runs a scheduled command again" 0 "$BIN" -f --cache "$cmd_cache" "$TMP/cmd-a.siml"
+tests=$((tests + 1))
+if [ "$(wc -l <"$marker")" = "2" ]; then
+echo "[test] ok: --force ran the command a second time"
+else
+fail "--force did not run the command"
+fi
+
+# A different working directory is a different thing to remember.
+mkdir -p "$TMP/other"
+sed "s|^workdir: .*|workdir: $TMP/other|" "$TMP/cmd-a.siml" >"$TMP/cmd-c.siml"
+expect "a different workdir is a different record" 0 "$BIN" --cache "$cmd_cache" "$TMP/cmd-c.siml"
+tests=$((tests + 1))
+if [ "$(wc -l <"$marker")" = "3" ] && grep -q "ran in $TMP/other" "$marker"; then
+echo "[test] ok: the same command elsewhere ran on its own schedule"
+else
+fail "the same command in another workdir did not run"
+sed 's/^/    | /' "$marker" >&2
+fi
+
+# A failing command must not be recorded, so it is retried immediately.
+cat >"$TMP/cmd-fail.siml" <<EOF
+name: failing-command
+command: echo attempt >>"$marker.fail"; exit 7
+workdir: {{TMPDIR_FOR_TEST}}
+schedule: 6h
+EOF
+: >"$marker.fail"
+expect "a failing command exits 2" 2 "$BIN" --cache "$cmd_cache" "$TMP/cmd-fail.siml"
+contains "the exit code is reported" "command failed with exit code 7"
+expect "a failing command is retried at once" 2 "$BIN" --cache "$cmd_cache" "$TMP/cmd-fail.siml"
+tests=$((tests + 1))
+if [ "$(wc -l <"$marker.fail")" = "2" ]; then
+echo "[test] ok: the failed run was not recorded"
+else
+fail "the failed command was recorded"
+fi
+
+expect "--check-only reports a due command as exit 10" 10 \
+"$BIN" -c --cache "$cmd_cache" "$TMP/cmd-fail.siml"
+contains "due command is named" "due      failing-command"
+
+expect "--adopt records a command without running it" 0 \
+"$BIN" -a --cache "$cmd_cache" "$TMP/cmd-fail.siml"
+tests=$((tests + 1))
+if [ "$(wc -l <"$marker.fail")" = "2" ]; then
+echo "[test] ok: --adopt did not run the command"
+else
+fail "--adopt ran the command"
+fi
+expect "an adopted command is now on its schedule" 0 \
+"$BIN" -v --cache "$cmd_cache" "$TMP/cmd-fail.siml"
+contains "adopted command is skipped" "skip     failing-command (next run in"
+
+# The default working directory is $HOME.
+mkdir -p "$TMP/fake-home"
+cat >"$TMP/cmd-home.siml" <<EOF
+name: at-home
+command: pwd >"$marker.home"
+schedule: always
+EOF
+expect "a command without workdir runs in HOME" 0 \
+env HOME="$TMP/fake-home" "$BIN" --cache "$cmd_cache" "$TMP/cmd-home.siml"
+tests=$((tests + 1))
+if [ "$(cat "$marker.home")" = "$TMP/fake-home" ]; then
+echo "[test] ok: the default workdir is {{HOME}}"
+else
+fail "the default workdir was $(cat "$marker.home"), expected $TMP/fake-home"
+fi
+
+unset TMPDIR_FOR_TEST
 
 echo "[test] ran ${tests} assertions"
 if [ "$rc" = 0 ]; then

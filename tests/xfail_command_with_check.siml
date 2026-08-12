@@ -1,0 +1,2 @@
+command: echo hi
+check: hash

@@ -1,0 +1,9 @@
+name: cargo install-update -a
+command: cargo install-update -a
+workdir: /home/hacman-test
+run: /bin/sh -c <command>, in workdir
+record-when: the command exits 0
+schedule: 1d
+check-when: 86400 seconds after the last run
+cache-identity: cmd /home/hacman-test $ cargo install-update -a
+cache-file: /home/hacman-test/.cache/hacman/cmd-2505e44cc191979c

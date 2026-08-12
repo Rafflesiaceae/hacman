@@ -1,0 +1,2 @@
+command: echo hi
+install: echo also-hi

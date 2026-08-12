@@ -1,1 +1,0 @@
-hacman: tests/xfail_missing_url.siml:1: entry is missing 'url'

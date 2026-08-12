@@ -1,0 +1,1 @@
+hacman: tests/xfail_command_with_check.siml:1: 'check' and 'version-*' only apply to a 'url'

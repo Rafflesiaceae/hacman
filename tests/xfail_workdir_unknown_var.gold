@@ -1,0 +1,1 @@
+hacman: tests/xfail_workdir_unknown_var.siml:1: workdir refers to {{HACMAN_TEST_UNSET}}, which is not set in the environment

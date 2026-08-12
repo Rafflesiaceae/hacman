@@ -1,0 +1,4 @@
+# Without a workdir the command runs in {{HOME}}.
+name: prune-journal
+command: journalctl --vacuum-time=30d
+schedule: weekly

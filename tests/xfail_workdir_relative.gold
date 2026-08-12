@@ -1,0 +1,1 @@
+hacman: tests/xfail_workdir_relative.siml:1: workdir must expand to an absolute path

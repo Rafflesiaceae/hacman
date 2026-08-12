@@ -1,0 +1,9 @@
+name: prune-journal
+command: journalctl --vacuum-time=30d
+workdir: /home/hacman-test
+run: /bin/sh -c <command>, in workdir
+record-when: the command exits 0
+schedule: 1w
+check-when: 604800 seconds after the last run
+cache-identity: cmd /home/hacman-test $ journalctl --vacuum-time=30d
+cache-file: /home/hacman-test/.cache/hacman/cmd-a00b9c710bb53c5c

@@ -4,5 +4,7 @@ check: etag
 request: HEAD https://example.com/artifact.tar.gz
 compare: the ETag header, or Last-Modified when absent
 schedule: 1d
-check-when: 86400 seconds after the last check
+check-when: 86400 seconds after the last run
+cache-identity: url etag https://example.com/artifact.tar.gz
+cache-file: /home/hacman-test/.cache/hacman/url-b4fca5bdccb67a2c
 install: (none - a change would only be reported)

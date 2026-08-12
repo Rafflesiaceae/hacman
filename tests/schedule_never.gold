@@ -5,6 +5,8 @@ request: GET https://example.com/manual
 compare: an FNV-1a hash of the whole response body
 schedule: never
 check-when: only with --force
+cache-identity: url hash https://example.com/manual
+cache-file: /home/hacman-test/.cache/hacman/url-9685ba9f823737ef
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
 install: |

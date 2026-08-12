@@ -4,5 +4,7 @@ check: etag
 request: HEAD https://example.com/x
 compare: the ETag header, or Last-Modified when absent
 schedule: 30d
-check-when: 2592000 seconds after the last check
+check-when: 2592000 seconds after the last run
+cache-identity: url etag https://example.com/x
+cache-file: /home/hacman-test/.cache/hacman/url-825ac3e0348a606e
 install: (none - a change would only be reported)

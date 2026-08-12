@@ -1,0 +1,9 @@
+name: nixcfg-pull
+command: git pull --ff-only
+workdir: /home/hacman-test/workspace/nixcfg
+run: /bin/sh -c <command>, in workdir
+record-when: the command exits 0
+schedule: 12h
+check-when: 43200 seconds after the last run
+cache-identity: cmd /home/hacman-test/workspace/nixcfg $ git pull --ff-only
+cache-file: /home/hacman-test/.cache/hacman/cmd-3cac4986c0e7422f

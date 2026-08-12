@@ -1,0 +1,4 @@
+name: nixcfg-pull
+command: git pull --ff-only
+workdir: {{HOME}}/workspace/nixcfg
+schedule: 12h
