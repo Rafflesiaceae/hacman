@@ -1,0 +1,16 @@
+# A complete C project carried by one .siml file. Run it with:
+#   hacman --force examples/hello-c.siml
+name: embedded-hello
+command: meson setup build && meson compile -C build && ./build/hello
+schedule: never
+files:
+  main.c: |
+    #include <stdio.h>
+    int main(void)
+    {
+        puts("hello from an embedded hacman project");
+        return 0;
+    }
+  meson.build: |
+    project('embedded-hello', 'c', default_options: ['c_std=c99'])
+    executable('hello', 'main.c')

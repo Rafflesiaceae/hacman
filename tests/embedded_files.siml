@@ -1,0 +1,11 @@
+name: embedded
+command: test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready
+schedule: never
+files:
+  main.c: |
+    int main(void)
+    {
+        return 0;
+    }
+  message.txt: |
+    built before the command

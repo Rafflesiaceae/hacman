@@ -74,9 +74,10 @@ Rules the fast path follows, and that changes to it must keep:
   `open`/`read`/`close` and parsed straight out of that buffer; the parser's
   line callback hands out slices of it. The cache record is one small file, so
   reading it is one more `open`/`read`/`close` — never a table to scan.
-- **No copies.** Every config value — including the `install:` script — is an
-  `hm_str` pointing back into the input buffer. The install script is not even
-  de-indented until an install actually happens.
+- **Almost no copies.** Config values — including install scripts and embedded
+  file contents — point back into the input buffer. Only embedded-file names
+  are copied, because parser key slices are transient. Block contents are not
+  even de-indented until work is actually due.
 - **No stdio on the fast path.** Output goes through a small `write(2)`-based
   formatter in `src/util.c`.
 - **Nothing eager.** Nothing happens at all unless the schedule says the
@@ -269,7 +270,8 @@ schedule: 12h
 | key | required | default | meaning |
 |---|---|---|---|
 | `command` | yes | — | passed to `sh -c`, run inside `workdir` |
-| `workdir` | no | `{{HOME}}` | working directory; must expand to an absolute path |
+| `workdir` | no | `{{HOME}}` | working directory; must expand to an absolute path; incompatible with `files` |
+| `files` | no | — | files to materialize in a cache work directory before running the command |
 | `name` | no | the `command` | label used in output |
 | `schedule` | no | `daily` | when the command may run (below) |
 | `bin-path` | no | — | program to exec afterwards (see [above](#options-before-file-arguments-after-it)) |
@@ -287,6 +289,44 @@ out the schedule.
 The record is keyed by the pair (command, working directory) — see
 [Cache](#cache) — so the same command in the same directory shares one
 last-run across every file that mentions it, whatever those files are called.
+
+#### Embedded files
+
+A command project can carry a small, self-contained source tree directly in
+its `.siml` file:
+
+```
+name: embedded-hello
+command: meson setup build && meson compile -C build && ./build/hello
+schedule: never
+files:
+  main.c: |
+    #include <stdio.h>
+    int main(void)
+    {
+        puts("hello from hacman");
+        return 0;
+    }
+  meson.build: |
+    project('embedded-hello', 'c', default_options: ['c_std=c99'])
+    executable('hello', 'main.c')
+```
+
+See [`examples/hello-c.siml`](examples/hello-c.siml) for the runnable version.
+`hacman --force examples/hello-c.siml` materializes `main.c` and `meson.build`,
+builds them with Meson, and runs the resulting program.
+
+`files` is a mapping from a filename to a literal block scalar. Filenames use
+SIML's mapping-key syntax (`[a-zA-Z_][a-zA-Z0-9_.-]*`); values must use `|`, so
+their bytes and line breaks are unambiguous. A project with `files` cannot set
+`workdir`: hacman derives a project-specific `<cache>/cmd-….work` directory,
+writes every embedded file there, then runs the command there. The directory
+is also exported as `HACMAN_WORKDIR`.
+
+Materialization happens only immediately before a real command execution:
+schedule skips, `--plan`, `--check-only`, `--dry-run`, and `--adopt` do not
+touch the files. Paths and contents are included in the cache identity, so an
+edit gets a new work directory and is due on its next normal invocation.
 
 Unknown keys, a missing `url` and anything that would introduce a second
 project are hard errors, reported with a line number. Use `hacman --plan` to
@@ -398,6 +438,7 @@ What the identity is made of decides what shares a record:
 | project | identity | consequence |
 |---|---|---|
 | command | the command and its working directory | the same command in the same directory shares one last-run across every file that names it |
+| command with `files` | the command and a digest of embedded paths and contents | editing an embedded project gives it a fresh work directory and makes it due |
 | url | the URL, the check scheme and its version anchors | two files watching the same URL the same way share one history |
 
 `name` is deliberately *not* part of it: renaming a project keeps its history,
@@ -437,7 +478,7 @@ src/config.c              SIML -> one hm_project, zero-copy
 src/plan.c                --plan serialisation
 src/cache.c               cache records: identity, load, atomic save
 src/check.c               HTTP via curl + the three check schemes
-src/install.c             slow path: install scripts, commands, exec
+src/install.c             slow path: embedded files, install scripts, commands, exec
 src/util.c                write(2)-based output, string and file helpers
 vendor/siml/              vendored SIML parser (see vendor.py)
 ```

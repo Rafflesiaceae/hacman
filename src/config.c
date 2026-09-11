@@ -72,8 +72,12 @@ typedef struct {
     int         seen_version;
     int         seen_install;
     int         seen_workdir;
-    int         in_install;    /* inside the `install:` block scalar     */
-    const char *block_start;   /* first raw byte of the install block    */
+    int         seen_files;
+    int         pending_files; /* saw the header-only `files:` entry     */
+    int         in_files;      /* inside the nested embedded-file map    */
+    int         block_kind;    /* 1 = install, 2 = embedded file         */
+    hm_embedded_file *block_file;
+    const char *block_start;   /* first raw byte of the current block    */
     const char *block_end;     /* one past its last raw byte             */
 } hm_cfg;
 
@@ -230,6 +234,56 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
     return 0;
 }
 
+static int valid_file_path(hm_str path)
+{
+    size_t start = 0, i;
+
+    if (path.len == 0 || path.len > HM_FILE_PATH_MAX || path.ptr[0] == '/' ||
+        path.ptr[path.len - 1] == '/') {
+        return 0;
+    }
+
+    for (i = 0; i <= path.len; ++i) {
+        if (i == path.len || path.ptr[i] == '/') {
+            size_t n = i - start;
+            if (n == 0 || (n == 1 && path.ptr[start] == '.') ||
+                (n == 2 && path.ptr[start] == '.' && path.ptr[start + 1] == '.')) {
+                return 0;
+            }
+            start = i + 1;
+        }
+    }
+    return 1;
+}
+
+static hm_embedded_file *add_file(hm_cfg *c, hm_str path, long line)
+{
+    hm_project *p = c->cur;
+    size_t i;
+
+    if (!valid_file_path(path)) {
+        cfg_err(c, line, "embedded file path must be a safe relative path");
+        return NULL;
+    }
+    for (i = 0; i < p->file_count; ++i) {
+        if (hm_str_eq_str(p->files[i].path, path)) {
+            cfg_err(c, line, "duplicate embedded file path");
+            return NULL;
+        }
+    }
+    if (p->file_count == HM_FILES_MAX) {
+        cfg_err(c, line, "too many embedded files");
+        return NULL;
+    }
+
+    hm_str_copy(p->files[p->file_count].path_buf,
+                sizeof(p->files[p->file_count].path_buf), path);
+    p->files[p->file_count].path.ptr = p->files[p->file_count].path_buf;
+    p->files[p->file_count].path.len = path.len;
+    p->files[p->file_count].line = line;
+    return &p->files[p->file_count++];
+}
+
 static int begin_project(hm_cfg *c, long line)
 {
     hm_project *p = c->out;
@@ -337,14 +391,21 @@ static int finish_project(hm_cfg *c)
                     "a 'command' project has no 'install': the command is the work");
             return -1;
         }
+        if (c->seen_files && c->seen_workdir) {
+            cfg_err(c, p->line,
+                    "'workdir' cannot be used with 'files': embedded files run in the cache");
+            return -1;
+        }
         if (p->name.len == 0) p->name = default_name(p->command);
 
-        /* Without a working directory, run where the user lives. */
-        if (p->workdir.len == 0) {
+        /* Embedded projects get a cache work directory after their identity
+         * is known. Other command projects default to where the user lives. */
+        if (p->file_count == 0 && p->workdir.len == 0) {
             p->workdir.ptr = "{{HOME}}";
             p->workdir.len = 8;
         }
-        if (expand_template(c, p->workdir, "workdir", p->workdir_path,
+        if (p->file_count == 0 &&
+            expand_template(c, p->workdir, "workdir", p->workdir_path,
                             sizeof(p->workdir_path), p->line) != 0) {
             return -1;
         }
@@ -352,6 +413,10 @@ static int finish_project(hm_cfg *c)
         p->kind = HM_KIND_URL;
         if (c->seen_workdir) {
             cfg_err(c, p->line, "'workdir' only applies to a 'command'");
+            return -1;
+        }
+        if (c->seen_files) {
+            cfg_err(c, p->line, "'files' only applies to a 'command'");
             return -1;
         }
         if (p->name.len == 0) p->name = default_name(p->url);
@@ -387,7 +452,11 @@ static void block_line(hm_cfg *c, const siml_event *ev)
         const char *line_start = ev->value.ptr;
         while (line_start > c->buf && line_start[-1] != '\n') --line_start;
         c->block_start            = line_start;
-        c->cur->install_indent    = (size_t)(ev->value.ptr - line_start);
+        if (c->block_kind == 1) {
+            c->cur->install_indent = (size_t)(ev->value.ptr - line_start);
+        } else {
+            c->block_file->content_indent = (size_t)(ev->value.ptr - line_start);
+        }
     }
     c->block_end = ev->value.ptr + ev->value.len;
 }
@@ -420,6 +489,18 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
         case SIML_EVENT_COMMENT:
             break;
 
+        case SIML_EVENT_MAPPING_ENTRY_HEADER:
+            if (c.in_files) {
+                cfg_err(&c, ev.line,
+                        "an embedded file must be a literal block scalar");
+                return -1;
+            }
+            if (c.cur != NULL && hm_str_eq(slice(ev.key), "files")) {
+                c.seen_files    = 1;
+                c.pending_files = 1;
+            }
+            break;
+
         case SIML_EVENT_DOCUMENT_START:
             /* A second document would be a second project. */
             if (c.started) {
@@ -442,6 +523,11 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
             break;
 
         case SIML_EVENT_MAPPING_START:
+            if (c.cur != NULL && c.pending_files) {
+                c.pending_files = 0;
+                c.in_files      = 1;
+                break;
+            }
             if (c.cur != NULL) {
                 cfg_err(&c, ev.line, "nested mappings are not supported");
                 return -1;
@@ -450,6 +536,10 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
             break;
 
         case SIML_EVENT_MAPPING_END:
+            if (c.in_files) {
+                c.in_files = 0;
+                break;
+            }
             if (finish_project(&c) != 0) return -1;
             break;
 
@@ -462,31 +552,49 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
                 cfg_err(&c, ev.line, "bare sequence items are not supported");
                 return -1;
             }
+            if (c.in_files) {
+                cfg_err(&c, ev.line,
+                        "an embedded file must be a literal block scalar");
+                return -1;
+            }
             if (apply_field(&c, slice(ev.key), slice(ev.value), ev.line) != 0) {
                 return -1;
             }
             break;
 
         case SIML_EVENT_BLOCK_SCALAR_START:
-            if (c.cur == NULL || !hm_str_eq(slice(ev.key), "install")) {
-                cfg_err(&c, ev.line, "only 'install' may be a block scalar");
+            if (c.cur != NULL && c.in_files) {
+                c.block_file = add_file(&c, slice(ev.key), ev.line);
+                if (c.block_file == NULL) return -1;
+                c.block_kind = 2;
+            } else if (c.cur != NULL && hm_str_eq(slice(ev.key), "install")) {
+                c.seen_install = 1;
+                c.block_kind   = 1;
+            } else {
+                cfg_err(&c, ev.line,
+                        "only 'install' and embedded files may be block scalars");
                 return -1;
             }
-            c.in_install  = 1;
             c.block_start = NULL;
             c.block_end   = NULL;
             break;
 
         case SIML_EVENT_BLOCK_SCALAR_LINE:
-            if (c.in_install) block_line(&c, &ev);
+            if (c.block_kind != 0) block_line(&c, &ev);
             break;
 
         case SIML_EVENT_BLOCK_SCALAR_END:
-            if (c.in_install && c.block_start != NULL) {
-                c.cur->install.ptr = c.block_start;
-                c.cur->install.len = (size_t)(c.block_end - c.block_start);
+            if (c.block_kind != 0 && c.block_start != NULL) {
+                if (c.block_kind == 1) {
+                    c.cur->install.ptr = c.block_start;
+                    c.cur->install.len = (size_t)(c.block_end - c.block_start);
+                } else {
+                    c.block_file->content.ptr = c.block_start;
+                    c.block_file->content.len = (size_t)(c.block_end - c.block_start);
+                }
             }
-            c.in_install = 0;
+            c.block_kind = 0;
+            c.block_file = NULL;
             break;
 
         case SIML_EVENT_STREAM_END:
@@ -513,18 +621,32 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
  * describe and the script that runs can never drift apart. */
 int hm_install_next_line(const hm_project *p, const char **cursor, hm_str *out)
 {
-    const char *end = p->install.ptr + p->install.len;
-    const char *cur = *cursor;
+    hm_embedded_file block;
+
+    block.content        = p->install;
+    block.content_indent = p->install_indent;
+    return hm_file_next_line(&block, cursor, out);
+}
+
+int hm_file_next_line(const hm_embedded_file *file, const char **cursor,
+                      hm_str *out)
+{
+    const char *end;
+    const char *cur;
     const char *nl;
     const char *eol;
     size_t      strip = 0;
 
-    if (p->install.len == 0 || cur == NULL || cur >= end) return 0;
+    if (file->content.len == 0 || file->content.ptr == NULL ||
+        *cursor == NULL) return 0;
+    end = file->content.ptr + file->content.len;
+    cur = *cursor;
+    if (cur >= end) return 0;
 
     nl  = (const char *)memchr(cur, '\n', (size_t)(end - cur));
     eol = (nl != NULL) ? nl : end;
 
-    while (strip < p->install_indent && cur + strip < eol && cur[strip] == ' ') ++strip;
+    while (strip < file->content_indent && cur + strip < eol && cur[strip] == ' ') ++strip;
 
     out->ptr = cur + strip;
     out->len = (size_t)(eol - (cur + strip));

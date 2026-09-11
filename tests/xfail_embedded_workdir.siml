@@ -1,0 +1,5 @@
+command: true
+workdir: {{HOME}}
+files:
+  main.c: |
+    content

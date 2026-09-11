@@ -1,0 +1,3 @@
+command: true
+files:
+  main.c: not-a-block

@@ -208,6 +208,8 @@ static int finish(const hm_project *p, const hm_opts *o, int rc)
 /* A command project: run it, and remember that only if it succeeded. */
 static int run_command_project(const hm_project *p, hm_opts *o, long now)
 {
+    const char *workdir = (p->file_count > 0) ? cache.workdir : p->workdir_path;
+
     if (o->check_only || o->dry_run) {
         hm_out("due      %S\n", p->name);
         hm_out_flush();
@@ -217,7 +219,10 @@ static int run_command_project(const hm_project *p, hm_opts *o, long now)
     if (!o->adopt) {
         if (o->verbose) hm_out("run      %S\n", p->name);
         hm_out_flush();
-        if (hm_command_run(p) != 0) {
+        if (p->file_count > 0 && hm_materialize_files(p, workdir) != 0) {
+            return HM_EXIT_FAILED;
+        }
+        if (hm_command_run(p, workdir) != 0) {
             /* Nothing is written: the last run stays whatever it was, so the
              * next invocation tries again. */
             return HM_EXIT_FAILED;

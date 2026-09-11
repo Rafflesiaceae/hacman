@@ -1,0 +1,1 @@
+hacman: tests/xfail_embedded_workdir.siml:1: 'workdir' cannot be used with 'files': embedded files run in the cache

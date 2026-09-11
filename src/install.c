@@ -10,9 +10,11 @@
 #include "hacman.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -22,6 +24,109 @@ static const char *tmpdir(void)
 {
     const char *dir = getenv("TMPDIR");
     return (dir != NULL && dir[0] != '\0') ? dir : "/tmp";
+}
+
+static int mkdir_p(const char *path)
+{
+    char   copy[HM_PATH_MAX * 2 + 2];
+    size_t i, n = strlen(path);
+
+    if (n == 0 || n >= sizeof(copy)) {
+        fprintf(stderr, "hacman: embedded-file directory path is too long\n");
+        return -1;
+    }
+    memcpy(copy, path, n + 1);
+
+    for (i = 1; i <= n; ++i) {
+        if (copy[i] == '/' || copy[i] == '\0') {
+            char saved = copy[i];
+            copy[i] = '\0';
+            if (mkdir(copy, 0700) != 0 && errno != EEXIST) {
+                fprintf(stderr, "hacman: %s: cannot create directory: %s\n",
+                        copy, strerror(errno));
+                return -1;
+            }
+            copy[i] = saved;
+        }
+    }
+    return 0;
+}
+
+static int write_embedded_file(const hm_embedded_file *file,
+                               const char *workdir)
+{
+    char target[HM_PATH_MAX * 2 + 2];
+    char parent[HM_PATH_MAX * 2 + 2];
+    char temp[HM_PATH_MAX * 2 + 32];
+    const char *cursor = file->content.ptr;
+    hm_str line;
+    FILE *fp;
+    int fd;
+    size_t i;
+
+    if ((size_t)snprintf(target, sizeof(target), "%s/%.*s", workdir,
+                         (int)file->path.len, file->path.ptr) >= sizeof(target)) {
+        fprintf(stderr, "hacman: embedded-file path is too long\n");
+        return -1;
+    }
+    memcpy(parent, target, strlen(target) + 1);
+    for (i = strlen(parent); i > 0; --i) {
+        if (parent[i] == '/') {
+            parent[i] = '\0';
+            break;
+        }
+    }
+    if (mkdir_p(parent) != 0) return -1;
+
+    if ((size_t)snprintf(temp, sizeof(temp), "%s.tmp.%ld", target,
+                         (long)getpid()) >= sizeof(temp)) {
+        fprintf(stderr, "hacman: embedded-file temporary path is too long\n");
+        return -1;
+    }
+    fd = open(temp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "hacman: %s: cannot create embedded file: %s\n",
+                temp, strerror(errno));
+        return -1;
+    }
+    fp = fdopen(fd, "w");
+    if (fp == NULL) {
+        fprintf(stderr, "hacman: %s: fdopen failed\n", temp);
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
+    while (hm_file_next_line(file, &cursor, &line)) {
+        if (fwrite(line.ptr, 1, line.len, fp) != line.len || fputc('\n', fp) == EOF) {
+            fprintf(stderr, "hacman: %s: cannot write embedded file\n", temp);
+            fclose(fp);
+            unlink(temp);
+            return -1;
+        }
+    }
+    if (fclose(fp) != 0) {
+        fprintf(stderr, "hacman: %s: cannot write embedded file\n", temp);
+        unlink(temp);
+        return -1;
+    }
+    if (rename(temp, target) != 0) {
+        fprintf(stderr, "hacman: %s: cannot install embedded file: %s\n",
+                target, strerror(errno));
+        unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+int hm_materialize_files(const hm_project *p, const char *workdir)
+{
+    size_t i;
+
+    if (mkdir_p(workdir) != 0) return -1;
+    for (i = 0; i < p->file_count; ++i) {
+        if (write_embedded_file(&p->files[i], workdir) != 0) return -1;
+    }
+    return 0;
 }
 
 /* Creates $TMPDIR/hacman-<what>-XXXXXX and returns its FILE*, storing the
@@ -183,7 +288,7 @@ cleanup:
  * No temporary file and no script: a single command is already the simplest
  * thing a shell can be handed. The caller records the run only if this
  * returns 0, so a failing command is retried on the next run. */
-int hm_command_run(const hm_project *p)
+int hm_command_run(const hm_project *p, const char *workdir)
 {
     char  command[HM_COMMAND_MAX + 1];
     char  name[HM_NAME_MAX + 1];
@@ -201,13 +306,13 @@ int hm_command_run(const hm_project *p)
         return -1;
     }
     if (pid == 0) {
-        if (chdir(p->workdir_path) != 0) {
+        if (chdir(workdir) != 0) {
             fprintf(stderr, "hacman: %s: cannot enter %s: %s\n",
-                    name, p->workdir_path, strerror(errno));
+                    name, workdir, strerror(errno));
             _exit(127);
         }
         setenv("HACMAN_NAME", name, 1);
-        setenv("HACMAN_WORKDIR", p->workdir_path, 1);
+        setenv("HACMAN_WORKDIR", workdir, 1);
 
         execl(HM_SHELL, HM_SHELL, "-c", command, (char *)NULL);
         fprintf(stderr, "hacman: cannot execute %s: %s\n", HM_SHELL, strerror(errno));

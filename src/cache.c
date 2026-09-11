@@ -30,6 +30,35 @@
 static char record_buf[HM_RECORD_MAX];
 static char cache_dir_buf[HM_PATH_MAX + 1];
 
+static unsigned long long hash_bytes(unsigned long long h,
+                                     const char *data, size_t len)
+{
+    size_t i;
+    for (i = 0; i < len; ++i) {
+        h ^= (unsigned char)data[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static void embedded_hash(const hm_project *p, char out17[17])
+{
+    static const char hex[] = "0123456789abcdef";
+    unsigned long long h = 1469598103934665603ULL;
+    size_t i;
+
+    for (i = 0; i < p->file_count; ++i) {
+        const hm_embedded_file *f = &p->files[i];
+        const char separator = '\0';
+        h = hash_bytes(h, f->path.ptr, f->path.len);
+        h = hash_bytes(h, &separator, 1);
+        h = hash_bytes(h, f->content.ptr, f->content.len);
+        h = hash_bytes(h, &separator, 1);
+    }
+    for (i = 0; i < 16; ++i) out17[i] = hex[(h >> (60 - 4 * i)) & 0xF];
+    out17[16] = '\0';
+}
+
 /* Appends `s`, replacing anything that would break the record layout. */
 static size_t append_clean(char *dst, size_t o, size_t cap,
                            const char *s, size_t len)
@@ -84,16 +113,23 @@ const char *hm_cache_dir(const char *override)
 }
 
 /* Builds the identity string: everything that makes this record *this* record,
- * and deliberately nothing else. `name` is display text and is left out, so
- * renaming a project keeps its history, and two files watching the same URL -
- * or running the same command in the same directory - share one record. */
+ * and deliberately nothing else. `name` is display text and is left out. For
+ * embedded commands, a digest of every path and content replaces the normal
+ * workdir: it both avoids an identity/workdir cycle and makes edits rebuild. */
 static void build_identity(const hm_project *p, char *out, size_t cap)
 {
     size_t o = 0;
 
     if (p->kind == HM_KIND_COMMAND) {
         o = append_str(out, o, cap, "cmd ");
-        o = append_str(out, o, cap, p->workdir_path);
+        if (p->file_count > 0) {
+            char files_hash[17];
+            embedded_hash(p, files_hash);
+            o = append_str(out, o, cap, "files:");
+            o = append_str(out, o, cap, files_hash);
+        } else {
+            o = append_str(out, o, cap, p->workdir_path);
+        }
         o = append_str(out, o, cap, " $ ");
         o = append_clean(out, o, cap, p->command.ptr, p->command.len);
     } else {
@@ -123,6 +159,7 @@ void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir)
     c->last_check = 0;
     c->last_change = 0;
     c->known      = 0;
+    c->workdir[0] = '\0';
 
     build_identity(p, c->identity, sizeof(c->identity));
     hm_hash_hex(c->identity, strlen(c->identity), hash);
@@ -136,6 +173,14 @@ void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir)
     o = append_str(c->path, o, sizeof(c->path), "/");
     o = append_str(c->path, o, sizeof(c->path), c->key);
     c->path[o] = '\0';
+
+    if (p->file_count > 0) {
+        o = append_str(c->workdir, 0, sizeof(c->workdir), dir);
+        o = append_str(c->workdir, o, sizeof(c->workdir), "/");
+        o = append_str(c->workdir, o, sizeof(c->workdir), c->key);
+        o = append_str(c->workdir, o, sizeof(c->workdir), ".work");
+        c->workdir[o] = '\0';
+    }
 }
 
 /* Splits off the next tab-separated field of a record line. */

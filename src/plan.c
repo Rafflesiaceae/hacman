@@ -80,6 +80,27 @@ static void print_install(const hm_project *p)
     }
 }
 
+static void print_files(const hm_project *p, const hm_cache *c)
+{
+    size_t i;
+
+    if (p->file_count == 0) return;
+    hm_out("files-dir: %s\n", c->workdir);
+    hm_out("files-written: before command execution\n");
+    hm_out("files:\n");
+    for (i = 0; i < p->file_count; ++i) {
+        const hm_embedded_file *file = &p->files[i];
+        const char *cursor = file->content.ptr;
+        hm_str line;
+
+        hm_out("  %S: |\n", file->path);
+        while (hm_file_next_line(file, &cursor, &line)) {
+            if (line.len == 0) hm_out("\n");
+            else hm_out("    %S\n", line);
+        }
+    }
+}
+
 void hm_plan_print(const hm_project *p, const hm_cache *c)
 {
     char sched[32];
@@ -89,9 +110,11 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
     hm_out("name: %S\n", p->name);
     if (p->kind == HM_KIND_COMMAND) {
         hm_out("command: %S\n", p->command);
-        hm_out("workdir: %s\n", p->workdir_path);
+        hm_out("workdir: %s\n",
+               (p->file_count > 0) ? c->workdir : p->workdir_path);
         hm_out("run: %s -c <command>, in workdir\n", HM_SHELL);
         hm_out("record-when: the command exits 0\n");
+        print_files(p, c);
     } else {
         hm_out("url: %S\n", p->url);
         print_check(p);

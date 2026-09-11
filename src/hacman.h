@@ -19,6 +19,8 @@
 #define HM_PATH_MAX     1023                  /* working directory, cache dir */
 #define HM_KEY_MAX      31                    /* cache file name             */
 #define HM_IDENTITY_MAX 4095                  /* what a cache key stands for  */
+#define HM_FILES_MAX    64                    /* files embedded in one project */
+#define HM_FILE_PATH_MAX 128                  /* SIML mapping-key limit       */
 
 /* A borrowed, non-NUL-terminated string. Config values are slices into the
  * single buffer the .siml input was read into; nothing is ever copied. */
@@ -47,6 +49,18 @@ typedef enum {
     HM_CHECK_VERSION    /* GET, compare a version substring from the body */
 } hm_check_kind;
 
+/* One text file embedded below a command project's cache work directory.
+ * The short SIML mapping key is copied because parser key slices are
+ * transient. Block content borrows the input buffer and stays indented until
+ * the command is due and the file is actually materialised. */
+typedef struct {
+    char   path_buf[HM_FILE_PATH_MAX + 1];
+    hm_str path;
+    hm_str content;
+    size_t content_indent;
+    long   line;
+} hm_embedded_file;
+
 /* One project - and an input file describes exactly one of them. */
 typedef struct {
     hm_project_kind kind;
@@ -68,6 +82,8 @@ typedef struct {
     char          bin_path[HM_PATH_MAX + 1];
     hm_str        install;         /* raw block-scalar region, still indented */
     size_t        install_indent;  /* columns to strip from install lines  */
+    hm_embedded_file files[HM_FILES_MAX];
+    size_t        file_count;
     long          line;            /* line the project started on          */
 } hm_project;
 
@@ -98,9 +114,10 @@ long hm_read_all(const char *path, char *buf, size_t cap);
 
 /* --- config.c ----------------------------------------------------------- */
 
-/* Parses `len` bytes of SIML describing exactly one project into `out`. All
- * resulting slices point into `buf`, which must stay alive for as long as the
- * project is used. Returns 0, or -1 on error (message already printed). */
+/* Parses `len` bytes of SIML describing exactly one project into `out`.
+ * Value slices point into `buf`, which must stay alive for as long as the
+ * project is used; transient embedded-file keys are copied. Returns 0, or -1
+ * on error (message already printed). */
 int hm_config_parse(const char *buf, size_t len, const char *origin,
                     hm_project *out);
 
@@ -110,6 +127,10 @@ void        hm_sched_describe(const hm_project *p, char *out, size_t cap);
 /* Walks the install script one de-indented line at a time. Initialise
  * `*cursor` to p->install.ptr; returns 0 once the block is exhausted. */
 int hm_install_next_line(const hm_project *p, const char **cursor, hm_str *out);
+
+/* Walks an embedded file one de-indented line at a time. */
+int hm_file_next_line(const hm_embedded_file *file, const char **cursor,
+                      hm_str *out);
 
 /* --- plan.c ------------------------------------------------------------- */
 
@@ -130,14 +151,14 @@ void hm_plan_print(const hm_project *p, const struct hm_cache_s *c);
  * updates.
  *
  * A record is addressed by what it stands for, never by which file mentioned
- * it: the identity of a URL project is its URL and check scheme, and the
- * identity of a command project is its command and working directory. Two
- * input files that describe the same command in the same directory therefore
- * share one last-run, however they are named. */
+ * it: a URL identity contains its URL and check scheme; a command identity
+ * contains its command plus either its working directory or its embedded-file
+ * digest. */
 typedef struct hm_cache_s {
     char key[HM_KEY_MAX + 1];            /* file name within the cache dir  */
     char identity[HM_IDENTITY_MAX + 1];  /* what that name stands for       */
     char path[HM_PATH_MAX + 1];          /* dir + "/" + key                 */
+    char workdir[HM_PATH_MAX + 1];       /* embedded-file command directory */
     char mark[HM_MARK_MAX + 1];          /* last observed etag/hash/version */
     long last_check;                     /* epoch seconds, 0 = never        */
     long last_change;                    /* epoch seconds, 0 = never        */
@@ -178,7 +199,11 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
 
 /* Slow path for HM_KIND_COMMAND: runs `command` with the shell, in `workdir`.
  * Returns 0 on success, -1 if the command failed or could not be run. */
-int hm_command_run(const hm_project *p);
+int hm_command_run(const hm_project *p, const char *workdir);
+
+/* Writes every embedded file below `workdir`, creating directories as needed.
+ * Existing files are replaced atomically. */
+int hm_materialize_files(const hm_project *p, const char *workdir);
 
 /* Replaces this process with the project's bin-path, passing `argv` (whose
  * first slot this fills in). Only ever returns on failure, with the exit code

@@ -171,6 +171,22 @@ contains "missing file argument is explained" "no project file given"
 
 # --- check and install pipeline -----------------------------------------
 
+# Embedded files are materialised below the cache before a command starts,
+# and that directory is both its cwd and HACMAN_WORKDIR.
+embedded_cache="$TMP/cache-embedded"
+expect "embedded files stay untouched in dry-run" 10 \
+    "$BIN" --dry-run --force --cache "$embedded_cache" tests/embedded_files.siml
+tests=$((tests + 1))
+if find "$embedded_cache" -name '*.work' -print -quit 2>/dev/null | grep -q .; then
+    fail "dry-run created an embedded-file work directory"
+else
+    echo "[test] ok: dry-run creates no embedded files"
+fi
+
+expect "embedded files exist before command execution" 0 \
+    "$BIN" --force --cache "$embedded_cache" tests/embedded_files.siml
+contains "embedded command completed" "embedded-ready"
+
 payload="$TMP/payload.txt"
 cache="$TMP/cache"
 echo "version 1.0.0" >"$payload"
