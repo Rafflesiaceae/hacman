@@ -37,16 +37,16 @@ static int hm_read_line(void *userdata, const char **out_line, size_t *out_len)
     start = r->buf + r->pos;
     nl    = (const char *)memchr(start, '\n', r->len - r->pos);
     if (nl == NULL) {
-        /* Final line without LF: SIML rejects this, signalled by rc == 2. */
+        /* SIML diagnoses a non-empty final line without an LF. */
         *out_line = start;
         *out_len  = r->len - r->pos;
         r->pos    = r->len;
-        return 2;
+        return 1;
     }
 
     *out_line = start;
-    *out_len  = (size_t)(nl - start);
-    r->pos   += *out_len + 1;
+    *out_len  = (size_t)(nl - start) + 1;
+    r->pos   += *out_len;
     return 1;
 }
 

@@ -42,16 +42,10 @@ if get_option('static')
   endif
 endif
 
-# The vendored SIML parser is header-only; siml.c is the single translation
-# unit that instantiates it.
+# The vendored SIML parser is implemented directly by siml.h, which config.c
+# includes as its single translation unit.
 siml_inc = include_directories('vendor/siml')
-siml_lib = static_library('siml', 'vendor/siml/siml.c',
-  include_directories: siml_inc,
-  c_args: ['-w'],  # vendored code, built as-is
-  override_options: ['c_std=c89'],
-)
 siml_dep = declare_dependency(
-  link_with: siml_lib,
   include_directories: siml_inc,
 )
 
