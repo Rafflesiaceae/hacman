@@ -1,3 +1,4 @@
+#!/usr/bin/env hacman
 # A plain "did this URL change at all" watch: only the server's validators are
 # compared, so nothing but headers is transferred.
 name: nixpkgs-unstable

@@ -1,3 +1,4 @@
+#!/usr/bin/env hacman
 # `check: hash` fingerprints the whole body - use it for URLs that serve no
 # useful validators. The downloaded body is handed to the script as
 # $HACMAN_RESPONSE, so it does not have to be fetched twice.

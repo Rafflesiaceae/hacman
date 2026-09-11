@@ -1,3 +1,4 @@
+#!/usr/bin/env hacman
 # A complete C project carried by one .siml file. Run it with:
 #   hacman --force examples/hello-c.siml
 name: embedded-hello

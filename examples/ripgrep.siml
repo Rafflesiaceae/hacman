@@ -1,3 +1,4 @@
+#!/usr/bin/env hacman
 # One project per file - see README.md.
 # hacman resolves this file with `hacman --plan examples/ripgrep.siml`.
 name: ripgrep

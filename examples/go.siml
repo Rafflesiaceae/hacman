@@ -1,3 +1,4 @@
+#!/usr/bin/env hacman
 # A single-line install script is fine too, as is a schedule that only ever
 # runs under `hacman --force`.
 name: go

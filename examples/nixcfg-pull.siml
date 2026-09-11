@@ -1,3 +1,4 @@
+#!/usr/bin/env hacman
 # A command project: no URL, no install script - the command *is* the work.
 # hacman only runs it when the schedule allows, and only records the run if the
 # command succeeded, so a failure is retried on the next invocation.

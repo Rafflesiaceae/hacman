@@ -1,3 +1,4 @@
+#!/usr/bin/env hacman
 # hacman as a shim: keep the toolchain fresh, then become cargo.
 # Put this behind an alias or a wrapper script:
 #   alias cargo='hacman ~/.config/hacman/cargo-shim.siml'
