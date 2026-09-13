@@ -356,7 +356,7 @@ record-when: the command exits 0
 schedule: 12h
 check-when: 43200 seconds after the last run
 cache-identity: cmd /home/you/workspace/nixcfg $ git pull --ff-only && nix flake update
-cache-file: /home/you/.cache/hacman/cmd-3cac4986c0e7422f
+cache-file: /home/you/.cache/hacman/cmd-e1afb450457ef858
 ```
 
 The plan is itself SIML, and its `install:` block is exactly what the installer
@@ -435,7 +435,7 @@ can explicitly relocate the entire tree. It contains one tiny record per
 watched thing:
 
 ```
-$ cat ~/.cache/hacman/cmd-3cac4986c0e7422f
+$ cat ~/.cache/hacman/cmd-e1afb450457ef858
 #hacman-cache 1 cmd /home/you/workspace/nixcfg $ git pull --ff-only
 1786527549	1786527549
 ```
