@@ -1,0 +1,30 @@
+#!/usr/bin/env hacman
+# Keep the downloaded Koca binary for normal invocations and ask GitHub for a
+# newer release no more often than the configurable schedule below.
+name: koca
+url: https://api.github.com/repos/koca-build/koca/releases/latest
+check: version
+version-prefix: "tag_name": "
+version-suffix: "
+schedule: 1h
+bin-path: {{HOME}}/.local/bin/koca
+install: |
+  set -eu
+
+  # Koca names its release architectures differently from uname on Linux.
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=x64 ;;
+    aarch64|arm64) release_arch=arm64 ;;
+    *)
+      echo "koca: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  asset="koca-linux-$release_arch"
+  download_url="https://github.com/koca-build/koca/releases/download/$HACMAN_VERSION/$asset"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+
+  curl -fsSL "$download_url" -o "$tmp/$asset"
+  install -Dm755 "$tmp/$asset" "$HOME/.local/bin/koca"
