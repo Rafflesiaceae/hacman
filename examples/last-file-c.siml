@@ -1,6 +1,6 @@
 #!/usr/bin/env hacman
 # A complete last-file utility carried by one .siml file. Run it with:
-#   ./examples/last-file.siml [PATH ...]
+#   ./examples/last-file-c.siml [PATH ...]
 name: embedded-last-file
 command: meson setup build && meson compile -C build
 bin-path: build/last-file
