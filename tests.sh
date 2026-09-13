@@ -71,6 +71,16 @@ for siml in tests/*.siml; do
     got="$(plan "$siml" 2>&1)"
     got_rc=$?
 
+    # Embedded cache keys hash canonical source paths, which necessarily vary
+    # with the checkout location. Preserve exact golden output for every other
+    # field while giving those path-derived keys a portable spelling.
+    if [[ "$got" == *"files-dir: "* ]]; then
+        got="$(printf '%s\n' "$got" |
+            sed -E \
+                -e 's/cmd-[0-9a-f]{16}/cmd-<source-path-hash>/g' \
+                -e 's#source:.* files:#source:<input-path> files:#')"
+    fi
+
     if [ "$GOLD" = "update" ]; then
         printf '%s\n' "$got" >"$gold"
         echo "[test] updated: $gold"
@@ -221,8 +231,8 @@ contains "embedded program completed" "embedded-prog"
 contains "embedded program receives option-looking arguments" "arg:--help"
 contains "embedded program preserves argument boundaries" "arg:two words"
 
-# Embedded command projects are content-addressed builds. Even `schedule:
-# always` must reuse the successful build until an input changes.
+# Embedded command projects fingerprint their inputs. Even `schedule: always`
+# must reuse the successful build until an input changes.
 cat >"$TMP/embedded-cached.siml" <<'EOF'
 name: embedded-cached
 command: echo built >> build.log && chmod +x runner
@@ -248,17 +258,40 @@ else
     fail "unchanged embedded command was rerun"
 fi
 
-# Changing an embedded input selects a new content-addressed work directory
-# and performs exactly one new build there.
-sed 's/cached-v1/cached-v2/' "$TMP/embedded-cached.siml" >"$TMP/embedded-changed.siml"
+# Changing an embedded input clears and reuses its path-addressed work
+# directory, including removal of files left by the previous build.
+cached_workdir="$(find "$cached_build_dir" -maxdepth 1 -type d -name '*.work' -print -quit)"
+touch "$cached_workdir/stale-output"
+sed 's/cached-v1/cached-v2/' "$TMP/embedded-cached.siml" >"$TMP/embedded-cached.next"
+mv "$TMP/embedded-cached.next" "$TMP/embedded-cached.siml"
 expect "changed embedded input builds again" 0 \
-    "$BIN" --cache "$cached_build_dir" "$TMP/embedded-changed.siml"
+    "$BIN" --cache "$cached_build_dir" "$TMP/embedded-cached.siml"
 contains "changed embedded executable runs" "cached-v2"
 tests=$((tests + 1))
-if [ "$(find "$cached_build_dir" -name build.log -exec cat {} \; | wc -l)" = "2" ]; then
-    echo "[test] ok: changed embedded input produced one new build"
+changed_workdir="$(find "$cached_build_dir" -maxdepth 1 -type d -name '*.work' -print -quit)"
+if [ "$changed_workdir" = "$cached_workdir" ] && \
+    [ "$(find "$cached_build_dir" -maxdepth 1 -type d -name '*.work' | wc -l)" = "1" ]; then
+    echo "[test] ok: changed embedded input reused its work directory"
 else
-    fail "changed embedded input did not produce exactly one new build"
+    fail "changed embedded input did not reuse exactly one work directory"
+fi
+tests=$((tests + 1))
+if [ ! -e "$changed_workdir/stale-output" ] && [ "$(cat "$changed_workdir/build.log")" = "built" ]; then
+    echo "[test] ok: changed embedded input cleared stale build outputs"
+else
+    fail "changed embedded input left stale build outputs"
+fi
+
+# Identical definitions at different source paths own separate records and
+# workspaces; changing one can therefore never clear the other's build.
+cp "$TMP/embedded-cached.siml" "$TMP/embedded-copy.siml"
+expect "copied embedded input builds separately" 0 \
+    "$BIN" --cache "$cached_build_dir" "$TMP/embedded-copy.siml"
+tests=$((tests + 1))
+if [ "$(find "$cached_build_dir" -maxdepth 1 -type d -name '*.work' | wc -l)" = "2" ]; then
+    echo "[test] ok: source paths select separate work directories"
+else
+    fail "different source paths shared an embedded work directory"
 fi
 
 payload="$TMP/payload.txt"

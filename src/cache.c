@@ -5,11 +5,11 @@
  *   #hacman-cache 1 <identity>
  *   <last_check>\t<last_change>\t<mark>
  *
- * The identity line is what makes the cache addressable by *meaning* rather
- * than by file name: the file name is only a hash of that identity, and a
- * record whose identity does not match is ignored rather than trusted, so a
- * hash collision can never make two different things share a last-run. It
- * doubles as a label when reading the cache directory by hand.
+ * The identity line protects every cache lookup: a record whose identity does
+ * not match is ignored rather than trusted, so a hash collision can never make
+ * two different things share a last-run. Most file names hash that identity;
+ * embedded projects instead hash their input path so edits reuse one record
+ * and work directory. The identity still doubles as a readable label.
  *
  * One file per record keeps the fast path down to a single small read, and
  * lets several hacman runs - one per project file - proceed in parallel
@@ -112,9 +112,10 @@ const char *hm_cache_dir(const char *override)
 
 /* Builds the identity string: everything that makes this record *this* record,
  * and deliberately nothing else. `name` is display text and is left out. For
- * embedded commands, a digest of every path and content replaces the normal
- * workdir: it both avoids an identity/workdir cycle and makes edits rebuild. */
-static void build_identity(const hm_project *p, char *out, size_t cap)
+ * embedded commands, the source path and a digest of every embedded path and
+ * content replace the normal workdir: this both avoids an identity/workdir
+ * cycle and makes edits rebuild. */
+static void build_identity(const hm_project *p, const char *source_path, char *out, size_t cap)
 {
     size_t o = 0;
 
@@ -122,6 +123,12 @@ static void build_identity(const hm_project *p, char *out, size_t cap)
         o = append_str(out, o, cap, "cmd ");
         if (p->file_count > 0) {
             char files_hash[17];
+
+            if (source_path != NULL) {
+                o = append_str(out, o, cap, "source:");
+                o = append_clean(out, o, cap, source_path, strlen(source_path));
+                o = append_str(out, o, cap, " ");
+            }
             embedded_hash(p, files_hash);
             o = append_str(out, o, cap, "files:");
             o = append_str(out, o, cap, files_hash);
@@ -148,7 +155,7 @@ static void build_identity(const hm_project *p, char *out, size_t cap)
     out[o] = '\0';
 }
 
-void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir)
+void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir, const char *source_path)
 {
     char   hash[17];
     size_t o = 0;
@@ -159,8 +166,16 @@ void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir)
     c->known       = 0;
     c->workdir[0]  = '\0';
 
-    build_identity(p, c->identity, sizeof(c->identity));
-    hm_hash_hex(c->identity, strlen(c->identity), hash);
+    build_identity(p, source_path, c->identity, sizeof(c->identity));
+    /* A file-backed embedded project owns one stable cache location. Its
+     * changing content identity remains inside that record and invalidates it
+     * on the next load. Standard input has no stable path, so it keeps the
+     * content-addressed fallback. */
+    if (p->file_count > 0 && source_path != NULL) {
+        hm_hash_hex(source_path, strlen(source_path), hash);
+    } else {
+        hm_hash_hex(c->identity, strlen(c->identity), hash);
+    }
 
     o = append_str(c->key, 0, sizeof(c->key), (p->kind == HM_KIND_COMMAND) ? "cmd-" : "url-");
     o = append_str(c->key, o, sizeof(c->key), hash);

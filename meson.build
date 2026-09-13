@@ -12,8 +12,13 @@ project('hacman', 'c',
 
 cc = meson.get_compiler('c')
 
-# hacman is a POSIX program: it needs fork/execvp, clock/time and mkstemp.
-add_project_arguments('-D_POSIX_C_SOURCE=200809L', language: 'c')
+# hacman is a POSIX/XSI program: it needs fork/execvp, clock/time, mkstemp and
+# realpath's allocation form for canonical input paths.
+add_project_arguments(
+  '-D_POSIX_C_SOURCE=200809L',
+  '-D_XOPEN_SOURCE=700',
+  language: 'c',
+)
 
 # Startup cost is a feature here (see README.md), so the binary is trimmed
 # aggressively: unused sections are dropped and no build-id note is emitted.

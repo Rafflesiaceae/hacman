@@ -403,7 +403,7 @@ static int expand_template(hm_cfg *c, hm_str tpl, const char *what, char *out, s
 
     /* Ordinary paths must not change meaning with the caller's cwd. An
      * embedded bin-path is the exception: it is resolved later against the
-     * identity-derived cache work directory. */
+     * source-derived cache work directory. */
     if (require_absolute && out[0] != '/') {
         hm_err("hacman: %s:%d: %s must expand to an absolute path\n", c->origin, line, what);
         return -1;
@@ -452,7 +452,7 @@ static int finish_project(hm_cfg *c)
         }
         if (p->name.len == 0) p->name = default_name(p->command);
 
-        /* Embedded projects get a cache work directory after their identity
+        /* Embedded projects get a cache work directory after their source path
          * is known. Other command projects default to where the user lives. */
         if (p->file_count == 0 && p->workdir.len == 0) {
             p->workdir.ptr = "{{HOME}}";

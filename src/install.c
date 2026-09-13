@@ -9,6 +9,7 @@
 
 #include "hacman.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -49,6 +50,85 @@ static int mkdir_p(const char *path)
         }
     }
     return 0;
+}
+
+/* Removes one tree bottom-up. lstat() ensures a symlink below the cache is
+ * unlinked as an entry rather than followed into an unrelated directory. */
+static int remove_tree(const char *path)
+{
+    struct stat st;
+
+    if (lstat(path, &st) != 0) {
+        if (errno == ENOENT) return 0;
+        fprintf(stderr, "hacman: %s: cannot inspect stale work path: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    if (S_ISDIR(st.st_mode)) {
+        struct dirent *entry;
+        DIR           *dir = opendir(path);
+
+        if (dir == NULL) {
+            fprintf(stderr, "hacman: %s: cannot open stale work directory: %s\n", path,
+                    strerror(errno));
+            return -1;
+        }
+        errno = 0;
+        while ((entry = readdir(dir)) != NULL) {
+            char  *child;
+            size_t path_len, name_len;
+            int    rc;
+
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+            path_len = strlen(path);
+            name_len = strlen(entry->d_name);
+            child    = (char *)malloc(path_len + 1 + name_len + 1);
+            if (child == NULL) {
+                fprintf(stderr, "hacman: cannot allocate a stale work path\n");
+                closedir(dir);
+                return -1;
+            }
+            memcpy(child, path, path_len);
+            child[path_len] = '/';
+            memcpy(child + path_len + 1, entry->d_name, name_len + 1);
+            rc = remove_tree(child);
+            free(child);
+            if (rc != 0) {
+                closedir(dir);
+                return -1;
+            }
+            errno = 0;
+        }
+        if (errno != 0) {
+            int saved = errno;
+            closedir(dir);
+            fprintf(stderr, "hacman: %s: cannot read stale work directory: %s\n", path,
+                    strerror(saved));
+            return -1;
+        }
+        if (closedir(dir) != 0) {
+            fprintf(stderr, "hacman: %s: cannot close stale work directory: %s\n", path,
+                    strerror(errno));
+            return -1;
+        }
+        if (rmdir(path) != 0) {
+            fprintf(stderr, "hacman: %s: cannot remove stale work directory: %s\n", path,
+                    strerror(errno));
+            return -1;
+        }
+        return 0;
+    }
+
+    if (unlink(path) != 0) {
+        fprintf(stderr, "hacman: %s: cannot remove stale work file: %s\n", path, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+int hm_workdir_reset(const char *workdir)
+{
+    return remove_tree(workdir);
 }
 
 static int write_embedded_file(const hm_embedded_file *file, const char *workdir)

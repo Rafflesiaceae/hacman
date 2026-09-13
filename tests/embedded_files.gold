@@ -1,9 +1,9 @@
 name: embedded
 command: test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready
-workdir: /home/hacman-test/.cache/hacman/cmd-af22cee75dcd5dad.work
+workdir: /home/hacman-test/.cache/hacman/cmd-<source-path-hash>.work
 run: /bin/sh -c <command>, in workdir
 record-when: the command exits 0
-files-dir: /home/hacman-test/.cache/hacman/cmd-af22cee75dcd5dad.work
+files-dir: /home/hacman-test/.cache/hacman/cmd-<source-path-hash>.work
 files-written: before command execution
 files:
   main.c: |
@@ -13,7 +13,8 @@ files:
     }
   message.txt: |
     built before the command
-cache-policy: command and embedded-file contents
+cache-policy: input path, command, and embedded-file contents
+workdir-policy: stable per input path, cleared when inputs change
 check-when: inputs change, cached executable is missing, or with --force
-cache-identity: cmd files:e2d7338fb2fdd7f8 $ test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready
-cache-file: /home/hacman-test/.cache/hacman/cmd-af22cee75dcd5dad
+cache-identity: cmd source:<input-path> files:e2d7338fb2fdd7f8 $ test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready
+cache-file: /home/hacman-test/.cache/hacman/cmd-<source-path-hash>

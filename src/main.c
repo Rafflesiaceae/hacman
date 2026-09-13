@@ -19,6 +19,7 @@
 
 #include "hacman.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -195,9 +196,9 @@ static int is_due(const hm_project *p, const hm_cache *c, long now, const hm_opt
 
     if (o->force) return 1;
 
-    /* Embedded projects are immutable, content-addressed builds: their cache
-     * identity already changes with the command, file paths, or file contents.
-     * A successful record therefore means there is no setup work to repeat.
+    /* An embedded project's record has a stable path but an identity that
+     * changes with the command, file paths, or file contents. A successful
+     * matching record therefore means there is no setup work to repeat.
      * Rebuild a missing executable instead of handing an invalid cache entry
      * to exec(), while projects without bin-path retain useful --adopt
      * semantics based on the record alone. */
@@ -275,8 +276,11 @@ static int run_command_project(const hm_project *p, hm_opts *o, long now)
     if (!o->adopt) {
         if (o->verbose) hm_out("run      %S\n", p->name);
         hm_out_flush();
-        if (p->file_count > 0 && hm_materialize_files(p, workdir) != 0) {
-            return HM_EXIT_FAILED;
+        if (p->file_count > 0) {
+            /* A non-matching or absent record means this stable workspace may
+             * contain outputs from different inputs or an interrupted build. */
+            if (!cache.known && hm_workdir_reset(workdir) != 0) return HM_EXIT_FAILED;
+            if (hm_materialize_files(p, workdir) != 0) return HM_EXIT_FAILED;
         }
         if (hm_command_run(p, workdir) != 0) {
             /* Nothing is written: the last run stays whatever it was, so the
@@ -295,6 +299,7 @@ int main(int argc, char **argv)
     hm_opts           o;
     const hm_project *p = &project;
     const char       *cache_dir;
+    char             *source_path = NULL;
     hm_check_result   res;
     char              old_mark[HM_MARK_MAX + 1];
     long              len, now, wait = 0;
@@ -326,14 +331,31 @@ int main(int argc, char **argv)
         return HM_EXIT_USAGE;
     }
 
-    /* The cache record is addressed by what the project *is*, so this also
-     * settles which record two different files share. */
+    /* A canonical input path gives an embedded project one workspace across
+     * content changes. realpath() also makes relative and symlinked spellings
+     * of the same input agree. Standard input has no path and retains the
+     * content-addressed fallback. */
+    if (project.file_count > 0 && strcmp(o.file, "-") != 0) {
+        source_path = realpath(o.file, NULL);
+        if (source_path == NULL) {
+            hm_err("hacman: %s: cannot resolve input path\n", o.file);
+            return HM_EXIT_USAGE;
+        }
+        if (strlen(source_path) > HM_PATH_MAX) {
+            hm_err("hacman: %s: canonical input path is too long\n", o.file);
+            free(source_path);
+            return HM_EXIT_USAGE;
+        }
+    }
+
     cache_dir = hm_cache_dir(o.cache_dir);
     if (cache_dir == NULL) {
+        free(source_path);
         hm_err("hacman: HOME is not set; use --cache or HACMAN_CACHE\n");
         return HM_EXIT_USAGE;
     }
-    hm_cache_init(&cache, p, cache_dir);
+    hm_cache_init(&cache, p, cache_dir, source_path);
+    free(source_path);
     if (resolve_embedded_bin(&project, &cache, o.file) != 0) {
         return HM_EXIT_USAGE;
     }

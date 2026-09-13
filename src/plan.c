@@ -119,7 +119,8 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
         print_check(p);
     }
     if (p->file_count > 0) {
-        hm_out("cache-policy: command and embedded-file contents\n");
+        hm_out("cache-policy: input path, command, and embedded-file contents\n");
+        hm_out("workdir-policy: stable per input path, cleared when inputs change\n");
         hm_out("check-when: inputs change, cached executable is missing, or with --force\n");
     } else {
         hm_out("schedule: %s\n", sched);
@@ -136,8 +137,9 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
         }
     }
 
-    /* Which record decides "already done", and what it stands for: two files
-     * that plan to the same identity share one last-run. */
+    /* Which record decides "already done", and what it stands for. Embedded
+     * inputs deliberately keep separate path-addressed records even when their
+     * content identities match. */
     hm_out("cache-identity: %s\n", c->identity);
     hm_out("cache-file: %s\n", c->path);
 

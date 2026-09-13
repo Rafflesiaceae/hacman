@@ -148,10 +148,10 @@ void hm_plan_print(const hm_project *p, const struct hm_cache_s *c);
  * started in parallel - one per project file - cannot lose each other's
  * updates.
  *
- * A record is addressed by what it stands for, never by which file mentioned
- * it: a URL identity contains its URL and check scheme; a command identity
- * contains its command plus either its working directory or its embedded-file
- * digest. */
+ * URL and ordinary command records are addressed by what they stand for. An
+ * embedded command instead uses its input file path as a stable address while
+ * retaining the command and embedded-file digest as the identity stored in
+ * that record. */
 typedef struct hm_cache_s {
     char key[HM_KEY_MAX + 1];           /* file name within the cache dir  */
     char identity[HM_IDENTITY_MAX + 1]; /* what that name stands for       */
@@ -167,8 +167,10 @@ typedef struct hm_cache_s {
  * when no override is provided and HOME is unavailable. */
 const char *hm_cache_dir(const char *override);
 
-/* Derives identity, key and file path. Touches no files. */
-void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir);
+/* Derives identity, key and file path. `source_path` is the canonical input
+ * filename for an embedded project, or NULL for standard input. Touches no
+ * files. */
+void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir, const char *source_path);
 
 /* Reads the record, if any. Returns 0 on success (also when absent, with
  * known == 0), -1 on an unreadable file. */
@@ -199,6 +201,10 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
 /* Slow path for HM_KIND_COMMAND: runs `command` with the shell, in `workdir`.
  * Returns 0 on success, -1 if the command failed or could not be run. */
 int hm_command_run(const hm_project *p, const char *workdir);
+
+/* Removes an embedded work directory without following symlinks. A missing
+ * directory is already clean. */
+int hm_workdir_reset(const char *workdir);
 
 /* Writes every embedded file below `workdir`, creating directories as needed.
  * Existing files are replaced atomically. */

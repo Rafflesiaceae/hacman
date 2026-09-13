@@ -331,9 +331,13 @@ is also exported as `HACMAN_WORKDIR`.
 
 Materialization happens only immediately before a real command execution:
 cache hits, `--plan`, `--check-only`, `--dry-run`, and `--adopt` do not touch
-the files. Embedded projects are content-addressed rather than scheduled.
-Paths, contents, and the command are included in the cache identity, so an edit
-gets a new work directory and builds on its next normal invocation.
+the files. Embedded projects are input-fingerprinted rather than scheduled.
+The canonical absolute `.siml` path selects a stable cache record and work
+directory. That source path, the embedded paths and contents, and the command
+form the identity stored in that record; when the inputs change, hacman clears
+and reuses the work directory before the next normal build. Inputs read from
+standard input have no stable path and retain a content-addressed work
+directory.
 
 Unknown keys, a missing `url` and anything that would introduce a second
 project are hard errors, reported with a line number. Use `hacman --plan` to
@@ -441,17 +445,19 @@ $ cat ~/.cache/hacman/cmd-e1afb450457ef858
 ```
 
 The first line is the record's **identity**, the second is last check, last
-change and the recorded marker. The file name is a hash of that identity, and a
-record whose identity does not match is ignored rather than trusted, so a hash
-collision cannot make two different things share a last-run.
+change and the recorded marker. Ordinary record names hash that identity;
+embedded projects instead hash the canonical input path so edits reuse one
+record and work directory. A record whose identity does not match is ignored
+rather than trusted, so changed embedded inputs rebuild instead of inheriting
+the prior successful state.
 
 What the identity is made of decides what shares a record:
 
-| project | identity | consequence |
+| project | cache address and identity | consequence |
 |---|---|---|
-| command | the command and its working directory | the same command in the same directory shares one last-run across every file that names it |
-| command with `files` | the command and a digest of embedded paths and contents | editing an embedded project gives it a fresh work directory and makes it due |
-| url | the URL, the check scheme and its version anchors | two files watching the same URL the same way share one history |
+| command | command and working directory | the same command in the same directory shares one last-run across every file that names it |
+| command with `files` | canonical input path; identity also includes that path, the command and a digest of embedded paths and contents | each input owns one work directory; an edit clears and rebuilds it |
+| url | URL, check scheme and version anchors | two files watching the same URL the same way share one history |
 
 `name` is deliberately *not* part of it: renaming a project keeps its history,
 and two people naming the same thing differently still agree on it.
