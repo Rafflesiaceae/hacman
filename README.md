@@ -142,12 +142,13 @@ Meson options: `-Dstatic=`, `-Dcurl=` (HTTP client, default `curl`),
 Tests need no network (see [Tests](#tests)):
 
 ```sh
-./tests.sh
+./tests.py
 ```
 
 ### Dependencies
 
 - Build: a C99 compiler, Meson ≥ 0.60, Ninja.
+- Tests: Python ≥ 3.8 and `curl`.
 - Runtime: `curl` and `/bin/sh`. The SIML parser is vendored in
   `vendor/siml/` (see `vendor.py`); nothing else is linked in.
 
@@ -516,7 +517,7 @@ Comments (`# text`, with the space) are allowed, `#` alone is not.
 ```
 build.sh                  static-musl build wrapper
 meson.build               build definition
-tests.sh                  test suite (also `meson test`)
+tests.py                  test suite (also `meson test`)
 tests/*.siml, *.gold      golden-file fixtures for `hacman --plan`
 examples/*.siml           one annotated project per file
 src/main.c                fast path: args, schedule decision, orchestration
@@ -532,8 +533,8 @@ vendor/siml/              vendored SIML parser (see vendor.py)
 ### Tests
 
 ```sh
-./tests.sh              # golden plans + the offline pipeline
-GOLD=update ./tests.sh  # rewrite tests/*.gold after an intended change
+./tests.py              # golden plans + the offline pipeline
+GOLD=update ./tests.py  # rewrite tests/*.gold after an intended change
 ```
 
 Every `tests/<name>.siml` is resolved with `hacman --plan` and diffed against

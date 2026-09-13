@@ -89,7 +89,7 @@ hacman = executable('hacman', hacman_sources,
   install: true,
 )
 
-test('smoke', find_program('tests.sh'),
+test('smoke', find_program('tests.py'),
   args: [hacman.full_path()],
   workdir: meson.current_source_dir(),
 )
