@@ -428,9 +428,11 @@ This is where hacman deliberately stops being clever: an update is whatever
 
 ### Cache
 
-`hacman` remembers what it last saw under `~/.cache/hacman/`
-(`$XDG_CACHE_HOME/hacman` when set); `--cache DIR` and `$HACMAN_CACHE` override
-it. It is a directory of one tiny record per watched thing:
+`hacman` keeps every persistent artifact under `~/.cache/hacman/`: cache
+records live directly below it and embedded source trees, build directories,
+and binaries live in `cmd-….work` children. `--cache DIR` and `$HACMAN_CACHE`
+can explicitly relocate the entire tree. It contains one tiny record per
+watched thing:
 
 ```
 $ cat ~/.cache/hacman/cmd-3cac4986c0e7422f

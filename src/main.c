@@ -294,6 +294,7 @@ int main(int argc, char **argv)
 {
     hm_opts           o;
     const hm_project *p = &project;
+    const char       *cache_dir;
     hm_check_result   res;
     char              old_mark[HM_MARK_MAX + 1];
     long              len, now, wait = 0;
@@ -327,7 +328,12 @@ int main(int argc, char **argv)
 
     /* The cache record is addressed by what the project *is*, so this also
      * settles which record two different files share. */
-    hm_cache_init(&cache, p, hm_cache_dir(o.cache_dir));
+    cache_dir = hm_cache_dir(o.cache_dir);
+    if (cache_dir == NULL) {
+        hm_err("hacman: HOME is not set; use --cache or HACMAN_CACHE\n");
+        return HM_EXIT_USAGE;
+    }
+    hm_cache_init(&cache, p, cache_dir);
     if (resolve_embedded_bin(&project, &cache, o.file) != 0) {
         return HM_EXIT_USAGE;
     }

@@ -163,7 +163,8 @@ typedef struct hm_cache_s {
     int  known;                         /* a record for this identity existed */
 } hm_cache;
 
-/* ${HACMAN_CACHE}, else ${XDG_CACHE_HOME:-$HOME/.cache}/hacman. */
+/* An explicit override, ${HACMAN_CACHE}, or $HOME/.cache/hacman. Returns NULL
+ * when no override is provided and HOME is unavailable. */
 const char *hm_cache_dir(const char *override);
 
 /* Derives identity, key and file path. Touches no files. */

@@ -99,15 +99,13 @@ const char *hm_cache_dir(const char *override)
     env = getenv("HACMAN_CACHE");
     if (env != NULL && env[0] != '\0') return env;
 
-    env = getenv("XDG_CACHE_HOME");
-    if (env == NULL || env[0] == '\0') {
-        env = getenv("HOME");
-        if (env == NULL || env[0] == '\0') return "./hacman-cache";
-        o   = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), env);
-        env = "/.cache";
-    }
+    /* Keep every default cache artifact under one predictable user-owned
+     * tree. Falling back to the caller's cwd would leak cache directories
+     * into arbitrary projects. */
+    env = getenv("HOME");
+    if (env == NULL || env[0] == '\0') return NULL;
     o                = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), env);
-    o                = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), "/hacman");
+    o                = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), "/.cache/hacman");
     cache_dir_buf[o] = '\0';
     return cache_dir_buf;
 }

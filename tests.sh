@@ -169,6 +169,20 @@ contains "stdin project is planned" "url: https://example.com/x"
 expect "a missing file argument is a usage error" 1 bash -c "printf 'url: https://example.com/x\n' | '$BIN' --plan"
 contains "missing file argument is explained" "no project file given"
 
+# The default cache tree is deliberately stable at ~/.cache/hacman; ambient
+# XDG settings must not scatter persistent build artifacts elsewhere.
+expect "default cache stays below HOME" 0 \
+    env HOME=/home/cache-test XDG_CACHE_HOME=/tmp/xdg-cache \
+    "$BIN" --plan tests/minimal.siml
+contains "default cache uses ~/.cache/hacman" \
+    "cache-file: /home/cache-test/.cache/hacman/"
+missing "XDG cache path is ignored" "/tmp/xdg-cache"
+
+expect "missing HOME without a cache override is an error" 1 \
+    env -u HOME -u HACMAN_CACHE "$BIN" --plan tests/minimal.siml
+contains "missing HOME explains cache overrides" \
+    "HOME is not set; use --cache or HACMAN_CACHE"
+
 # --- check and install pipeline -----------------------------------------
 
 # Embedded files are materialised below the cache before a command starts,
