@@ -4,15 +4,74 @@
 name: azure-cli
 command: sh update-azure.sh
 schedule: daily
-bin-path: azure-cli/bin/az
+bin-path: azure-cli/usr/bin/az
 files:
   update-azure.sh: |
     #!/bin/sh
     set -eu
 
-    # A virtual environment keeps Azure CLI packages out of the system Python.
-    if [ ! -x azure-cli/bin/python ]; then
-      python3 -m venv azure-cli
+    # Recover the last good runtime if a previous replacement was interrupted.
+    previous="$PWD/.azure-previous"
+    if [ ! -d "$PWD/azure-cli" ] && [ -d "$previous" ]; then
+      mv "$previous" "$PWD/azure-cli"
     fi
-    azure-cli/bin/python -m pip install --disable-pip-version-check \
-      --upgrade azure-cli
+    rm -rf "$previous"
+
+    # Microsoft's Debian archives contain the CLI and a private Python runtime.
+    case "$(uname -m)" in
+      x86_64|amd64) release_arch=amd64 ;;
+      aarch64|arm64) release_arch=arm64 ;;
+      *)
+        echo "azure-cli: unsupported Linux architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+    esac
+
+    repository=https://packages.microsoft.com/repos/azure-cli
+    packages="$repository/dists/jammy/main/binary-$release_arch/Packages"
+    archive_path="$(curl -fsSL "$packages" |
+      sed -n 's/^Filename: //p' | sort -V | tail -n 1)"
+    if [ -z "$archive_path" ]; then
+      echo "azure-cli: package index contains no archive" >&2
+      exit 1
+    fi
+
+    # Stage the package payload beside the active copy without installing it.
+    stage="$(mktemp -d "$PWD/.azure-update.XXXXXX")"
+    trap 'rm -rf "$stage"' EXIT
+    archive=${archive_path##*/}
+    curl -fsSL "$repository/$archive_path" -o "$stage/$archive"
+
+    # A Debian package is an ar archive around a compressed tar payload.
+    payload="$(ar t "$stage/$archive" |
+      sed -n '/^data\.tar\./ { p; q; }')"
+    if [ -z "$payload" ]; then
+      echo "azure-cli: package contains no data archive" >&2
+      exit 1
+    fi
+    ar p "$stage/$archive" "$payload" >"$stage/$payload"
+    mkdir "$stage/root"
+    case "$payload" in
+      data.tar.gz) tar -xzf "$stage/$payload" -C "$stage/root" ;;
+      data.tar.xz) tar -xJf "$stage/$payload" -C "$stage/root" ;;
+      data.tar.zst) tar --zstd -xf "$stage/$payload" -C "$stage/root" ;;
+      *)
+        echo "azure-cli: unsupported package payload: $payload" >&2
+        exit 1
+        ;;
+    esac
+    AZURE_CONFIG_DIR="$stage/config" \
+      "$stage/root/usr/bin/az" version >/dev/null
+
+    # Rotate only after the downloaded runtime proves executable.
+    if [ -d "$PWD/azure-cli" ]; then
+      mv "$PWD/azure-cli" "$previous"
+    fi
+    if mv "$stage/root" "$PWD/azure-cli"; then
+      rm -rf "$previous"
+    else
+      if [ -d "$previous" ]; then
+        mv "$previous" "$PWD/azure-cli"
+      fi
+      exit 1
+    fi

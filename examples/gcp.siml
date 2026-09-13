@@ -10,11 +10,12 @@ files:
     #!/bin/sh
     set -eu
 
-    # Preserve installed components when refreshing an existing SDK.
-    if [ -x google-cloud-sdk/bin/gcloud ]; then
-      google-cloud-sdk/bin/gcloud components update --quiet
-      exit 0
+    # Recover the last good runtime if a previous replacement was interrupted.
+    previous="$PWD/.gcp-previous"
+    if [ ! -d "$PWD/google-cloud-sdk" ] && [ -d "$previous" ]; then
+      mv "$previous" "$PWD/google-cloud-sdk"
     fi
+    rm -rf "$previous"
 
     # Google publishes separate CLI archives for supported Linux architectures.
     case "$(uname -m)" in
@@ -26,15 +27,25 @@ files:
         ;;
     esac
 
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
+    # Stage the complete self-contained runtime beside the active copy.
+    stage="$(mktemp -d "$PWD/.gcp-update.XXXXXX")"
+    trap 'rm -rf "$stage"' EXIT
     archive="google-cloud-cli-linux-$release_arch.tar.gz"
     curl -fsSL \
       "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/$archive" \
-      -o "$tmp/$archive"
-    tar -xzf "$tmp/$archive" -C "$tmp"
+      -o "$stage/$archive"
+    tar -xzf "$stage/$archive" -C "$stage"
+    "$stage/google-cloud-sdk/bin/gcloud" version >/dev/null
 
-    # Configure the staged SDK without changing the caller's shell profile.
-    "$tmp/google-cloud-sdk/install.sh" --quiet \
-      --usage-reporting=false --command-completion=false --path-update=false
-    mv "$tmp/google-cloud-sdk" google-cloud-sdk
+    # Rotate only after the downloaded runtime proves executable.
+    if [ -d "$PWD/google-cloud-sdk" ]; then
+      mv "$PWD/google-cloud-sdk" "$previous"
+    fi
+    if mv "$stage/google-cloud-sdk" "$PWD/google-cloud-sdk"; then
+      rm -rf "$previous"
+    else
+      if [ -d "$previous" ]; then
+        mv "$previous" "$PWD/google-cloud-sdk"
+      fi
+      exit 1
+    fi
