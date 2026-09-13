@@ -4,11 +4,18 @@
 name: aws-cli
 command: sh update-aws.sh
 schedule: daily
-bin-path: bin/aws
+bin-path: aws/dist/aws
 files:
   update-aws.sh: |
     #!/bin/sh
     set -eu
+
+    # Recover the last good runtime if a previous replacement was interrupted.
+    previous="$PWD/.aws-previous"
+    if [ ! -d "$PWD/aws" ] && [ -d "$previous" ]; then
+      mv "$previous" "$PWD/aws"
+    fi
+    rm -rf "$previous"
 
     # AWS publishes separate CLI archives for the supported Linux architectures.
     case "$(uname -m)" in
@@ -20,17 +27,23 @@ files:
         ;;
     esac
 
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
+    # Stage the complete self-contained runtime beside the active copy.
+    stage="$(mktemp -d "$PWD/.aws-update.XXXXXX")"
+    trap 'rm -rf "$stage"' EXIT
     archive="awscli-exe-linux-$release_arch.zip"
-    curl -fsSL "https://awscli.amazonaws.com/$archive" -o "$tmp/$archive"
-    unzip -q "$tmp/$archive" -d "$tmp"
+    curl -fsSL "https://awscli.amazonaws.com/$archive" -o "$stage/$archive"
+    unzip -q "$stage/$archive" 'aws/dist/*' -d "$stage"
+    "$stage/aws/dist/aws" --version >/dev/null
 
-    # The archive's installer needs --update after the initial private install.
-    if [ -x "$PWD/bin/aws" ]; then
-      "$tmp/aws/install" --install-dir "$PWD/aws-cli" \
-        --bin-dir "$PWD/bin" --update
+    # Rotate only after the downloaded runtime proves executable.
+    if [ -d "$PWD/aws" ]; then
+      mv "$PWD/aws" "$previous"
+    fi
+    if mv "$stage/aws" "$PWD/aws"; then
+      rm -rf "$previous"
     else
-      "$tmp/aws/install" --install-dir "$PWD/aws-cli" \
-        --bin-dir "$PWD/bin"
+      if [ -d "$previous" ]; then
+        mv "$previous" "$PWD/aws"
+      fi
+      exit 1
     fi
