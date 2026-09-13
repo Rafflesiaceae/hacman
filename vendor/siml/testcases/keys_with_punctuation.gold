@@ -1,0 +1,18 @@
+STREAM_START
+DOCUMENT_START
+MAPPING_START
+SCALAR key=simple-key value='alpha'
+SCALAR key=with.dots value='bravo'
+SCALAR key=hyphenated-key value='charlie'
+SCALAR key=mix.ed-key_1 value='delta'
+SEQUENCE_START style=flow key=list-key.with-dash
+SCALAR value='one-two'
+SCALAR value='three.four'
+SEQUENCE_END
+BLOCK_SCALAR_START key=literal.key
+BLOCK_SCALAR_LINE 'echoes of a dashed-key literal'
+BLOCK_SCALAR_END
+COMMENT # vim: set ft=yaml:
+MAPPING_END
+DOCUMENT_END
+STREAM_END

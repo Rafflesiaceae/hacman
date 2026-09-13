@@ -1,0 +1,9 @@
+build/
+tests/
+
+testcases/*.out
+testcases/*.err
+
+fuzzer
+fuzz-*.log
+crash-*

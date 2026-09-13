@@ -1,0 +1,17 @@
+STREAM_START
+DOCUMENT_START
+MAPPING_START
+MAPPING_ENTRY_HEADER key=ab
+COMMENT   # comment before sequence child
+SEQUENCE_START style=block
+SCALAR value='first'
+SCALAR value='second'
+SEQUENCE_END
+MAPPING_ENTRY_HEADER key=cd
+COMMENT   # comment before mapping child
+MAPPING_START
+SCALAR key=key value='value'
+MAPPING_END
+MAPPING_END
+DOCUMENT_END
+STREAM_END

@@ -1,0 +1,4 @@
+parent:
+  child: value
+
+# vim: set ft=yaml:

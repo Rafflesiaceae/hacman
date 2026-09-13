@@ -1,0 +1,10 @@
+id: single_line_lists
+hash_in_list: [va#lue,mid#tag]
+trim_spaces_list: [spaced_item,trailing]
+pipe_like_list: [pipeish,nested-ish]
+---
+id: scalar_fields
+comment_trimmed: value before comment   # trailing comment
+hash_literal: value#hash
+list_inline_comment: [foo,bar]  # inline list comment
+# vim: set ft=yaml:

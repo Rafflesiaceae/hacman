@@ -1,0 +1,17 @@
+id: list_demo
+scalars: foo
+list1: [a,b,c] # simple list
+list2: [single]
+list3: []  # empty list
+description: |
+  list demo
+empty:
+  nested: value
+list4: [with_hash,value#notcomment]
+---
+id: block_list_demo
+tags: [alpha,beta]
+flags: [fast,stable]
+labels: [slow,experimental]
+notes: bracket list variants after empty labels
+# vim: set ft=yaml:

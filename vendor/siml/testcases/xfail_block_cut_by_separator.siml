@@ -1,0 +1,6 @@
+id: list_cut_by_separator
+tags: |
+  alpha,
+---
+  beta,
+# vim: set ft=yaml:

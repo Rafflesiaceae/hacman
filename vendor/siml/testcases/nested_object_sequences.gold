@@ -1,0 +1,22 @@
+STREAM_START
+DOCUMENT_START
+SEQUENCE_START style=block
+SEQUENCE_START style=block
+MAPPING_START
+SCALAR key=id value='first'
+SCALAR key=value value='1'
+MAPPING_END
+MAPPING_START
+SCALAR key=id value='second'
+SCALAR key=value value='2'
+MAPPING_END
+SEQUENCE_END
+SEQUENCE_START style=block
+MAPPING_START
+SCALAR key=id value='third'
+SCALAR key=value value='3'
+MAPPING_END
+SEQUENCE_END
+SEQUENCE_END
+DOCUMENT_END
+STREAM_END

@@ -1,0 +1,2 @@
+number: 9#1       # just a number
+foo: [bar,ba#z]   # just a flow sequence

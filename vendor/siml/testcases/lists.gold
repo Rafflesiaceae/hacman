@@ -1,0 +1,48 @@
+STREAM_START
+DOCUMENT_START
+MAPPING_START
+SCALAR key=id value='list_demo'
+SCALAR key=scalars value='foo'
+SEQUENCE_START style=flow key=list1  # (spaces=1) simple list
+SCALAR value='a'
+SCALAR value='b'
+SCALAR value='c'
+SEQUENCE_END
+SEQUENCE_START style=flow key=list2
+SCALAR value='single'
+SEQUENCE_END
+SEQUENCE_START style=flow key=list3  # (spaces=2) empty list
+SEQUENCE_END
+BLOCK_SCALAR_START key=description
+BLOCK_SCALAR_LINE 'list demo'
+BLOCK_SCALAR_END
+MAPPING_ENTRY_HEADER key=empty
+MAPPING_START
+SCALAR key=nested value='value'
+MAPPING_END
+SEQUENCE_START style=flow key=list4
+SCALAR value='with_hash'
+SCALAR value='value#notcomment'
+SEQUENCE_END
+MAPPING_END
+DOCUMENT_END
+DOCUMENT_START
+MAPPING_START
+SCALAR key=id value='block_list_demo'
+SEQUENCE_START style=flow key=tags
+SCALAR value='alpha'
+SCALAR value='beta'
+SEQUENCE_END
+SEQUENCE_START style=flow key=flags
+SCALAR value='fast'
+SCALAR value='stable'
+SEQUENCE_END
+SEQUENCE_START style=flow key=labels
+SCALAR value='slow'
+SCALAR value='experimental'
+SEQUENCE_END
+SCALAR key=notes value='bracket list variants after empty labels'
+COMMENT # vim: set ft=yaml:
+MAPPING_END
+DOCUMENT_END
+STREAM_END
