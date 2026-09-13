@@ -234,11 +234,11 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
     return 0;
 }
 
-static int valid_file_path(hm_str path)
+static int valid_relative_path(hm_str path, size_t max)
 {
     size_t start = 0, i;
 
-    if (path.len == 0 || path.len > HM_FILE_PATH_MAX || path.ptr[0] == '/' ||
+    if (path.len == 0 || path.len > max || path.ptr[0] == '/' ||
         path.ptr[path.len - 1] == '/') {
         return 0;
     }
@@ -254,6 +254,11 @@ static int valid_file_path(hm_str path)
         }
     }
     return 1;
+}
+
+static int valid_file_path(hm_str path)
+{
+    return valid_relative_path(path, HM_FILE_PATH_MAX);
 }
 
 static hm_embedded_file *add_file(hm_cfg *c, hm_str path, long line)
@@ -310,7 +315,8 @@ static int begin_project(hm_cfg *c, long line)
  * buffer: a working directory has to be a real path before it can be entered,
  * and before it can identify a cache record. */
 static int expand_template(hm_cfg *c, hm_str tpl, const char *what,
-                           char *out, size_t cap, long line)
+                           char *out, size_t cap, long line,
+                           int require_absolute)
 {
     size_t i = 0, o = 0;
 
@@ -346,9 +352,10 @@ static int expand_template(hm_cfg *c, hm_str tpl, const char *what,
     }
     out[o] = '\0';
 
-    /* A relative path would mean something different per caller, while the
-     * cache record it identifies - or the program it names - would not. */
-    if (out[0] != '/') {
+    /* Ordinary paths must not change meaning with the caller's cwd. An
+     * embedded bin-path is the exception: it is resolved later against the
+     * identity-derived cache work directory. */
+    if (require_absolute && out[0] != '/') {
         hm_err("hacman: %s:%d: %s must expand to an absolute path\n",
                c->origin, line, what);
         return -1;
@@ -406,7 +413,7 @@ static int finish_project(hm_cfg *c)
         }
         if (p->file_count == 0 &&
             expand_template(c, p->workdir, "workdir", p->workdir_path,
-                            sizeof(p->workdir_path), p->line) != 0) {
+                            sizeof(p->workdir_path), p->line, 1) != 0) {
             return -1;
         }
     } else {
@@ -429,7 +436,15 @@ static int finish_project(hm_cfg *c)
     /* The program this project sets up, if it names one. */
     if (p->bin.len > 0 &&
         expand_template(c, p->bin, "bin-path", p->bin_path,
-                        sizeof(p->bin_path), p->line) != 0) {
+                        sizeof(p->bin_path), p->line,
+                        p->file_count == 0) != 0) {
+        return -1;
+    }
+    if (p->bin_path[0] != '\0' && p->bin_path[0] != '/' &&
+        !valid_relative_path((hm_str){p->bin_path, strlen(p->bin_path)},
+                             HM_PATH_MAX)) {
+        cfg_err(c, p->line,
+                "embedded bin-path must be a safe relative path");
         return -1;
     }
 

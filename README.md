@@ -274,12 +274,14 @@ schedule: 12h
 | `files` | no | — | files to materialize in a cache work directory before running the command |
 | `name` | no | the `command` | label used in output |
 | `schedule` | no | `daily` | when the command may run (below) |
-| `bin-path` | no | — | program to exec afterwards (see [above](#options-before-file-arguments-after-it)) |
+| `bin-path` | no | — | program to exec afterwards; may be relative to the generated work directory when used with `files` (see [above](#options-before-file-arguments-after-it)) |
 
 `workdir` and `bin-path` support `{{VAR}}` templating against the environment:
 `{{HOME}}/workspace/nixcfg`. An unset variable is an error rather than an empty
-string, so a typo cannot silently point the command at `/workspace/nixcfg`, and
-both must expand to an absolute path.
+string, so a typo cannot silently point the command at `/workspace/nixcfg`.
+Both must normally expand to an absolute path. For a command project with
+embedded `files`, `bin-path` may instead be a safe relative path beneath the
+generated work directory, such as `build/tool`.
 
 There is no `install` and no `check`: the command *is* the work, and its exit
 status is the whole verdict. hacman records the run **only if the command
@@ -297,8 +299,9 @@ its `.siml` file:
 
 ```
 name: embedded-hello
-command: meson setup build && meson compile -C build && ./build/hello
-schedule: never
+command: meson setup build && meson compile -C build
+bin-path: build/hello
+schedule: always
 files:
   main.c: |
     #include <stdio.h>
@@ -313,8 +316,9 @@ files:
 ```
 
 See [`examples/hello-c.siml`](examples/hello-c.siml) for the runnable version.
-`hacman --force examples/hello-c.siml` materializes `main.c` and `meson.build`,
-builds them with Meson, and runs the resulting program.
+Running `./examples/hello-c.siml` materializes `main.c` and `meson.build`, builds
+them with Meson, and runs the resulting program. Arguments are forwarded to
+the built program in the same way as for any other `bin-path`.
 
 `files` is a mapping from a filename to a literal block scalar. Filenames use
 SIML's mapping-key syntax (`[a-zA-Z_][a-zA-Z0-9_.-]*`); values must use `|`, so

@@ -1,9 +1,10 @@
 #!/usr/bin/env hacman
 # A complete C project carried by one .siml file. Run it with:
-#   hacman --force examples/hello-c.siml
+#   ./examples/hello-c.siml
 name: embedded-hello
-command: meson setup build && meson compile -C build && ./build/hello
-schedule: never
+command: meson setup build && meson compile -C build
+bin-path: build/hello
+schedule: always
 files:
   main.c: |
     #include <stdio.h>

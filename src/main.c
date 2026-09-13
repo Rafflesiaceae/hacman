@@ -31,6 +31,7 @@
 #define HM_EXIT_CHANGED 10 /* --check-only / --dry-run found changes */
 
 static char       config_buf[HM_CONFIG_MAX];
+static char       resolved_bin_path[HM_PATH_MAX + 1];
 static hm_project project;
 static hm_cache   cache;
 
@@ -205,6 +206,30 @@ static int finish(const hm_project *p, const hm_opts *o, int rc)
     return hm_exec_bin(p, o->prog_argv); /* only returns if exec failed */
 }
 
+/* An embedded project does not know its cache work directory until its cache
+ * identity has been built. Resolve its relative bin-path once that directory
+ * is available, before either the plan or the eventual exec sees it. */
+static int resolve_embedded_bin(hm_project *p, const hm_cache *c,
+                                const char *file)
+{
+    size_t base_len, bin_len;
+
+    if (p->bin_path[0] == '\0' || p->bin_path[0] == '/') return 0;
+
+    base_len = strlen(c->workdir);
+    bin_len  = strlen(p->bin_path);
+    if (base_len + 1 + bin_len > HM_PATH_MAX) {
+        hm_err("hacman: %s: resolved bin-path is too long\n", file);
+        return -1;
+    }
+
+    memcpy(resolved_bin_path, c->workdir, base_len);
+    resolved_bin_path[base_len] = '/';
+    memcpy(resolved_bin_path + base_len + 1, p->bin_path, bin_len + 1);
+    memcpy(p->bin_path, resolved_bin_path, base_len + 1 + bin_len + 1);
+    return 0;
+}
+
 /* A command project: run it, and remember that only if it succeeded. */
 static int run_command_project(const hm_project *p, hm_opts *o, long now)
 {
@@ -273,6 +298,9 @@ int main(int argc, char **argv)
     /* The cache record is addressed by what the project *is*, so this also
      * settles which record two different files share. */
     hm_cache_init(&cache, p, hm_cache_dir(o.cache_dir));
+    if (resolve_embedded_bin(&project, &cache, o.file) != 0) {
+        return HM_EXIT_USAGE;
+    }
 
     /* --plan answers "what does this file mean?" and stops there: no reads, no
      * clock, no network, so its output is reproducible. */

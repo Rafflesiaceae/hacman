@@ -187,6 +187,26 @@ expect "embedded files exist before command execution" 0 \
     "$BIN" --force --cache "$embedded_cache" tests/embedded_files.siml
 contains "embedded command completed" "embedded-ready"
 
+# An embedded command may build a program below its generated work directory
+# and name it with a relative bin-path. Arguments after FILE go to that program.
+cat >"$TMP/embedded-bin.siml" <<'EOF'
+name: embedded-bin
+command: mkdir -p build && cp runner build/prog && chmod +x build/prog
+bin-path: build/prog
+schedule: never
+files:
+  runner: |
+    #!/bin/sh
+    echo "embedded-prog"
+    for arg in "$@"; do echo "arg:$arg"; done
+EOF
+expect "embedded relative bin-path runs" 0 \
+    "$BIN" --force --cache "$TMP/cache-embedded-bin" \
+    "$TMP/embedded-bin.siml" --help "two words"
+contains "embedded program completed" "embedded-prog"
+contains "embedded program receives option-looking arguments" "arg:--help"
+contains "embedded program preserves argument boundaries" "arg:two words"
+
 payload="$TMP/payload.txt"
 cache="$TMP/cache"
 echo "version 1.0.0" >"$payload"
