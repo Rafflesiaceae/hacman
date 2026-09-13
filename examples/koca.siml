@@ -7,7 +7,7 @@ check: version
 version-prefix: "tag_name": "
 version-suffix: "
 schedule: 1h
-bin-path: {{HOME}}/.local/bin/koca
+bin-path: {{HOME}}/.cache/hacman/koca
 install: |
   set -eu
 
@@ -27,4 +27,5 @@ install: |
   trap 'rm -rf "$tmp"' EXIT
 
   curl -fsSL "$download_url" -o "$tmp/$asset"
-  install -Dm755 "$tmp/$asset" "$HOME/.local/bin/koca"
+  # Keep the executable beside hacman's own persistent cache records.
+  install -Dm755 "$tmp/$asset" "$HOME/.cache/hacman/koca"
