@@ -24,6 +24,9 @@ BUILD_DIR="${BUILD_DIR:-"$ROOT_DIR/build"}"
 BIN="${1:-${BIN:-"$BUILD_DIR/hacman"}}"
 GOLD="${GOLD:-check}"
 
+# Ambient shim options must not change the test runner's own hacman calls.
+unset HACMAN
+
 if [[ "${DEBUG:-}" != "" ]]; then
     echo "[dbg][tests.sh] ROOT_DIR=${ROOT_DIR}" >&2
     echo "[dbg][tests.sh] BIN=${BIN}" >&2
@@ -171,6 +174,33 @@ missing() {
 }
 
 # --- input handling -------------------------------------------------------
+
+# A shebang fixes the project path as argv[1], so HACMAN is how executable
+# project files receive options intended for hacman itself.
+mkdir -p "$TMP/hacman-path"
+ln -s "$BIN" "$TMP/hacman-path/hacman"
+expect "HACMAN passes --help through an executable project" 0 \
+    env PATH="$TMP/hacman-path:$PATH" HACMAN=--help ./examples/hello-c.siml
+contains "HACMAN help prints usage" "usage: hacman [OPTIONS] FILE"
+
+expect "HACMAN accepts multiple and quoted options" 0 \
+    env HACMAN='--plan --cache "/tmp/hacman env cache"' "$BIN" tests/minimal.siml
+contains "quoted HACMAN value stays one argument" \
+    "cache-file: /tmp/hacman env cache/"
+
+expect "command-line option overrides HACMAN value" 0 \
+    env HACMAN='--plan --cache /tmp/hacman-env-cache' \
+    "$BIN" --cache /tmp/hacman-cli-cache tests/minimal.siml
+contains "command-line cache wins" "cache-file: /tmp/hacman-cli-cache/"
+missing "environment cache loses" "/tmp/hacman-env-cache/"
+
+expect "unterminated HACMAN quote is rejected" 1 \
+    env HACMAN='--cache "unterminated' "$BIN" tests/minimal.siml
+contains "unterminated HACMAN quote is explained" "HACMAN contains an unterminated quote"
+
+expect "HACMAN positional argument is rejected" 1 \
+    env HACMAN='--verbose not-an-option' "$BIN" tests/minimal.siml
+contains "HACMAN is options-only" "HACMAN may contain options only"
 
 # Standard input is read only when the file argument is exactly "-".
 expect "stdin input via -" 0 bash -c "printf 'url: https://example.com/x\n' | '$BIN' --plan -"

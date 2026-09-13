@@ -181,6 +181,20 @@ usage: hacman [OPTIONS] FILE
 generate-project | hacman -
 ```
 
+For executable `.siml` files, `HACMAN` supplies options before the implicit
+file argument added by the shebang:
+
+```sh
+HACMAN=--help ./examples/hello-c.siml
+HACMAN='--verbose --timeout 30' ./examples/koca.siml --version
+```
+
+`HACMAN` accepts options only. Its value is split without starting a shell;
+single quotes, double quotes, and backslashes may group or escape whitespace.
+Real command-line options are applied afterwards and override scalar settings
+such as `--cache` and `--timeout`. Arguments following the `.siml` path remain
+arguments to `bin-path`, as usual.
+
 ### Options before FILE, arguments after it
 
 hacman's own options must come **before** `FILE`. The first non-option argument

@@ -27,13 +27,17 @@
 #include "config.h"
 
 /* Exit codes */
-#define HM_EXIT_OK      0
-#define HM_EXIT_USAGE   1
-#define HM_EXIT_FAILED  2
-#define HM_EXIT_CHANGED 10 /* --check-only / --dry-run found changes */
+#define HM_EXIT_OK         0
+#define HM_EXIT_USAGE      1
+#define HM_EXIT_FAILED     2
+#define HM_EXIT_CHANGED    10 /* --check-only / --dry-run found changes */
+#define HM_ENV_OPTIONS_MAX 4096
+#define HM_ENV_ARG_MAX     64
 
 static char       config_buf[HM_CONFIG_MAX];
 static char       resolved_bin_path[HM_PATH_MAX + 1];
+static char       env_options_buf[HM_ENV_OPTIONS_MAX + 1];
+static char      *env_options_argv[HM_ENV_ARG_MAX];
 static hm_project project;
 static hm_cache   cache;
 
@@ -60,7 +64,7 @@ static const char usage_text[] =
     "\n"
     "When the project names a bin-path, hacman execs it once the setup is done and\n"
     "forwards ARGS to it. Options must therefore come before FILE - everything\n"
-    "after FILE belongs to the program.\n"
+    "after FILE belongs to the program. HACMAN may contain options to prepend.\n"
     "\n"
     "options:\n"
     "  -c, --check-only    check only, never install or run (exit 10 if due)\n"
@@ -121,19 +125,90 @@ static int opt_is(const char *arg, const char *shrt, const char *lng)
     return strcmp(arg, shrt) == 0 || strcmp(arg, lng) == 0;
 }
 
-static int parse_args(int argc, char **argv, hm_opts *o)
+static int env_space(char ch)
+{
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
+}
+
+/* Splits HACMAN without invoking a shell. Quotes and backslashes only group or
+ * escape bytes; expansion has already been performed by the caller's shell. */
+static int parse_env_words(const char *value, int *argc_out)
+{
+    const char *read;
+    char       *write;
+    size_t      len;
+    int         argc = 0;
+
+    len = strnlen(value, sizeof(env_options_buf));
+    if (len >= sizeof(env_options_buf)) {
+        hm_err("hacman: HACMAN is longer than %u bytes\n", (unsigned long)HM_ENV_OPTIONS_MAX);
+        return -1;
+    }
+    memcpy(env_options_buf, value, len + 1);
+    read  = env_options_buf;
+    write = env_options_buf;
+
+    while (*read != '\0') {
+        char quote = '\0';
+
+        while (env_space(*read)) ++read;
+        if (*read == '\0') break;
+        if (argc == HM_ENV_ARG_MAX) {
+            hm_err("hacman: HACMAN contains more than %u arguments\n",
+                   (unsigned long)HM_ENV_ARG_MAX);
+            return -1;
+        }
+        env_options_argv[argc++] = write;
+
+        while (*read != '\0' && (quote != '\0' || !env_space(*read))) {
+            if (*read == '\\') {
+                ++read;
+                if (*read == '\0') {
+                    hm_err("hacman: HACMAN ends with an incomplete escape\n");
+                    return -1;
+                }
+                *write++ = *read++;
+            } else if (*read == '\'' || *read == '"') {
+                if (quote == '\0') {
+                    quote = *read++;
+                } else if (quote == *read) {
+                    quote = '\0';
+                    ++read;
+                } else {
+                    *write++ = *read++;
+                }
+            } else {
+                *write++ = *read++;
+            }
+        }
+        if (quote != '\0') {
+            hm_err("hacman: HACMAN contains an unterminated quote\n");
+            return -1;
+        }
+        while (env_space(*read)) ++read;
+        *write++ = '\0';
+    }
+
+    *argc_out = argc;
+    return 0;
+}
+
+/* Parses one argument source. HACMAN is options-only; the real argv owns FILE
+ * and its address is retained so exec can reuse the trailing argument vector. */
+static int parse_arg_list(int argc, char **argv, int first, int env_only, hm_opts *o)
 {
     int i;
 
-    memset(o, 0, sizeof(*o));
-    o->timeout = 15;
-
-    for (i = 1; i < argc; ++i) {
+    for (i = first; i < argc; ++i) {
         const char *a = argv[i];
 
         /* The first non-option is FILE, and it ends hacman's own arguments:
          * the rest is the program's, however it is spelled. */
         if (a[0] != '-' || strcmp(a, "-") == 0) {
+            if (env_only) {
+                hm_err("hacman: HACMAN may contain options only (found '%s')\n", a);
+                return -1;
+            }
             o->file      = a;
             o->prog_argv = &argv[i];
             return 0;
@@ -185,6 +260,26 @@ static int parse_args(int argc, char **argv, hm_opts *o)
         }
     }
     return 0;
+}
+
+static int parse_args(int argc, char **argv, hm_opts *o)
+{
+    const char *env;
+    int         env_argc;
+    int         rc;
+
+    memset(o, 0, sizeof(*o));
+    o->timeout = 15;
+
+    env = getenv("HACMAN");
+    if (env != NULL && env[0] != '\0') {
+        if (parse_env_words(env, &env_argc) != 0) return -1;
+        rc = parse_arg_list(env_argc, env_options_argv, 0, 1, o);
+        if (rc != 0) return rc;
+    }
+    /* Real command-line options come later and therefore override scalar
+     * settings such as --cache and --timeout from HACMAN. */
+    return parse_arg_list(argc, argv, 1, 0, o);
 }
 
 /* The scheduling decision - the whole point of the fast path. Returns 1 when
