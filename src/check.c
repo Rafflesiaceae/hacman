@@ -19,21 +19,23 @@
 static char body_buf[HM_BODY_MAX];
 
 /* Runs curl and captures its stdout. Returns 0 on success, -1 otherwise. */
-static int run_curl(const char *url, int head_only, int timeout_secs,
-                    size_t *out_len)
+static int run_curl(const char *url, int head_only, int timeout_secs, size_t *out_len)
 {
-    char  timeout_arg[16];
+    char        timeout_arg[16];
     const char *argv[16];
-    int   argc = 0;
-    int   fds[2];
-    pid_t pid;
-    size_t total = 0;
+    int         argc = 0;
+    int         fds[2];
+    pid_t       pid;
+    size_t      total = 0;
 
-    {   /* timeout as a decimal string, without stdio */
-        size_t n = 0, i = 0;
-        char   tmp[16];
+    { /* timeout as a decimal string, without stdio */
+        size_t        n = 0, i = 0;
+        char          tmp[16];
         unsigned long v = (unsigned long)(timeout_secs > 0 ? timeout_secs : 15);
-        do { tmp[n++] = (char)('0' + (v % 10)); v /= 10; } while (v > 0 && n < sizeof(tmp));
+        do {
+            tmp[n++] = (char)('0' + (v % 10));
+            v /= 10;
+        } while (v > 0 && n < sizeof(tmp));
         while (n > 0) timeout_arg[i++] = tmp[--n];
         timeout_arg[i] = '\0';
     }
@@ -41,8 +43,8 @@ static int run_curl(const char *url, int head_only, int timeout_secs,
     argv[argc++] = HM_CURL;
     argv[argc++] = "--silent";
     argv[argc++] = "--show-error";
-    argv[argc++] = "--location";     /* follow redirects                    */
-    argv[argc++] = "--fail";         /* HTTP >= 400 is a failure            */
+    argv[argc++] = "--location"; /* follow redirects                    */
+    argv[argc++] = "--fail";     /* HTTP >= 400 is a failure            */
     argv[argc++] = "--max-time";
     argv[argc++] = timeout_arg;
     if (head_only) argv[argc++] = "--head";
@@ -121,13 +123,13 @@ static int ci_prefix(const char *line, size_t len, const char *name)
  * print one block per hop, and only the final hop describes the resource. */
 static int last_header(const char *buf, size_t len, const char *name, hm_str *out)
 {
-    const char *p     = buf;
-    const char *end   = buf + len;
-    int         found = 0;
+    const char *p        = buf;
+    const char *end      = buf + len;
+    int         found    = 0;
     size_t      name_len = strlen(name);
 
     while (p < end) {
-        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+        const char *nl       = (const char *)memchr(p, '\n', (size_t)(end - p));
         const char *line_end = nl ? nl : end;
         size_t      line_len = (size_t)(line_end - p);
 
@@ -162,8 +164,7 @@ static const char *find_sub(const char *hay, size_t hay_len, hm_str needle)
 
 /* Pulls the text between `version-prefix` and `version-suffix` out of the
  * body. An empty suffix means "up to the end of the line". */
-static int extract_version(const hm_project *p, const char *body, size_t len,
-                           char *out, size_t cap)
+static int extract_version(const hm_project *p, const char *body, size_t len, char *out, size_t cap)
 {
     const char *start = find_sub(body, len, p->version_prefix);
     const char *end;
@@ -196,10 +197,13 @@ static int extract_version(const hm_project *p, const char *body, size_t len,
         hm_str v;
         v.ptr = start;
         v.len = (size_t)(end - start);
-        while (v.len > 0 && (*v.ptr == ' ' || *v.ptr == '\t')) { ++v.ptr; --v.len; }
-        while (v.len > 0 && (v.ptr[v.len - 1] == '\r' ||
-                             v.ptr[v.len - 1] == ' '  ||
-                             v.ptr[v.len - 1] == '\t')) --v.len;
+        while (v.len > 0 && (*v.ptr == ' ' || *v.ptr == '\t')) {
+            ++v.ptr;
+            --v.len;
+        }
+        while (v.len > 0 &&
+               (v.ptr[v.len - 1] == '\r' || v.ptr[v.len - 1] == ' ' || v.ptr[v.len - 1] == '\t'))
+            --v.len;
         if (v.len == 0) {
             hm_err("hacman: %S: extracted version is empty\n", p->name);
             return -1;
@@ -238,7 +242,8 @@ int hm_check(const hm_project *p, int timeout_secs, hm_check_result *res)
             return 0;
         }
         hm_err("hacman: %S: response has no ETag or Last-Modified header; "
-               "use 'check: hash' or 'check: version'\n", p->name);
+               "use 'check: hash' or 'check: version'\n",
+               p->name);
         return -1;
     }
     case HM_CHECK_HASH:

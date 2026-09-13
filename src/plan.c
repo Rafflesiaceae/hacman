@@ -89,9 +89,9 @@ static void print_files(const hm_project *p, const hm_cache *c)
     hm_out("files-written: before command execution\n");
     hm_out("files:\n");
     for (i = 0; i < p->file_count; ++i) {
-        const hm_embedded_file *file = &p->files[i];
-        const char *cursor = file->content.ptr;
-        hm_str line;
+        const hm_embedded_file *file   = &p->files[i];
+        const char             *cursor = file->content.ptr;
+        hm_str                  line;
 
         hm_out("  %S: |\n", file->path);
         while (hm_file_next_line(file, &cursor, &line)) {
@@ -110,8 +110,7 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
     hm_out("name: %S\n", p->name);
     if (p->kind == HM_KIND_COMMAND) {
         hm_out("command: %S\n", p->command);
-        hm_out("workdir: %s\n",
-               (p->file_count > 0) ? c->workdir : p->workdir_path);
+        hm_out("workdir: %s\n", (p->file_count > 0) ? c->workdir : p->workdir_path);
         hm_out("run: %s -c <command>, in workdir\n", HM_SHELL);
         hm_out("record-when: the command exits 0\n");
         print_files(p, c);
@@ -128,8 +127,7 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
         hm_out("check-when: only with --force\n");
         break;
     case HM_SCHED_EVERY:
-        hm_out("check-when: %u seconds after the last run\n",
-               (unsigned long)p->sched_interval);
+        hm_out("check-when: %u seconds after the last run\n", (unsigned long)p->sched_interval);
         break;
     }
 

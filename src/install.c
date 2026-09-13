@@ -40,10 +40,9 @@ static int mkdir_p(const char *path)
     for (i = 1; i <= n; ++i) {
         if (copy[i] == '/' || copy[i] == '\0') {
             char saved = copy[i];
-            copy[i] = '\0';
+            copy[i]    = '\0';
             if (mkdir(copy, 0700) != 0 && errno != EEXIST) {
-                fprintf(stderr, "hacman: %s: cannot create directory: %s\n",
-                        copy, strerror(errno));
+                fprintf(stderr, "hacman: %s: cannot create directory: %s\n", copy, strerror(errno));
                 return -1;
             }
             copy[i] = saved;
@@ -52,20 +51,19 @@ static int mkdir_p(const char *path)
     return 0;
 }
 
-static int write_embedded_file(const hm_embedded_file *file,
-                               const char *workdir)
+static int write_embedded_file(const hm_embedded_file *file, const char *workdir)
 {
-    char target[HM_PATH_MAX * 2 + 2];
-    char parent[HM_PATH_MAX * 2 + 2];
-    char temp[HM_PATH_MAX * 2 + 32];
+    char        target[HM_PATH_MAX * 2 + 2];
+    char        parent[HM_PATH_MAX * 2 + 2];
+    char        temp[HM_PATH_MAX * 2 + 32];
     const char *cursor = file->content.ptr;
-    hm_str line;
-    FILE *fp;
-    int fd;
-    size_t i;
+    hm_str      line;
+    FILE       *fp;
+    int         fd;
+    size_t      i;
 
-    if ((size_t)snprintf(target, sizeof(target), "%s/%.*s", workdir,
-                         (int)file->path.len, file->path.ptr) >= sizeof(target)) {
+    if ((size_t)snprintf(target, sizeof(target), "%s/%.*s", workdir, (int)file->path.len,
+                         file->path.ptr) >= sizeof(target)) {
         fprintf(stderr, "hacman: embedded-file path is too long\n");
         return -1;
     }
@@ -78,15 +76,14 @@ static int write_embedded_file(const hm_embedded_file *file,
     }
     if (mkdir_p(parent) != 0) return -1;
 
-    if ((size_t)snprintf(temp, sizeof(temp), "%s.tmp.%ld", target,
-                         (long)getpid()) >= sizeof(temp)) {
+    if ((size_t)snprintf(temp, sizeof(temp), "%s.tmp.%ld", target, (long)getpid()) >=
+        sizeof(temp)) {
         fprintf(stderr, "hacman: embedded-file temporary path is too long\n");
         return -1;
     }
     fd = open(temp, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {
-        fprintf(stderr, "hacman: %s: cannot create embedded file: %s\n",
-                temp, strerror(errno));
+        fprintf(stderr, "hacman: %s: cannot create embedded file: %s\n", temp, strerror(errno));
         return -1;
     }
     fp = fdopen(fd, "w");
@@ -110,8 +107,7 @@ static int write_embedded_file(const hm_embedded_file *file,
         return -1;
     }
     if (rename(temp, target) != 0) {
-        fprintf(stderr, "hacman: %s: cannot install embedded file: %s\n",
-                target, strerror(errno));
+        fprintf(stderr, "hacman: %s: cannot install embedded file: %s\n", target, strerror(errno));
         unlink(temp);
         return -1;
     }
@@ -142,8 +138,8 @@ static FILE *temp_file(const char *what, char *path_out, size_t cap)
     }
     fd = mkstemp(path_out);
     if (fd < 0) {
-        fprintf(stderr, "hacman: %s: cannot create temporary file: %s\n",
-                path_out, strerror(errno));
+        fprintf(stderr, "hacman: %s: cannot create temporary file: %s\n", path_out,
+                strerror(errno));
         return NULL;
     }
     fp = fdopen(fd, "w");
@@ -236,7 +232,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         goto cleanup;
     }
     if (pid == 0) {
-        char *const argv[] = { (char *)HM_SHELL, (char *)"-e", script_path, NULL };
+        char *const argv[] = {(char *)HM_SHELL, (char *)"-e", script_path, NULL};
 
         setenv("HACMAN_NAME", name, 1);
         setenv("HACMAN_URL", url, 1);
@@ -260,11 +256,11 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         if (WIFSIGNALED(status)) {
-            fprintf(stderr, "hacman: %s: install script killed by signal %d\n",
-                    name, WTERMSIG(status));
+            fprintf(stderr, "hacman: %s: install script killed by signal %d\n", name,
+                    WTERMSIG(status));
         } else {
-            fprintf(stderr, "hacman: %s: install script failed with exit code %d\n",
-                    name, WEXITSTATUS(status));
+            fprintf(stderr, "hacman: %s: install script failed with exit code %d\n", name,
+                    WEXITSTATUS(status));
         }
         fprintf(stderr, "hacman: %s: script kept at %s\n", name, script_path);
         /* Keep the script around; the state is not advanced either, so the
@@ -307,8 +303,7 @@ int hm_command_run(const hm_project *p, const char *workdir)
     }
     if (pid == 0) {
         if (chdir(workdir) != 0) {
-            fprintf(stderr, "hacman: %s: cannot enter %s: %s\n",
-                    name, workdir, strerror(errno));
+            fprintf(stderr, "hacman: %s: cannot enter %s: %s\n", name, workdir, strerror(errno));
             _exit(127);
         }
         setenv("HACMAN_NAME", name, 1);
@@ -327,13 +322,12 @@ int hm_command_run(const hm_project *p, const char *workdir)
     }
 
     if (WIFSIGNALED(status)) {
-        fprintf(stderr, "hacman: %s: command killed by signal %d\n",
-                name, WTERMSIG(status));
+        fprintf(stderr, "hacman: %s: command killed by signal %d\n", name, WTERMSIG(status));
         return -1;
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        fprintf(stderr, "hacman: %s: command failed with exit code %d\n",
-                name, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        fprintf(stderr, "hacman: %s: command failed with exit code %d\n", name,
+                WIFEXITED(status) ? WEXITSTATUS(status) : -1);
         return -1;
     }
     return 0;
@@ -356,7 +350,6 @@ int hm_exec_bin(const hm_project *p, char **argv)
     fflush(stdout);
     execv(p->bin_path, argv);
 
-    fprintf(stderr, "hacman: cannot execute %s: %s\n",
-            p->bin_path, strerror(errno));
+    fprintf(stderr, "hacman: cannot execute %s: %s\n", p->bin_path, strerror(errno));
     return 127;
 }

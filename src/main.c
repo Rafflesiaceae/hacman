@@ -37,7 +37,7 @@ static hm_cache   cache;
 
 typedef struct {
     const char *file;
-    char      **prog_argv;   /* &argv[FILE], reused as the program's argv */
+    char      **prog_argv; /* &argv[FILE], reused as the program's argv */
     const char *cache_dir;
     int         check_only;
     int         dry_run;
@@ -49,31 +49,31 @@ typedef struct {
 } hm_opts;
 
 static const char usage_text[] =
-"usage: hacman [OPTIONS] FILE [ARGS...]\n"
-"\n"
-"Checks the URL described by a SIML project file and runs its install script\n"
-"when that URL changed, or - for a file that describes a command instead -\n"
-"runs that command no more often than its schedule allows. FILE describes\n"
-"exactly one project; \"-\" reads it from standard input.\n"
-"\n"
-"When the project names a bin-path, hacman execs it once the setup is done and\n"
-"forwards ARGS to it. Options must therefore come before FILE - everything\n"
-"after FILE belongs to the program.\n"
-"\n"
-"options:\n"
-"  -c, --check-only    check only, never install or run (exit 10 if due)\n"
-"  -n, --dry-run       report what would happen, change nothing\n"
-"  -f, --force         ignore the schedule and act now\n"
-"  -a, --adopt         record the current state without installing or running\n"
-"  -p, --plan          print what FILE resolves to, as SIML, and exit\n"
-"      --cache DIR     cache directory (default: ~/.cache/hacman)\n"
-"  -t, --timeout SECS  per-request timeout (default: 15)\n"
-"  -v, --verbose       report an unchanged or skipped project too\n"
-"  -h, --help          show this help\n"
-"  -V, --version       show the version\n"
-"\n"
-"exit codes: 0 ok, 1 usage/config error, 2 a check, install or command failed,\n"
-"            10 work is pending with --check-only/--dry-run\n";
+    "usage: hacman [OPTIONS] FILE [ARGS...]\n"
+    "\n"
+    "Checks the URL described by a SIML project file and runs its install script\n"
+    "when that URL changed, or - for a file that describes a command instead -\n"
+    "runs that command no more often than its schedule allows. FILE describes\n"
+    "exactly one project; \"-\" reads it from standard input.\n"
+    "\n"
+    "When the project names a bin-path, hacman execs it once the setup is done and\n"
+    "forwards ARGS to it. Options must therefore come before FILE - everything\n"
+    "after FILE belongs to the program.\n"
+    "\n"
+    "options:\n"
+    "  -c, --check-only    check only, never install or run (exit 10 if due)\n"
+    "  -n, --dry-run       report what would happen, change nothing\n"
+    "  -f, --force         ignore the schedule and act now\n"
+    "  -a, --adopt         record the current state without installing or running\n"
+    "  -p, --plan          print what FILE resolves to, as SIML, and exit\n"
+    "      --cache DIR     cache directory (default: ~/.cache/hacman)\n"
+    "  -t, --timeout SECS  per-request timeout (default: 15)\n"
+    "  -v, --verbose       report an unchanged or skipped project too\n"
+    "  -h, --help          show this help\n"
+    "  -V, --version       show the version\n"
+    "\n"
+    "exit codes: 0 ok, 1 usage/config error, 2 a check, install or command failed,\n"
+    "            10 work is pending with --check-only/--dry-run\n";
 
 /* "45s", "12m", "3h07m", "5d" - enough to answer "when will it check again?" */
 static void fmt_duration(long secs, char *out, size_t cap)
@@ -84,16 +84,28 @@ static void fmt_duration(long secs, char *out, size_t cap)
     size_t n = 0;
     long   v;
 
-    if      (secs < 60)    { v = secs;          unit = 's'; }
-    else if (secs < 3600)  { v = secs / 60;     unit = 'm'; }
-    else if (secs < 86400) { v = secs / 3600;   unit = 'h'; }
-    else                   { v = secs / 86400;  unit = 'd'; }
+    if (secs < 60) {
+        v    = secs;
+        unit = 's';
+    } else if (secs < 3600) {
+        v    = secs / 60;
+        unit = 'm';
+    } else if (secs < 86400) {
+        v    = secs / 3600;
+        unit = 'h';
+    } else {
+        v    = secs / 86400;
+        unit = 'd';
+    }
 
     {
-        char   digits[24];
-        size_t d = 0;
+        char          digits[24];
+        size_t        d = 0;
         unsigned long x = (unsigned long)(v < 0 ? 0 : v);
-        do { digits[d++] = (char)('0' + (x % 10)); x /= 10; } while (x > 0 && d < sizeof(digits));
+        do {
+            digits[d++] = (char)('0' + (x % 10));
+            x /= 10;
+        } while (x > 0 && d < sizeof(digits));
         while (d > 0 && n + 1 < sizeof(tmp)) tmp[n++] = digits[--d];
     }
     if (n + 1 < sizeof(tmp)) tmp[n++] = unit;
@@ -146,12 +158,18 @@ static int parse_args(int argc, char **argv, hm_opts *o)
             hm_out_flush();
             return 1;
         } else if (strcmp(a, "--cache") == 0) {
-            if (++i >= argc) { hm_err("hacman: --cache needs a directory\n"); return -1; }
+            if (++i >= argc) {
+                hm_err("hacman: --cache needs a directory\n");
+                return -1;
+            }
             o->cache_dir = argv[i];
         } else if (opt_is(a, "-t", "--timeout")) {
             unsigned long v;
             hm_str        s;
-            if (++i >= argc) { hm_err("hacman: --timeout needs a number\n"); return -1; }
+            if (++i >= argc) {
+                hm_err("hacman: --timeout needs a number\n");
+                return -1;
+            }
             s.ptr = argv[i];
             s.len = strlen(argv[i]);
             if (hm_parse_ulong(s, &v) != 0 || v == 0) {
@@ -169,8 +187,8 @@ static int parse_args(int argc, char **argv, hm_opts *o)
 
 /* The scheduling decision - the whole point of the fast path. Returns 1 when
  * the project must be acted on now, 0 when its schedule says "not yet". */
-static int is_due(const hm_project *p, const hm_cache *c, long now,
-                  const hm_opts *o, long *wait_out)
+static int is_due(const hm_project *p, const hm_cache *c, long now, const hm_opts *o,
+                  long *wait_out)
 {
     long elapsed;
 
@@ -209,8 +227,7 @@ static int finish(const hm_project *p, const hm_opts *o, int rc)
 /* An embedded project does not know its cache work directory until its cache
  * identity has been built. Resolve its relative bin-path once that directory
  * is available, before either the plan or the eventual exec sees it. */
-static int resolve_embedded_bin(hm_project *p, const hm_cache *c,
-                                const char *file)
+static int resolve_embedded_bin(hm_project *p, const hm_cache *c, const char *file)
 {
     size_t base_len, bin_len;
 
@@ -272,16 +289,14 @@ int main(int argc, char **argv)
     if (rc != 0) return (rc > 0) ? HM_EXIT_OK : HM_EXIT_USAGE;
 
     if (o.file == NULL) {
-        hm_err("hacman: no project file given (use '-' to read standard input)\n%s",
-               usage_text);
+        hm_err("hacman: no project file given (use '-' to read standard input)\n%s", usage_text);
         return HM_EXIT_USAGE;
     }
 
     len = hm_read_all(o.file, config_buf, sizeof(config_buf));
     if (len < 0) return HM_EXIT_USAGE;
 
-    if (hm_config_parse(config_buf, (size_t)len,
-                        (strcmp(o.file, "-") != 0) ? o.file : "<stdin>",
+    if (hm_config_parse(config_buf, (size_t)len, (strcmp(o.file, "-") != 0) ? o.file : "<stdin>",
                         &project) != 0) {
         return HM_EXIT_USAGE;
     }
@@ -291,7 +306,8 @@ int main(int argc, char **argv)
         hm_out_target(2);
     } else if (o.prog_argv[1] != NULL) {
         hm_err("hacman: %s: arguments after FILE need a 'bin-path' to forward "
-               "them to\n", o.file);
+               "them to\n",
+               o.file);
         return HM_EXIT_USAGE;
     }
 
@@ -340,8 +356,7 @@ int main(int argc, char **argv)
         return finish(p, &o, HM_EXIT_FAILED);
     }
 
-    hm_str_copy(old_mark, sizeof(old_mark),
-                (hm_str){ cache.mark, strlen(cache.mark) });
+    hm_str_copy(old_mark, sizeof(old_mark), (hm_str){cache.mark, strlen(cache.mark)});
     /* A project hacman has never seen counts as changed, so a fresh checkout
      * installs on its first run. Use --adopt to record instead. */
     changed = !cache.known || strcmp(old_mark, res.mark) != 0;
@@ -349,8 +364,7 @@ int main(int argc, char **argv)
     if (!changed) {
         if (o.verbose) hm_out("ok       %S (%s)\n", p->name, res.mark);
         cache.last_check = now;
-        return finish(p, &o, (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED
-                                                          : HM_EXIT_OK);
+        return finish(p, &o, (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK);
     }
 
     if (!cache.known) {
@@ -370,11 +384,9 @@ int main(int argc, char **argv)
         }
     }
 
-    hm_str_copy(cache.mark, sizeof(cache.mark),
-                (hm_str){ res.mark, strlen(res.mark) });
+    hm_str_copy(cache.mark, sizeof(cache.mark), (hm_str){res.mark, strlen(res.mark)});
     cache.last_check  = now;
     cache.last_change = now;
 
-    return finish(p, &o, (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED
-                                                      : HM_EXIT_OK);
+    return finish(p, &o, (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK);
 }

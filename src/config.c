@@ -14,7 +14,7 @@
 
 #include "hacman.h"
 
-#include <stdlib.h>  /* getenv() for {{VAR}} expansion */
+#include <stdlib.h> /* getenv() for {{VAR}} expansion */
 #include <string.h>
 
 #include "siml.h"
@@ -46,7 +46,7 @@ static int hm_read_line(void *userdata, const char **out_line, size_t *out_len)
 
     *out_line = start;
     *out_len  = (size_t)(nl - start) + 1;
-    r->pos   += *out_len;
+    r->pos += *out_len;
     return 1;
 }
 
@@ -62,23 +62,23 @@ static hm_str slice(siml_slice s)
 
 /* Parser-wide bookkeeping while walking the event stream. */
 typedef struct {
-    const char *buf;
-    const char *origin;
-    hm_project *out;           /* the one project being built            */
-    int         started;       /* its mapping has been opened            */
-    int         finished;      /* ... and closed again                   */
-    hm_project *cur;           /* non-NULL while inside that mapping     */
-    int         seen_check;    /* keys that are only valid for one kind  */
-    int         seen_version;
-    int         seen_install;
-    int         seen_workdir;
-    int         seen_files;
-    int         pending_files; /* saw the header-only `files:` entry     */
-    int         in_files;      /* inside the nested embedded-file map    */
-    int         block_kind;    /* 1 = install, 2 = embedded file         */
+    const char       *buf;
+    const char       *origin;
+    hm_project       *out;        /* the one project being built            */
+    int               started;    /* its mapping has been opened            */
+    int               finished;   /* ... and closed again                   */
+    hm_project       *cur;        /* non-NULL while inside that mapping     */
+    int               seen_check; /* keys that are only valid for one kind  */
+    int               seen_version;
+    int               seen_install;
+    int               seen_workdir;
+    int               seen_files;
+    int               pending_files; /* saw the header-only `files:` entry     */
+    int               in_files;      /* inside the nested embedded-file map    */
+    int               block_kind;    /* 1 = install, 2 = embedded file         */
     hm_embedded_file *block_file;
-    const char *block_start;   /* first raw byte of the current block    */
-    const char *block_end;     /* one past its last raw byte             */
+    const char       *block_start; /* first raw byte of the current block    */
+    const char       *block_end;   /* one past its last raw byte             */
 } hm_cfg;
 
 static void cfg_err(const hm_cfg *c, long line, const char *msg)
@@ -89,25 +89,35 @@ static void cfg_err(const hm_cfg *c, long line, const char *msg)
 const char *hm_check_name(hm_check_kind k)
 {
     switch (k) {
-    case HM_CHECK_HASH:    return "hash";
-    case HM_CHECK_VERSION: return "version";
+    case HM_CHECK_HASH:
+        return "hash";
+    case HM_CHECK_VERSION:
+        return "version";
     case HM_CHECK_ETAG:
-    default:               return "etag";
+    default:
+        return "etag";
     }
 }
 
 /* Renders a schedule back into its config spelling, e.g. "every 6h". */
 void hm_sched_describe(const hm_project *p, char *out, size_t cap)
 {
-    static const struct { const char *unit; long secs; } units[] = {
-        { "w", 604800L }, { "d", 86400L }, { "h", 3600L }, { "m", 60L }
-    };
-    size_t i, o = 0;
-    long   v    = p->sched_interval;
+    static const struct {
+        const char *unit;
+        long        secs;
+    } units[] = {{"w", 604800L}, {"d", 86400L}, {"h", 3600L}, {"m", 60L}};
+    size_t      i, o = 0;
+    long        v    = p->sched_interval;
     const char *unit = "s";
 
-    if (p->sched_kind == HM_SCHED_ALWAYS) { hm_str_copy(out, cap, (hm_str){"always", 6}); return; }
-    if (p->sched_kind == HM_SCHED_NEVER)  { hm_str_copy(out, cap, (hm_str){"never", 5});  return; }
+    if (p->sched_kind == HM_SCHED_ALWAYS) {
+        hm_str_copy(out, cap, (hm_str){"always", 6});
+        return;
+    }
+    if (p->sched_kind == HM_SCHED_NEVER) {
+        hm_str_copy(out, cap, (hm_str){"never", 5});
+        return;
+    }
 
     for (i = 0; i < sizeof(units) / sizeof(units[0]); ++i) {
         if (v % units[i].secs == 0) {
@@ -117,10 +127,13 @@ void hm_sched_describe(const hm_project *p, char *out, size_t cap)
         }
     }
     {
-        char tmp[24];
+        char   tmp[24];
         size_t n = 0;
         long   x = v;
-        do { tmp[n++] = (char)('0' + (x % 10)); x /= 10; } while (x > 0 && n < sizeof(tmp));
+        do {
+            tmp[n++] = (char)('0' + (x % 10));
+            x /= 10;
+        } while (x > 0 && n < sizeof(tmp));
         while (n > 0 && o + 1 < cap) out[o++] = tmp[--n];
         while (*unit != '\0' && o + 1 < cap) out[o++] = *unit++;
     }
@@ -134,23 +147,52 @@ static int parse_schedule(hm_project *p, hm_str v)
     long          mul = 1;
     hm_str        num = v;
 
-    if (hm_str_eq(v, "always")) { p->sched_kind = HM_SCHED_ALWAYS; return 0; }
-    if (hm_str_eq(v, "never"))  { p->sched_kind = HM_SCHED_NEVER;  return 0; }
+    if (hm_str_eq(v, "always")) {
+        p->sched_kind = HM_SCHED_ALWAYS;
+        return 0;
+    }
+    if (hm_str_eq(v, "never")) {
+        p->sched_kind = HM_SCHED_NEVER;
+        return 0;
+    }
 
     p->sched_kind = HM_SCHED_EVERY;
-    if (hm_str_eq(v, "hourly"))  { p->sched_interval = 3600L;    return 0; }
-    if (hm_str_eq(v, "daily"))   { p->sched_interval = 86400L;   return 0; }
-    if (hm_str_eq(v, "weekly"))  { p->sched_interval = 604800L;  return 0; }
-    if (hm_str_eq(v, "monthly")) { p->sched_interval = 2592000L; return 0; }
+    if (hm_str_eq(v, "hourly")) {
+        p->sched_interval = 3600L;
+        return 0;
+    }
+    if (hm_str_eq(v, "daily")) {
+        p->sched_interval = 86400L;
+        return 0;
+    }
+    if (hm_str_eq(v, "weekly")) {
+        p->sched_interval = 604800L;
+        return 0;
+    }
+    if (hm_str_eq(v, "monthly")) {
+        p->sched_interval = 2592000L;
+        return 0;
+    }
 
     if (v.len < 2) return -1;
     switch (v.ptr[v.len - 1]) {
-    case 's': mul = 1L;      break;
-    case 'm': mul = 60L;     break;
-    case 'h': mul = 3600L;   break;
-    case 'd': mul = 86400L;  break;
-    case 'w': mul = 604800L; break;
-    default:  return -1;
+    case 's':
+        mul = 1L;
+        break;
+    case 'm':
+        mul = 60L;
+        break;
+    case 'h':
+        mul = 3600L;
+        break;
+    case 'd':
+        mul = 86400L;
+        break;
+    case 'w':
+        mul = 604800L;
+        break;
+    default:
+        return -1;
     }
     num.len -= 1;
     if (hm_parse_ulong(num, &n) != 0 || n == 0) return -1;
@@ -161,9 +203,18 @@ static int parse_schedule(hm_project *p, hm_str v)
 
 static int parse_check(hm_project *p, hm_str v)
 {
-    if (hm_str_eq(v, "etag"))    { p->check = HM_CHECK_ETAG;    return 0; }
-    if (hm_str_eq(v, "hash"))    { p->check = HM_CHECK_HASH;    return 0; }
-    if (hm_str_eq(v, "version")) { p->check = HM_CHECK_VERSION; return 0; }
+    if (hm_str_eq(v, "etag")) {
+        p->check = HM_CHECK_ETAG;
+        return 0;
+    }
+    if (hm_str_eq(v, "hash")) {
+        p->check = HM_CHECK_HASH;
+        return 0;
+    }
+    if (hm_str_eq(v, "version")) {
+        p->check = HM_CHECK_VERSION;
+        return 0;
+    }
     return -1;
 }
 
@@ -211,8 +262,9 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
         }
     } else if (hm_str_eq(key, "schedule")) {
         if (parse_schedule(p, value) != 0) {
-            cfg_err(c, line, "schedule must be always, never, hourly, daily, "
-                             "weekly, monthly or <n>[smhdw]");
+            cfg_err(c, line,
+                    "schedule must be always, never, hourly, daily, "
+                    "weekly, monthly or <n>[smhdw]");
             return -1;
         }
     } else if (hm_str_eq(key, "version-prefix")) {
@@ -222,7 +274,7 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
         c->seen_version   = 1;
         p->version_suffix = value;
     } else if (hm_str_eq(key, "install")) {
-        c->seen_install   = 1;
+        c->seen_install = 1;
         /* Inline form: `install: make install`. The block form is handled by
          * the BLOCK_SCALAR_* events. */
         p->install        = value;
@@ -238,8 +290,7 @@ static int valid_relative_path(hm_str path, size_t max)
 {
     size_t start = 0, i;
 
-    if (path.len == 0 || path.len > max || path.ptr[0] == '/' ||
-        path.ptr[path.len - 1] == '/') {
+    if (path.len == 0 || path.len > max || path.ptr[0] == '/' || path.ptr[path.len - 1] == '/') {
         return 0;
     }
 
@@ -264,7 +315,7 @@ static int valid_file_path(hm_str path)
 static hm_embedded_file *add_file(hm_cfg *c, hm_str path, long line)
 {
     hm_project *p = c->cur;
-    size_t i;
+    size_t      i;
 
     if (!valid_file_path(path)) {
         cfg_err(c, line, "embedded file path must be a safe relative path");
@@ -281,11 +332,10 @@ static hm_embedded_file *add_file(hm_cfg *c, hm_str path, long line)
         return NULL;
     }
 
-    hm_str_copy(p->files[p->file_count].path_buf,
-                sizeof(p->files[p->file_count].path_buf), path);
+    hm_str_copy(p->files[p->file_count].path_buf, sizeof(p->files[p->file_count].path_buf), path);
     p->files[p->file_count].path.ptr = p->files[p->file_count].path_buf;
     p->files[p->file_count].path.len = path.len;
-    p->files[p->file_count].line = line;
+    p->files[p->file_count].line     = line;
     return &p->files[p->file_count++];
 }
 
@@ -304,8 +354,8 @@ static int begin_project(hm_cfg *c, long line)
     /* Nothing hacman watches is worth asking about more than once a day, so
      * the default schedule is a full 24h; anything shorter is opt-in. */
     p->sched_interval = 86400L;
-    p->line       = line;
-    c->cur        = p;
+    p->line           = line;
+    c->cur            = p;
     return 0;
 }
 
@@ -314,9 +364,8 @@ static int begin_project(hm_cfg *c, long line)
  * This is the one place a config value is not simply borrowed from the input
  * buffer: a working directory has to be a real path before it can be entered,
  * and before it can identify a cache record. */
-static int expand_template(hm_cfg *c, hm_str tpl, const char *what,
-                           char *out, size_t cap, long line,
-                           int require_absolute)
+static int expand_template(hm_cfg *c, hm_str tpl, const char *what, char *out, size_t cap,
+                           long line, int require_absolute)
 {
     size_t i = 0, o = 0;
 
@@ -332,8 +381,7 @@ static int expand_template(hm_cfg *c, hm_str tpl, const char *what,
             }
             name[n] = '\0';
             if (i + 1 >= tpl.len || tpl.ptr[i] != '}' || tpl.ptr[i + 1] != '}') {
-                hm_err("hacman: %s:%d: unterminated '{{' in %s\n",
-                       c->origin, line, what);
+                hm_err("hacman: %s:%d: unterminated '{{' in %s\n", c->origin, line, what);
                 return -1;
             }
             i += 2;
@@ -341,7 +389,8 @@ static int expand_template(hm_cfg *c, hm_str tpl, const char *what,
             value = getenv(name);
             if (value == NULL || value[0] == '\0') {
                 hm_err("hacman: %s:%d: %s refers to {{%s}}, which is not set "
-                       "in the environment\n", c->origin, line, what, name);
+                       "in the environment\n",
+                       c->origin, line, what, name);
                 return -1;
             }
             while (*value != '\0' && o + 1 < cap) out[o++] = *value++;
@@ -356,8 +405,7 @@ static int expand_template(hm_cfg *c, hm_str tpl, const char *what,
      * embedded bin-path is the exception: it is resolved later against the
      * identity-derived cache work directory. */
     if (require_absolute && out[0] != '/') {
-        hm_err("hacman: %s:%d: %s must expand to an absolute path\n",
-               c->origin, line, what);
+        hm_err("hacman: %s:%d: %s must expand to an absolute path\n", c->origin, line, what);
         return -1;
     }
     return 0;
@@ -394,8 +442,7 @@ static int finish_project(hm_cfg *c)
             return -1;
         }
         if (c->seen_install) {
-            cfg_err(c, p->line,
-                    "a 'command' project has no 'install': the command is the work");
+            cfg_err(c, p->line, "a 'command' project has no 'install': the command is the work");
             return -1;
         }
         if (c->seen_files && c->seen_workdir) {
@@ -411,9 +458,8 @@ static int finish_project(hm_cfg *c)
             p->workdir.ptr = "{{HOME}}";
             p->workdir.len = 8;
         }
-        if (p->file_count == 0 &&
-            expand_template(c, p->workdir, "workdir", p->workdir_path,
-                            sizeof(p->workdir_path), p->line, 1) != 0) {
+        if (p->file_count == 0 && expand_template(c, p->workdir, "workdir", p->workdir_path,
+                                                  sizeof(p->workdir_path), p->line, 1) != 0) {
             return -1;
         }
     } else {
@@ -434,17 +480,13 @@ static int finish_project(hm_cfg *c)
     }
 
     /* The program this project sets up, if it names one. */
-    if (p->bin.len > 0 &&
-        expand_template(c, p->bin, "bin-path", p->bin_path,
-                        sizeof(p->bin_path), p->line,
-                        p->file_count == 0) != 0) {
+    if (p->bin.len > 0 && expand_template(c, p->bin, "bin-path", p->bin_path, sizeof(p->bin_path),
+                                          p->line, p->file_count == 0) != 0) {
         return -1;
     }
     if (p->bin_path[0] != '\0' && p->bin_path[0] != '/' &&
-        !valid_relative_path((hm_str){p->bin_path, strlen(p->bin_path)},
-                             HM_PATH_MAX)) {
-        cfg_err(c, p->line,
-                "embedded bin-path must be a safe relative path");
+        !valid_relative_path((hm_str){p->bin_path, strlen(p->bin_path)}, HM_PATH_MAX)) {
+        cfg_err(c, p->line, "embedded bin-path must be a safe relative path");
         return -1;
     }
 
@@ -466,7 +508,7 @@ static void block_line(hm_cfg *c, const siml_event *ev)
     if (c->block_start == NULL) {
         const char *line_start = ev->value.ptr;
         while (line_start > c->buf && line_start[-1] != '\n') --line_start;
-        c->block_start            = line_start;
+        c->block_start = line_start;
         if (c->block_kind == 1) {
             c->cur->install_indent = (size_t)(ev->value.ptr - line_start);
         } else {
@@ -476,8 +518,7 @@ static void block_line(hm_cfg *c, const siml_event *ev)
     c->block_end = ev->value.ptr + ev->value.len;
 }
 
-int hm_config_parse(const char *buf, size_t len, const char *origin,
-                    hm_project *out)
+int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project *out)
 {
     hm_line_reader reader;
     siml_parser    parser;
@@ -508,8 +549,7 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
 
         case SIML_EVENT_MAPPING_ENTRY_HEADER:
             if (c.in_files) {
-                cfg_err(&c, ev.line,
-                        "an embedded file must be a literal block scalar");
+                cfg_err(&c, ev.line, "an embedded file must be a literal block scalar");
                 return -1;
             }
             if (c.cur != NULL && hm_str_eq(slice(ev.key), "files")) {
@@ -570,8 +610,7 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
                 return -1;
             }
             if (c.in_files) {
-                cfg_err(&c, ev.line,
-                        "an embedded file must be a literal block scalar");
+                cfg_err(&c, ev.line, "an embedded file must be a literal block scalar");
                 return -1;
             }
             if (apply_field(&c, slice(ev.key), slice(ev.value), ev.line) != 0) {
@@ -588,8 +627,7 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
                 c.seen_install = 1;
                 c.block_kind   = 1;
             } else {
-                cfg_err(&c, ev.line,
-                        "only 'install' and embedded files may be block scalars");
+                cfg_err(&c, ev.line, "only 'install' and embedded files may be block scalars");
                 return -1;
             }
             c.block_start = NULL;
@@ -645,8 +683,7 @@ int hm_install_next_line(const hm_project *p, const char **cursor, hm_str *out)
     return hm_file_next_line(&block, cursor, out);
 }
 
-int hm_file_next_line(const hm_embedded_file *file, const char **cursor,
-                      hm_str *out)
+int hm_file_next_line(const hm_embedded_file *file, const char **cursor, hm_str *out)
 {
     const char *end;
     const char *cur;
@@ -654,8 +691,7 @@ int hm_file_next_line(const hm_embedded_file *file, const char **cursor,
     const char *eol;
     size_t      strip = 0;
 
-    if (file->content.len == 0 || file->content.ptr == NULL ||
-        *cursor == NULL) return 0;
+    if (file->content.len == 0 || file->content.ptr == NULL || *cursor == NULL) return 0;
     end = file->content.ptr + file->content.len;
     cur = *cursor;
     if (cur >= end) return 0;

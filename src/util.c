@@ -12,7 +12,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define HM_OUT_CAP  4096
+#define HM_OUT_CAP 4096
 /* Longest single hm_out()/hm_err() call. Formatting truncates rather than
  * overflowing, so this has to stay above the longest message (the usage
  * text). */
@@ -31,7 +31,7 @@ static void hm_write_all(int fd, const char *s, size_t len)
             if (errno == EINTR) continue;
             return; /* nothing useful left to do about a failing stdout */
         }
-        s   += (size_t)n;
+        s += (size_t)n;
         len -= (size_t)n;
     }
 }
@@ -182,9 +182,9 @@ size_t hm_str_copy(char *dst, size_t cap, hm_str s)
  * cache identities. */
 void hm_hash_hex(const char *data, size_t len, char *out17)
 {
-    static const char hex[] = "0123456789abcdef";
-    unsigned long long h = 1469598103934665603ULL;
-    size_t i;
+    static const char  hex[] = "0123456789abcdef";
+    unsigned long long h     = 1469598103934665603ULL;
+    size_t             i;
 
     for (i = 0; i < len; ++i) {
         h ^= (unsigned char)data[i];
@@ -215,9 +215,9 @@ int hm_parse_ulong(hm_str s, unsigned long *out)
  * `path` is a file name, or "-" for standard input. */
 long hm_read_all(const char *path, char *buf, size_t cap)
 {
-    int    fd    = 0;
+    int    fd       = 0;
     int    close_fd = 0;
-    size_t total = 0;
+    size_t total    = 0;
 
     if (strcmp(path, "-") != 0) {
         fd = open(path, O_RDONLY);
@@ -239,8 +239,7 @@ long hm_read_all(const char *path, char *buf, size_t cap)
         if (n == 0) break;
         total += (size_t)n;
         if (total == cap) {
-            hm_err("hacman: %s: input too large (max %u bytes)\n",
-                   path, (unsigned long)cap);
+            hm_err("hacman: %s: input too large (max %u bytes)\n", path, (unsigned long)cap);
             if (close_fd) close(fd);
             return -1;
         }

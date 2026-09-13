@@ -19,7 +19,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <stdio.h>   /* rename() */
+#include <stdio.h> /* rename() */
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -30,8 +30,7 @@
 static char record_buf[HM_RECORD_MAX];
 static char cache_dir_buf[HM_PATH_MAX + 1];
 
-static unsigned long long hash_bytes(unsigned long long h,
-                                     const char *data, size_t len)
+static unsigned long long hash_bytes(unsigned long long h, const char *data, size_t len)
 {
     size_t i;
     for (i = 0; i < len; ++i) {
@@ -43,25 +42,24 @@ static unsigned long long hash_bytes(unsigned long long h,
 
 static void embedded_hash(const hm_project *p, char out17[17])
 {
-    static const char hex[] = "0123456789abcdef";
-    unsigned long long h = 1469598103934665603ULL;
-    size_t i;
+    static const char  hex[] = "0123456789abcdef";
+    unsigned long long h     = 1469598103934665603ULL;
+    size_t             i;
 
     for (i = 0; i < p->file_count; ++i) {
-        const hm_embedded_file *f = &p->files[i];
-        const char separator = '\0';
-        h = hash_bytes(h, f->path.ptr, f->path.len);
-        h = hash_bytes(h, &separator, 1);
-        h = hash_bytes(h, f->content.ptr, f->content.len);
-        h = hash_bytes(h, &separator, 1);
+        const hm_embedded_file *f         = &p->files[i];
+        const char              separator = '\0';
+        h                                 = hash_bytes(h, f->path.ptr, f->path.len);
+        h                                 = hash_bytes(h, &separator, 1);
+        h                                 = hash_bytes(h, f->content.ptr, f->content.len);
+        h                                 = hash_bytes(h, &separator, 1);
     }
     for (i = 0; i < 16; ++i) out17[i] = hex[(h >> (60 - 4 * i)) & 0xF];
     out17[16] = '\0';
 }
 
 /* Appends `s`, replacing anything that would break the record layout. */
-static size_t append_clean(char *dst, size_t o, size_t cap,
-                           const char *s, size_t len)
+static size_t append_clean(char *dst, size_t o, size_t cap, const char *s, size_t len)
 {
     size_t i;
     for (i = 0; i < len && o + 1 < cap; ++i) {
@@ -84,7 +82,10 @@ static size_t append_long(char *dst, size_t o, size_t cap, long v)
     size_t        n = 0;
     unsigned long x = (v < 0) ? 0UL : (unsigned long)v;
 
-    do { tmp[n++] = (char)('0' + (x % 10)); x /= 10; } while (x > 0 && n < sizeof(tmp));
+    do {
+        tmp[n++] = (char)('0' + (x % 10));
+        x /= 10;
+    } while (x > 0 && n < sizeof(tmp));
     while (n > 0 && o + 1 < cap) dst[o++] = tmp[--n];
     return o;
 }
@@ -103,11 +104,11 @@ const char *hm_cache_dir(const char *override)
     if (env == NULL || env[0] == '\0') {
         env = getenv("HOME");
         if (env == NULL || env[0] == '\0') return "./hacman-cache";
-        o = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), env);
+        o   = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), env);
         env = "/.cache";
     }
-    o = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), env);
-    o = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), "/hacman");
+    o                = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), env);
+    o                = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), "/hacman");
     cache_dir_buf[o] = '\0';
     return cache_dir_buf;
 }
@@ -155,30 +156,29 @@ void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir)
     char   hash[17];
     size_t o = 0;
 
-    c->mark[0]    = '\0';
-    c->last_check = 0;
+    c->mark[0]     = '\0';
+    c->last_check  = 0;
     c->last_change = 0;
-    c->known      = 0;
-    c->workdir[0] = '\0';
+    c->known       = 0;
+    c->workdir[0]  = '\0';
 
     build_identity(p, c->identity, sizeof(c->identity));
     hm_hash_hex(c->identity, strlen(c->identity), hash);
 
-    o = append_str(c->key, 0, sizeof(c->key),
-                   (p->kind == HM_KIND_COMMAND) ? "cmd-" : "url-");
+    o = append_str(c->key, 0, sizeof(c->key), (p->kind == HM_KIND_COMMAND) ? "cmd-" : "url-");
     o = append_str(c->key, o, sizeof(c->key), hash);
     c->key[o] = '\0';
 
-    o = append_str(c->path, 0, sizeof(c->path), dir);
-    o = append_str(c->path, o, sizeof(c->path), "/");
-    o = append_str(c->path, o, sizeof(c->path), c->key);
+    o          = append_str(c->path, 0, sizeof(c->path), dir);
+    o          = append_str(c->path, o, sizeof(c->path), "/");
+    o          = append_str(c->path, o, sizeof(c->path), c->key);
     c->path[o] = '\0';
 
     if (p->file_count > 0) {
-        o = append_str(c->workdir, 0, sizeof(c->workdir), dir);
-        o = append_str(c->workdir, o, sizeof(c->workdir), "/");
-        o = append_str(c->workdir, o, sizeof(c->workdir), c->key);
-        o = append_str(c->workdir, o, sizeof(c->workdir), ".work");
+        o             = append_str(c->workdir, 0, sizeof(c->workdir), dir);
+        o             = append_str(c->workdir, o, sizeof(c->workdir), "/");
+        o             = append_str(c->workdir, o, sizeof(c->workdir), c->key);
+        o             = append_str(c->workdir, o, sizeof(c->workdir), ".work");
         c->workdir[o] = '\0';
     }
 }
@@ -246,8 +246,7 @@ int hm_cache_load(hm_cache *c)
         if (line_len < magic_len || memcmp(p, HM_CACHE_MAGIC, magic_len) != 0) {
             return 0; /* not ours: treat as absent, it will be overwritten */
         }
-        if (line_len - magic_len != id_len ||
-            memcmp(p + magic_len, c->identity, id_len) != 0) {
+        if (line_len - magic_len != id_len || memcmp(p + magic_len, c->identity, id_len) != 0) {
             /* Same file name, different meaning: ignore rather than trust. */
             return 0;
         }
@@ -258,10 +257,10 @@ int hm_cache_load(hm_cache *c)
     nl = (const char *)memchr(p, '\n', (size_t)(end - p));
     if (nl == NULL) nl = end;
     {
-        const char *cur = p;
-        hm_str checked = next_field(&cur, nl);
-        hm_str changed = next_field(&cur, nl);
-        hm_str mark    = next_field(&cur, nl);
+        const char *cur     = p;
+        hm_str      checked = next_field(&cur, nl);
+        hm_str      changed = next_field(&cur, nl);
+        hm_str      mark    = next_field(&cur, nl);
 
         c->last_check  = parse_epoch(checked);
         c->last_change = parse_epoch(changed);
@@ -277,7 +276,10 @@ static void mkdir_p(const char *path)
     char   tmp[HM_PATH_MAX + 1];
     size_t i, n = 0;
 
-    while (path[n] != '\0' && n + 1 < sizeof(tmp)) { tmp[n] = path[n]; ++n; }
+    while (path[n] != '\0' && n + 1 < sizeof(tmp)) {
+        tmp[n] = path[n];
+        ++n;
+    }
     tmp[n] = '\0';
 
     for (i = 1; tmp[i] != '\0'; ++i) {
@@ -299,16 +301,19 @@ int hm_cache_save(const hm_cache *c)
 
     /* Sibling temp file, named after this process so that parallel runs cannot
      * step on each other, then rename() into place. */
-    o = append_str(tmp_path, 0, sizeof(tmp_path), c->path);
-    o = append_str(tmp_path, o, sizeof(tmp_path), ".tmp.");
-    o = append_long(tmp_path, o, sizeof(tmp_path), (long)getpid());
+    o           = append_str(tmp_path, 0, sizeof(tmp_path), c->path);
+    o           = append_str(tmp_path, o, sizeof(tmp_path), ".tmp.");
+    o           = append_long(tmp_path, o, sizeof(tmp_path), (long)getpid());
     tmp_path[o] = '\0';
 
     n = strlen(c->path);
-    while (n > 0 && c->path[n - 1] != '/') --n;  /* strip the file name */
+    while (n > 0 && c->path[n - 1] != '/') --n; /* strip the file name */
     if (n > 1) {
         size_t i = 0;
-        while (i + 1 < n && i + 1 < sizeof(dir)) { dir[i] = c->path[i]; ++i; }
+        while (i + 1 < n && i + 1 < sizeof(dir)) {
+            dir[i] = c->path[i];
+            ++i;
+        }
         dir[i] = '\0';
         mkdir_p(dir);
     }
