@@ -1,0 +1,470 @@
+#!/usr/bin/env hacman
+# A complete last-file utility carried by one .siml file. Run it with:
+#   ./examples/last-file.siml [PATH ...]
+name: embedded-last-file
+command: meson setup build && meson compile -C build
+bin-path: build/last-file
+files:
+  main.c: |
+    #define _GNU_SOURCE
+
+    #include <dirent.h>
+    #include <errno.h>
+    #include <fcntl.h>
+    #include <glob.h>
+    #include <linux/stat.h>
+    #include <pwd.h>
+    #include <stdint.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <sys/syscall.h>
+    #include <sys/types.h>
+    #include <unistd.h>
+
+    #define PATH_BUFFER_SIZE 8192
+
+    struct newest {
+        const char *path;
+        char storage[PATH_BUFFER_SIZE];
+        int64_t seconds;
+        uint32_t nanoseconds;
+        int found;
+    };
+
+    static void path_error(const char *path)
+    {
+        fprintf(stderr, "last-file: %s: %s\n", strerror(errno), path);
+    }
+
+    /* Calling statx through the kernel keeps the example independent of the
+     * libc wrapper while retaining Linux birth-time support. */
+    static int stat_path(const char *path, int nofollow, struct statx *info)
+    {
+        int flags = nofollow ? AT_SYMLINK_NOFOLLOW : 0;
+
+        return (int)syscall(SYS_statx, AT_FDCWD, path, flags,
+                            STATX_BASIC_STATS | STATX_BTIME, info);
+    }
+
+    static int is_regular(const struct statx *info)
+    {
+        return (info->stx_mode & S_IFMT) == S_IFREG;
+    }
+
+    static int is_directory(const struct statx *info)
+    {
+        return (info->stx_mode & S_IFMT) == S_IFDIR;
+    }
+
+    /* Prefer creation time when the filesystem supplies a meaningful value,
+     * matching the Lua utility's Bun-inspired ordering. */
+    static void file_timestamp(const struct statx *info, int64_t *seconds,
+                               uint32_t *nanoseconds)
+    {
+        const struct statx_timestamp *stamp = &info->stx_mtime;
+
+        if ((info->stx_mask & STATX_BTIME) != 0 &&
+            (info->stx_btime.tv_sec > 0 ||
+             (info->stx_btime.tv_sec == 0 && info->stx_btime.tv_nsec > 0))) {
+            stamp = &info->stx_btime;
+        }
+        *seconds = stamp->tv_sec;
+        *nanoseconds = stamp->tv_nsec;
+    }
+
+    static int remember_if_newest(struct newest *newest, const char *path)
+    {
+        struct statx info;
+        int64_t seconds;
+        uint32_t nanoseconds;
+        size_t length;
+
+        /* Candidate errors are deliberately ignored; an explicit single path
+         * is validated before it reaches this common selection step. */
+        if (stat_path(path, 0, &info) != 0 || !is_regular(&info)) {
+            return 0;
+        }
+        file_timestamp(&info, &seconds, &nanoseconds);
+        if (newest->found &&
+            (seconds < newest->seconds ||
+             (seconds == newest->seconds && nanoseconds <= newest->nanoseconds))) {
+            return 0;
+        }
+
+        length = strlen(path);
+        if (length >= sizeof(newest->storage)) {
+            errno = ENAMETOOLONG;
+            path_error(path);
+            return -1;
+        }
+        memcpy(newest->storage, path, length + 1);
+        newest->path = newest->storage;
+        newest->seconds = seconds;
+        newest->nanoseconds = nanoseconds;
+        newest->found = 1;
+        return 0;
+    }
+
+    /* Lexically normalize a joined path without resolving symlinks. */
+    static int join_path(char *out, size_t capacity, const char *left,
+                         const char *right)
+    {
+        char input[PATH_BUFFER_SIZE];
+        size_t component_starts[PATH_BUFFER_SIZE / 2];
+        size_t input_length;
+        size_t read_offset = 0;
+        size_t written = 0;
+        size_t components = 0;
+        int absolute;
+
+        if ((size_t)snprintf(input, sizeof(input), "%s/%s", left, right) >=
+            sizeof(input)) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        input_length = strlen(input);
+        absolute = input[0] == '/';
+        if (absolute) {
+            if (capacity < 2) {
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+            out[written++] = '/';
+        }
+
+        while (read_offset < input_length) {
+            size_t start;
+            size_t length;
+
+            while (read_offset < input_length && input[read_offset] == '/') {
+                ++read_offset;
+            }
+            start = read_offset;
+            while (read_offset < input_length && input[read_offset] != '/') {
+                ++read_offset;
+            }
+            length = read_offset - start;
+            if (length == 0 ||
+                (length == 1 && input[start] == '.')) {
+                continue;
+            }
+            if (length == 2 && input[start] == '.' && input[start + 1] == '.' &&
+                components > 0 &&
+                !(written - component_starts[components - 1] == 2 &&
+                  out[component_starts[components - 1]] == '.' &&
+                  out[component_starts[components - 1] + 1] == '.')) {
+                written = component_starts[--components];
+                if (written > 1 && out[written - 1] == '/') {
+                    --written;
+                }
+                continue;
+            }
+            if (length == 2 && input[start] == '.' && input[start + 1] == '.' &&
+                absolute) {
+                continue;
+            }
+            if (written > 0 && out[written - 1] != '/') {
+                if (written + 1 >= capacity) {
+                    errno = ENAMETOOLONG;
+                    return -1;
+                }
+                out[written++] = '/';
+            }
+            if (written + length >= capacity ||
+                components >= sizeof(component_starts) / sizeof(component_starts[0])) {
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+            component_starts[components++] = written;
+            memcpy(out + written, input + start, length);
+            written += length;
+        }
+
+        if (written == 0) {
+            if (capacity < 2) {
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+            out[written++] = '.';
+        }
+        out[written] = '\0';
+        return 0;
+    }
+
+    static int directory_name(char *out, size_t capacity, const char *path)
+    {
+        size_t length = strlen(path);
+        const char *slash;
+
+        while (length > 0 && path[length - 1] == '/') {
+            --length;
+        }
+        if (length == 0) {
+            return snprintf(out, capacity, "/") >= (int)capacity ? -1 : 0;
+        }
+        slash = memrchr(path, '/', length);
+        if (slash == NULL) {
+            return snprintf(out, capacity, ".") >= (int)capacity ? -1 : 0;
+        }
+        length = (size_t)(slash - path);
+        while (length > 0 && path[length - 1] == '/') {
+            --length;
+        }
+        if (length == 0) {
+            return snprintf(out, capacity, "/") >= (int)capacity ? -1 : 0;
+        }
+        if (length >= capacity) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        memcpy(out, path, length);
+        out[length] = '\0';
+        return 0;
+    }
+
+    static const char *base_name(const char *path, size_t *length)
+    {
+        size_t path_length = strlen(path);
+        const char *slash;
+
+        while (path_length > 0 && path[path_length - 1] == '/') {
+            --path_length;
+        }
+        slash = memrchr(path, '/', path_length);
+        *length = slash == NULL ? path_length :
+                  path_length - (size_t)(slash + 1 - path);
+        return slash == NULL ? path : slash + 1;
+    }
+
+    static const char *home_directory(void)
+    {
+        const char *home = getenv("HOME");
+        struct passwd *passwd;
+
+        if (home != NULL && home[0] != '\0') {
+            return home;
+        }
+        passwd = getpwuid(getuid());
+        return passwd != NULL ? passwd->pw_dir : NULL;
+    }
+
+    static int expand_home(char *out, size_t capacity, const char *path)
+    {
+        const char *home;
+
+        if (strcmp(path, "~") != 0 && strncmp(path, "~/", 2) != 0) {
+            return 0;
+        }
+        home = home_directory();
+        if (home == NULL) {
+            fprintf(stderr, "last-file: cannot determine the home directory\n");
+            return -1;
+        }
+        if ((size_t)snprintf(out, capacity, "%s%s", home,
+                             path[1] == '/' ? path + 1 : "") >= capacity) {
+            errno = ENAMETOOLONG;
+            path_error(path);
+            return -1;
+        }
+        return 1;
+    }
+
+    static int has_glob(const char *path)
+    {
+        return strpbrk(path, "*?[]{}") != NULL;
+    }
+
+    static int scan_directory(struct newest *newest, const char *directory)
+    {
+        DIR *handle = opendir(directory);
+        struct dirent *entry;
+        int result = 0;
+
+        if (handle == NULL) {
+            path_error(directory);
+            return -1;
+        }
+        errno = 0;
+        while ((entry = readdir(handle)) != NULL) {
+            char path[PATH_BUFFER_SIZE];
+            struct statx info;
+
+            if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0) {
+                errno = 0;
+                continue;
+            }
+            if (join_path(path, sizeof(path), directory, entry->d_name) != 0) {
+                path_error(directory);
+                result = -1;
+                break;
+            }
+            /* lstat semantics exclude symlinks discovered through a directory. */
+            if (stat_path(path, 1, &info) == 0 && is_regular(&info) &&
+                remember_if_newest(newest, path) != 0) {
+                result = -1;
+                break;
+            }
+            errno = 0;
+        }
+        if (entry == NULL && errno != 0 && result == 0) {
+            path_error(directory);
+            result = -1;
+        }
+        closedir(handle);
+        return result;
+    }
+
+    static int append_glob_literal(char *out, size_t capacity, const char *text)
+    {
+        size_t written = 0;
+
+        while (*text != '\0') {
+            if (strchr("\\*?[]{}", *text) != NULL) {
+                if (written + 1 >= capacity) {
+                    errno = ENAMETOOLONG;
+                    return -1;
+                }
+                out[written++] = '\\';
+            }
+            if (written + 1 >= capacity) {
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+            out[written++] = *text++;
+        }
+        out[written] = '\0';
+        return 0;
+    }
+
+    static int scan_glob(struct newest *newest, const char *pattern)
+    {
+        char directory[PATH_BUFFER_SIZE];
+        char escaped_directory[PATH_BUFFER_SIZE];
+        char glob_pattern[PATH_BUFFER_SIZE];
+        glob_t matches;
+        DIR *handle;
+        const char *basename;
+        size_t basename_length;
+        size_t index;
+        int glob_result;
+        int result = 0;
+
+        if (directory_name(directory, sizeof(directory), pattern) != 0) {
+            path_error(pattern);
+            return -1;
+        }
+        handle = opendir(directory);
+        if (handle == NULL) {
+            path_error(directory);
+            return -1;
+        }
+        closedir(handle);
+
+        basename = base_name(pattern, &basename_length);
+        if (append_glob_literal(escaped_directory, sizeof(escaped_directory),
+                                directory) != 0 ||
+            (size_t)snprintf(glob_pattern, sizeof(glob_pattern), "%s/%.*s",
+                             escaped_directory, (int)basename_length, basename) >=
+                sizeof(glob_pattern)) {
+            errno = ENAMETOOLONG;
+            path_error(pattern);
+            return -1;
+        }
+
+        memset(&matches, 0, sizeof(matches));
+        glob_result = glob(glob_pattern, GLOB_BRACE, NULL, &matches);
+        if (glob_result == GLOB_NOMATCH) {
+            globfree(&matches);
+            return 0;
+        }
+        if (glob_result != 0) {
+            globfree(&matches);
+            fprintf(stderr, "last-file: glob failed for %s\n", pattern);
+            return -1;
+        }
+
+        for (index = 0; index < matches.gl_pathc; ++index) {
+            char path[PATH_BUFFER_SIZE];
+            struct statx info;
+            const char *matched_name;
+            size_t matched_name_length;
+
+            matched_name = base_name(matches.gl_pathv[index], &matched_name_length);
+            if (matched_name_length >= sizeof(path) ||
+                join_path(path, sizeof(path), directory, matched_name) != 0) {
+                path_error(matches.gl_pathv[index]);
+                result = -1;
+                break;
+            }
+            if (stat_path(path, 1, &info) == 0 && is_regular(&info) &&
+                remember_if_newest(newest, path) != 0) {
+                result = -1;
+                break;
+            }
+        }
+        globfree(&matches);
+        return result;
+    }
+
+    int main(int argc, char **argv)
+    {
+        struct newest newest = {0};
+        char expanded[PATH_BUFFER_SIZE];
+        const char *path;
+        int expansion;
+        int index;
+
+        if (argc == 1) {
+            if (scan_directory(&newest, ".") != 0) {
+                return 1;
+            }
+        } else if (argc == 2) {
+            struct statx info;
+
+            expansion = expand_home(expanded, sizeof(expanded), argv[1]);
+            if (expansion < 0) {
+                return 1;
+            }
+            path = expansion > 0 ? expanded : argv[1];
+            if (has_glob(path)) {
+                if (scan_glob(&newest, path) != 0) {
+                    return 1;
+                }
+            } else {
+                if (stat_path(path, 0, &info) != 0) {
+                    path_error(path);
+                    return 1;
+                }
+                if (is_directory(&info)) {
+                    if (scan_directory(&newest, path) != 0) {
+                        return 1;
+                    }
+                } else if (is_regular(&info) &&
+                           remember_if_newest(&newest, path) != 0) {
+                    return 1;
+                }
+            }
+        } else {
+            for (index = 1; index < argc; ++index) {
+                expansion = expand_home(expanded, sizeof(expanded), argv[index]);
+                if (expansion < 0) {
+                    return 1;
+                }
+                path = expansion > 0 ? expanded : argv[index];
+                if (remember_if_newest(&newest, path) != 0) {
+                    return 1;
+                }
+            }
+        }
+
+        if (!newest.found) {
+            return 1;
+        }
+        puts(newest.path);
+        return 0;
+    }
+  meson.build: |
+    project('embedded-last-file', 'c', default_options: ['c_std=c99'])
+    executable('last-file', 'main.c')
