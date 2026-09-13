@@ -148,6 +148,12 @@ Tests need no network (see [Tests](#tests)):
 ./tests.py
 ```
 
+Formatting maintained C and Python sources requires `clang-format` and Black:
+
+```sh
+./autoformat.sh
+```
+
 ### Dependencies
 
 - Build: a C99 compiler, Meson ≥ 0.60, Ninja.

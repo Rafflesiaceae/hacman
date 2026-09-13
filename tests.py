@@ -926,7 +926,9 @@ install: |
         self.contains("first run reports new", "new      demo")
         install_log = next(cache.glob("*.work/install.log"))
         install_output = install_log.read_text(encoding="utf-8")
-        self.check("install script ran", "install name=demo prev=none" in install_output)
+        self.check(
+            "install script ran", "install name=demo prev=none" in install_output
+        )
         self.check("response file is passed", "body=version 1.0.0" in install_output)
         self.expect_hacman("unchanged run is quiet", 0, "--cache", cache, project)
         self.missing("no install on unchanged", "install name=demo")
@@ -939,7 +941,9 @@ install: |
         self.contains("change is reported with both marks", "changed  demo")
         install_output = install_log.read_text(encoding="utf-8")
         install_lines = [
-            line for line in install_output.splitlines() if line.startswith("install name=")
+            line
+            for line in install_output.splitlines()
+            if line.startswith("install name=")
         ]
         self.check(
             "previous mark reaches the script",
