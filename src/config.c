@@ -270,6 +270,15 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
         /* Embedded commands normally rebuild only when their inputs change;
          * spelling out a schedule opts them into periodic command runs. */
         p->schedule_explicit = 1;
+    } else if (hm_str_eq(key, "sandboxed")) {
+        if (hm_str_eq(value, "true")) {
+            p->sandboxed = 1;
+        } else if (hm_str_eq(value, "false")) {
+            p->sandboxed = 0;
+        } else {
+            cfg_err(c, line, "sandboxed must be true or false");
+            return -1;
+        }
     } else if (hm_str_eq(key, "version-prefix")) {
         c->seen_version   = 1;
         p->version_prefix = value;
@@ -354,6 +363,9 @@ static int begin_project(hm_cfg *c, long line)
     memset(p, 0, sizeof(*p));
     p->check      = HM_CHECK_ETAG;
     p->sched_kind = HM_SCHED_EVERY;
+    /* Project-controlled setup code is confined unless the file explicitly
+     * opts out for operations that intentionally modify the host. */
+    p->sandboxed = 1;
     /* Nothing hacman watches is worth asking about more than once a day, so
      * the default schedule is a full 24h; anything shorter is opt-in. */
     p->sched_interval = 86400L;
@@ -484,13 +496,15 @@ static int finish_project(hm_cfg *c)
 
     /* The program this project sets up, if it names one. */
     if (p->bin.len > 0 && expand_template(c, p->bin, "bin-path", p->bin_path, sizeof(p->bin_path),
-                                          p->line, p->file_count == 0) != 0) {
+                                          p->line, p->file_count == 0 && !p->sandboxed) != 0) {
         return -1;
     }
-    if (p->bin_path[0] != '\0' && p->bin_path[0] != '/' &&
-        !valid_relative_path((hm_str){p->bin_path, strlen(p->bin_path)}, HM_PATH_MAX)) {
-        cfg_err(c, p->line, "embedded bin-path must be a safe relative path");
-        return -1;
+    if (p->bin_path[0] != '\0' && p->bin_path[0] != '/') {
+        if (!valid_relative_path((hm_str){p->bin_path, strlen(p->bin_path)}, HM_PATH_MAX)) {
+            cfg_err(c, p->line, "cache-relative bin-path must be a safe relative path");
+            return -1;
+        }
+        p->bin_cached = 1;
     }
 
     c->finished = 1;

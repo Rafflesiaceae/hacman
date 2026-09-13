@@ -1,4 +1,6 @@
 name: cargo install-update -a
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-a24eea3d9771633e.work
 command: cargo install-update -a
 workdir: /home/hacman-test
 run: /bin/sh -c <command>, in workdir

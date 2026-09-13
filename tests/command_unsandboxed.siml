@@ -1,0 +1,5 @@
+name: host-maintenance
+sandboxed: false
+command: touch /var/lib/example/updated
+workdir: /var/lib/example
+schedule: weekly

@@ -247,12 +247,20 @@ class Suite:
 
     def example_plans(self) -> None:
         """Ensure each shipped example resolves without performing work."""
+        unsandboxed = []
         for siml in sorted((self.root / "examples").glob("*.siml")):
             if self.merge_snapshot(siml):
                 continue
             result = self.plan(siml)
             relative = siml.relative_to(self.root)
             self.check(f"{relative} plans", result.returncode == 0, result.stdout)
+            if "sandboxed: true\n" not in result.stdout:
+                unsandboxed.append(str(relative))
+        self.check(
+            "all shipped examples use the default sandbox",
+            not unsandboxed,
+            "\n".join(unsandboxed),
+        )
 
     def input_tests(self) -> None:
         """Cover environment options, stdin, and cache-path selection."""
@@ -528,6 +536,7 @@ files:
         self.write(
             project,
             f"""name: embedded-concurrent
+sandboxed: false
 command: echo update >> update.log && touch "{started}" && while [ ! -e "{release}" ]; do sleep 0.01; done && cp runner program && chmod +x program
 bin-path: program
 schedule: 1h
@@ -594,6 +603,213 @@ files:
                 process.wait()
             for handle in handles:
                 handle.close()
+
+    def sandbox_tests(self) -> None:
+        """Verify default confinement and the explicit opt-out for both runners."""
+        outside = self.temp / "sandbox-command-outside"
+        readable = self.temp / "sandbox-readable"
+        readable.write_text("host input\n", encoding="utf-8")
+        protected = self.temp / "sandbox-protected"
+        protected.write_text("unchanged\n", encoding="utf-8")
+        env = self.command_env(
+            {
+                "SANDBOX_OUTSIDE": str(outside),
+                "SANDBOX_PROTECTED": str(protected),
+                "SANDBOX_READABLE": str(readable),
+                "TMPDIR": str(self.temp),
+            }
+        )
+        cache = self.temp / "cache-sandbox-command"
+        project = self.temp / "sandbox-command.siml"
+        self.write(
+            project,
+            """name: sandbox-command
+command: cat "$SANDBOX_READABLE" > "$TMPDIR/read-copy" && printf changed > "$SANDBOX_PROTECTED"; printf blocked > "$SANDBOX_OUTSIDE"
+schedule: always
+""",
+        )
+        self.expect_hacman(
+            "sandboxed command rejects an external write",
+            2,
+            "--cache",
+            cache,
+            project,
+            env=env,
+        )
+        workdir = next(cache.glob("*.work"))
+        self.check(
+            "sandboxed command can read the host",
+            (workdir / "read-copy").read_text(encoding="utf-8") == "host input\n",
+        )
+        self.check("sandboxed command cannot write to the host", not outside.exists())
+        self.check(
+            "sandboxed command cannot replace host contents",
+            protected.read_text(encoding="utf-8") == "unchanged\n",
+        )
+
+        dev_null = self.temp / "sandbox-dev-null.siml"
+        self.write(
+            dev_null,
+            """name: sandbox-dev-null
+command: printf discarded > /dev/null
+schedule: always
+""",
+        )
+        self.expect_hacman(
+            "sandboxed command can write to /dev/null",
+            0,
+            "--cache",
+            self.temp / "cache-sandbox-dev-null",
+            dev_null,
+        )
+
+        project.write_text(
+            project.read_text(encoding="utf-8").replace(
+                "name: sandbox-command\n", "name: sandbox-command\nsandboxed: false\n"
+            ),
+            encoding="utf-8",
+        )
+        self.expect_hacman(
+            "sandboxed false lets a command write outside its cache",
+            0,
+            "--cache",
+            cache,
+            project,
+            env=env,
+        )
+        self.check(
+            "unsandboxed command external write is visible",
+            outside.read_text(encoding="utf-8") == "blocked",
+        )
+
+        outside.unlink()
+        payload = self.temp / "sandbox-payload"
+        payload.write_text("response body\n", encoding="utf-8")
+        script_cache = self.temp / "cache-sandbox-script"
+        script = self.temp / "sandbox-script.siml"
+        script_env = self.command_env(
+            {"SANDBOX_OUTSIDE": str(outside), "TMPDIR": str(self.temp)}
+        )
+        self.write(
+            script,
+            f"""name: sandbox-script
+url: {payload.as_uri()}
+check: hash
+schedule: always
+install: |
+  cat "$HACMAN_RESPONSE" > "$TMPDIR/response-copy"
+  printf blocked > "$SANDBOX_OUTSIDE"
+""",
+        )
+        self.expect_hacman(
+            "sandboxed install script rejects an external write",
+            2,
+            "--cache",
+            script_cache,
+            script,
+            env=script_env,
+        )
+        script_workdir = next(script_cache.glob("*.work"))
+        self.check(
+            "sandboxed install script writes in its cache workdir",
+            (script_workdir / "response-copy").read_text(encoding="utf-8")
+            == "response body\n",
+        )
+        self.check(
+            "sandboxed install script cannot write to the host", not outside.exists()
+        )
+
+        script.write_text(
+            script.read_text(encoding="utf-8").replace(
+                "name: sandbox-script\n", "name: sandbox-script\nsandboxed: false\n"
+            ),
+            encoding="utf-8",
+        )
+        self.expect_hacman(
+            "sandboxed false lets an install script write outside its cache",
+            0,
+            "--cache",
+            script_cache,
+            script,
+            env=script_env,
+        )
+        self.check(
+            "unsandboxed install-script external write is visible",
+            outside.read_text(encoding="utf-8") == "blocked",
+        )
+
+        cached_program = self.temp / "sandbox-cached-bin.siml"
+        self.write(
+            cached_program,
+            f"""name: sandbox-cached-bin
+url: {payload.as_uri()}
+check: hash
+schedule: weekly
+bin-path: cached-tool
+install: |
+  echo installed >> installs.log
+  cat > cached-tool <<'SCRIPT'
+  #!/bin/sh
+  printf 'cached:%s\\n' "$1"
+  SCRIPT
+  chmod 755 cached-tool
+""",
+        )
+        self.expect_hacman(
+            "sandboxed URL project builds and execs a relative bin-path",
+            0,
+            "--cache",
+            self.temp / "cache-sandbox-cached-bin",
+            cached_program,
+            "argument",
+        )
+        self.contains(
+            "relative bin-path resolves inside the sandbox workdir",
+            "cached:argument",
+        )
+        cached_workdir = next((self.temp / "cache-sandbox-cached-bin").glob("*.work"))
+        (cached_workdir / "cached-tool").unlink()
+        self.expect_hacman(
+            "missing cached relative bin-path triggers setup before schedule",
+            0,
+            "--cache",
+            self.temp / "cache-sandbox-cached-bin",
+            cached_program,
+            "rebuilt",
+        )
+        self.check(
+            "missing cached relative bin-path was rebuilt",
+            self.line_count(cached_workdir / "installs.log") == 2,
+        )
+
+        redirect = self.temp / "sandbox-symlink-target"
+        redirect.mkdir()
+        redirect_cache = self.temp / "cache-sandbox-symlink"
+        redirect_project = self.temp / "sandbox-symlink.siml"
+        self.write(
+            redirect_project,
+            """name: sandbox-symlink
+command: printf escaped > "$TMPDIR/escaped"
+schedule: always
+""",
+        )
+        plan = self.hacman("--plan", "--cache", redirect_cache, redirect_project)
+        match = re.search(r"^sandbox-write-dir: (.+)$", plan.stdout, re.MULTILINE)
+        redirected_workdir = Path(match.group(1)) if match else Path()
+        redirect_cache.mkdir()
+        if match:
+            redirected_workdir.symlink_to(redirect, target_is_directory=True)
+        self.expect_hacman(
+            "sandbox rejects a symlinked writable workdir",
+            2,
+            "--cache",
+            redirect_cache,
+            redirect_project,
+        )
+        self.check(
+            "symlinked workdir cannot redirect sandbox writes",
+            match is not None and not (redirect / "escaped").exists(),
+        )
 
     def url_pipeline_tests(self) -> tuple[Path, Path]:
         """Exercise URL checks, schedules, modes, and failures."""
@@ -846,6 +1062,7 @@ install: |
         self.write(
             first,
             f"""name: first-file
+sandboxed: false
 command: echo "ran in $(pwd)" >>"{marker}"
 workdir: {{{{TMPDIR_FOR_TEST}}}}
 schedule: 6h
@@ -945,6 +1162,7 @@ schedule: 6h
         self.write(
             failing,
             f"""name: failing-command
+sandboxed: false
 command: echo attempt >>"{failed_marker}"; exit 7
 workdir: {{{{TMPDIR_FOR_TEST}}}}
 schedule: 6h
@@ -1007,6 +1225,7 @@ schedule: 6h
         self.write(
             at_home,
             f"""name: at-home
+sandboxed: false
 command: pwd >"{home_marker}"
 schedule: always
 """,
@@ -1047,6 +1266,7 @@ for arg in "$@"; do echo "arg:$arg"; done
         self.write(
             shim,
             f"""name: shimmed
+sandboxed: false
 command: echo setup >>"{setup_log}"
 workdir: {{{{TMPDIR_FOR_TEST}}}}
 bin-path: {program}
@@ -1147,6 +1367,7 @@ schedule: 6h
         self.write(
             bad_setup,
             f"""name: bad-setup
+sandboxed: false
 command: exit 5
 workdir: {{{{TMPDIR_FOR_TEST}}}}
 bin-path: {program}
@@ -1194,6 +1415,7 @@ schedule: always
             self.temp = Path(directory)
             self.input_tests()
             self.embedded_tests()
+            self.sandbox_tests()
             self.url_pipeline_tests()
             self.command_tests()
             self.shim_tests()

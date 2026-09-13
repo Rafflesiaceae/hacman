@@ -1,4 +1,6 @@
 name: embedded
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-<source-path-hash>.work
 command: test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready
 workdir: /home/hacman-test/.cache/hacman/cmd-<source-path-hash>.work
 run: /bin/sh -c <command>, in workdir

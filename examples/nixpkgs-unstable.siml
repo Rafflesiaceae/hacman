@@ -1,11 +1,10 @@
 #!/usr/bin/env hacman
-# A plain "did this URL change at all" watch: only the server's validators are
-# compared, so nothing but headers is transferred.
+# Cache the latest nixpkgs-unstable revision without modifying a host flake.
 name: nixpkgs-unstable
 url: https://channels.nixos.org/nixpkgs-unstable/git-revision
-check: etag
+check: hash
 schedule: 6h
 install: |
   set -eu
-  echo "nixpkgs-unstable moved to $HACMAN_VERSION"
-  nix flake update --flake "$HOME/workspace/nixcfg"
+  install -m644 "$HACMAN_RESPONSE" revision.next
+  mv revision.next revision

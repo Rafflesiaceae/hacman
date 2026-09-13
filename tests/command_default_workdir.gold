@@ -1,4 +1,6 @@
 name: prune-journal
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-a7364c66f35cc228.work
 command: journalctl --vacuum-time=30d
 workdir: /home/hacman-test
 run: /bin/sh -c <command>, in workdir

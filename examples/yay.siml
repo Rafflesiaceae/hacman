@@ -1,13 +1,14 @@
 #!/usr/bin/env hacman
 # Keep a private yay binary current, then forward commands such as
 # `./examples/yay.siml -Syu` to it.
+# The downloaded binary stays in this project's cache work directory.
 name: yay
 url: https://api.github.com/repos/Jguer/yay/releases/latest
 check: version
 version-prefix: "tag_name": "
 version-suffix: "
 schedule: daily
-bin-path: {{HOME}}/.local/bin/yay
+bin-path: yay
 install: |
   set -eu
 
@@ -34,5 +35,5 @@ install: |
   "$tmp/$release_dir/yay" --version >/dev/null
 
   # Replace the cached executable only after the new release runs successfully.
-  install -Dm755 "$tmp/$release_dir/yay" "$HOME/.local/bin/yay.next"
-  mv "$HOME/.local/bin/yay.next" "$HOME/.local/bin/yay"
+  install -m755 "$tmp/$release_dir/yay" yay.next
+  mv yay.next yay

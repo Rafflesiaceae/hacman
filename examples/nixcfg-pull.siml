@@ -3,7 +3,9 @@
 # hacman only runs it when the schedule allows, and only records the run if the
 # command succeeded, so a failure is retried on the next invocation.
 # Any other file naming this command with this workdir shares that record.
+# The host checkout is only the seed; pulls and lock updates stay in its cached
+# copy under TMPDIR, which hacman points at this project's writable workdir.
 name: nixcfg-pull
-command: git pull --ff-only && nix flake update
+command: test -d "$TMPDIR/nixcfg/.git" || cp -a . "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
 workdir: {{HOME}}/workspace/nixcfg
 schedule: 12h

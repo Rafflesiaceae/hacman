@@ -1,4 +1,6 @@
 name: nixpkgs-unstable
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/url-6a1547ac49fb605b.work
 url: https://channels.nixos.org/nixpkgs-unstable/git-revision
 check: etag
 request: HEAD https://channels.nixos.org/nixpkgs-unstable/git-revision

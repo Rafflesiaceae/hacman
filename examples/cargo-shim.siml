@@ -4,7 +4,16 @@
 #   alias cargo='hacman ~/.config/hacman/cargo-shim.siml'
 # `cargo build --release` then updates stable at most once a week and forwards
 # `build --release` to the real cargo, whose exit status becomes hacman's.
+# Keep rustup's complete toolchain state in this project's cache workdir.
 name: cargo
-command: rustup update stable
-bin-path: {{HOME}}/.cargo/bin/cargo
+command: RUSTUP_HOME="$PWD/rustup" CARGO_HOME="$PWD/cargo-home" rustup update stable && chmod 755 cargo
+bin-path: cargo
 schedule: weekly
+files:
+  cargo: |
+    #!/bin/sh
+    set -eu
+    base="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+    export RUSTUP_HOME="$base/rustup"
+    export CARGO_HOME="$base/cargo-home"
+    exec "$CARGO_HOME/bin/cargo" "$@"

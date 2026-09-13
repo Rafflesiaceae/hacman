@@ -1,4 +1,6 @@
 name: rustup-updated-cargo
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-9581ab10389f28a9.work
 command: rustup update stable
 workdir: /home/hacman-test
 run: /bin/sh -c <command>, in workdir

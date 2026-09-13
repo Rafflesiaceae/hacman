@@ -1,4 +1,6 @@
 name: commented
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/url-4089f6dcfcb6f3fc.work
 url: https://example.com/x
 check: etag
 request: HEAD https://example.com/x

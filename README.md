@@ -18,9 +18,9 @@ cargo build --release   # updates the toolchain at most once a week,
 script when it changed, or simply run a command.
 
 ```
-url: https://go.dev/VERSION?m=text      command: rustup update stable
-check: hash                             workdir: {{HOME}}
-schedule: daily                         bin-path: {{HOME}}/.cargo/bin/cargo
+url: https://go.dev/VERSION?m=text      command: cp tool "$TMPDIR/tool"
+check: hash                             workdir: {{HOME}}/src/tool
+schedule: daily                         bin-path: tool
 install: |                              schedule: weekly
   ...
 ```
@@ -83,6 +83,9 @@ Rules the fast path follows, and that changes to it must keep:
 - **Nothing eager.** Nothing happens at all unless the schedule says the
   project is due: no request, no command, no fork. Nothing is written unless
   the work that followed actually succeeded.
+- **Sandboxed setup.** Commands and install scripts can read the host but may
+  only create, modify, or remove files inside their cache-owned `.work`
+  directory. Host-maintenance projects must explicitly opt out.
 
 Measured on this repository (glibc-static build, project not due):
 
@@ -151,6 +154,7 @@ Tests need no network (see [Tests](#tests)):
 - Tests: Python ≥ 3.8 and `curl`.
 - Runtime: `curl` and `/bin/sh`. The SIML parser is vendored in
   `vendor/siml/` (see `vendor.py`); nothing else is linked in.
+- Default sandbox: Linux with Landlock ABI ≥ 3 (Linux 5.19 or newer).
 
 HTTP is delegated to `curl(1)` on purpose: statically linking a TLS stack (and
 shipping a CA bundle with it) would dwarf the program, and one `fork`+`exec` is
@@ -270,6 +274,11 @@ See [`examples/`](examples/) for one file per check scheme.
 | `version-suffix` | no | end of line | text immediately after the version |
 | `install` | no | — | shell script to run when the URL changed |
 | `bin-path` | no | — | program to exec afterwards (see [above](#options-before-file-arguments-after-it)) |
+| `sandboxed` | no | `true` | confine install-script writes to the project's cache `.work` directory |
+
+For a sandboxed URL project, a safe relative `bin-path` resolves inside its
+cache work directory. This lets an install script atomically replace a cached
+tool without writing to `~/.local/bin` or another host directory.
 
 ### command projects
 
@@ -277,7 +286,7 @@ Run a command, but no more often than the schedule allows:
 
 ```
 name: nixcfg-pull
-command: git pull --ff-only && nix flake update
+command: test -d "$TMPDIR/nixcfg/.git" || cp -a . "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
 workdir: {{HOME}}/workspace/nixcfg
 schedule: 12h
 ```
@@ -289,14 +298,15 @@ schedule: 12h
 | `files` | no | — | files to materialize in a cache work directory before running the command |
 | `name` | no | the `command` | label used in output |
 | `schedule` | no | `daily` | when the command may run (below) |
-| `bin-path` | no | — | program to exec afterwards; may be relative to the generated work directory when used with `files` (see [above](#options-before-file-arguments-after-it)) |
+| `bin-path` | no | — | program to exec afterwards; a safe relative path resolves inside the sandbox work directory (see [above](#options-before-file-arguments-after-it)) |
+| `sandboxed` | no | `true` | confine command writes to the project's cache `.work` directory |
 
 `workdir` and `bin-path` support `{{VAR}}` templating against the environment:
 `{{HOME}}/workspace/nixcfg`. An unset variable is an error rather than an empty
 string, so a typo cannot silently point the command at `/workspace/nixcfg`.
-Both must normally expand to an absolute path. For a command project with
-embedded `files`, `bin-path` may instead be a safe relative path beneath the
-generated work directory, such as `build/tool`.
+`workdir` must expand to an absolute path. A sandboxed project's `bin-path` may
+instead be a safe relative path beneath the generated work directory, such as
+`build/tool`; an unsandboxed project's `bin-path` must be absolute.
 
 There is no `install` and no `check`: the command *is* the work, and its exit
 status is the whole verdict. hacman records the run **only if the command
@@ -371,14 +381,16 @@ clock, nor the network, so the same input always plans to the same bytes:
 ```
 $ hacman --plan examples/nixcfg-pull.siml
 name: nixcfg-pull
-command: git pull --ff-only && nix flake update
+sandboxed: true
+sandbox-write-dir: /home/you/.cache/hacman/cmd-497da11b49895aa7.work
+command: test -d "$TMPDIR/nixcfg/.git" || cp -a . "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
 workdir: /home/you/workspace/nixcfg
 run: /bin/sh -c <command>, in workdir
 record-when: the command exits 0
 schedule: 12h
 check-when: 43200 seconds after the last run
-cache-identity: cmd /home/you/workspace/nixcfg $ git pull --ff-only && nix flake update
-cache-file: /home/you/.cache/hacman/cmd-e1afb450457ef858
+cache-identity: cmd /home/you/workspace/nixcfg $ test -d "$TMPDIR/nixcfg/.git" || cp -a . "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
+cache-file: /home/you/.cache/hacman/cmd-497da11b49895aa7
 ```
 
 The plan is itself SIML, and its `install:` block is exactly what the installer
@@ -449,13 +461,44 @@ generated script and response file for debugging.
 This is where hacman deliberately stops being clever: an update is whatever
 `sh` can do, written inline next to the URL it belongs to.
 
+### Sandbox
+
+Commands and install scripts are sandboxed by default. On Linux, hacman uses
+Landlock to grant them read and execute access across the host filesystem and
+full filesystem access only below their project-specific
+`<cache>/<key>.work` directory. `/dev/null` is the only writable host-file
+exception. Network access is unchanged. For sandboxed install scripts, that
+writable directory is also the current directory; `TMPDIR` points to it for
+both scripts and commands.
+
+The program named by `bin-path` is handed control after setup and is not
+sandboxed. This distinction lets a cached compiler, package client, or other
+tool operate normally in the caller's directory while keeping its updater
+confined.
+
+Projects that intentionally modify the host can opt out explicitly:
+
+```siml
+name: nixcfg-pull
+sandboxed: false
+command: git pull --ff-only && nix flake update
+workdir: {{HOME}}/workspace/nixcfg
+```
+
+Sandbox setup fails closed: hacman does not run project-controlled code if its
+Landlock policy cannot be established. The running Linux kernel must provide
+Landlock ABI 3 or newer; use `sandboxed: false` only when the project genuinely
+needs external writes or must run without Landlock. Landlock mediates file
+content and namespace changes; metadata-only operations that Landlock does not
+yet cover remain governed by normal Unix permissions.
+
 ### Cache
 
 `hacman` keeps every persistent artifact under `~/.cache/hacman/`: cache
-records live directly below it and embedded source trees, build directories,
-and binaries live in `cmd-….work` children. `--cache DIR` and `$HACMAN_CACHE`
-can explicitly relocate the entire tree. It contains one tiny record per
-watched thing:
+records live directly below it and each project gets a `<key>.work` directory
+for sandboxed writes. Embedded source trees, build directories, and binaries
+also live in that directory. `--cache DIR` and `$HACMAN_CACHE` can explicitly
+relocate the entire tree. It contains one tiny record per watched thing:
 
 ```
 $ cat ~/.cache/hacman/cmd-e1afb450457ef858
@@ -526,6 +569,7 @@ src/plan.c                --plan serialisation
 src/cache.c               cache records: identity, load, atomic save
 src/check.c               HTTP via curl + the three check schemes
 src/install.c             slow path: embedded files, install scripts, commands, exec
+src/sandbox.c             Landlock filesystem confinement for setup code
 src/util.c                write(2)-based output, string and file helpers
 vendor/siml/              vendored SIML parser (see vendor.py)
 ```

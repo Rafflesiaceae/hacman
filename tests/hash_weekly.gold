@@ -1,4 +1,6 @@
 name: hosts-blocklist
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/url-b374f8b5d3d4c8a0.work
 url: https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
 check: hash
 request: GET https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts

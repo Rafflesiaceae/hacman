@@ -1,12 +1,14 @@
 #!/usr/bin/env hacman
 # One project per file - see README.md.
 # hacman resolves this file with `hacman --plan examples/ripgrep.siml`.
+# The downloaded binary stays in this project's cache work directory.
 name: ripgrep
 url: https://api.github.com/repos/BurntSushi/ripgrep/releases/latest
 check: version
 version-prefix: "tag_name": "
 version-suffix: "
 schedule: daily
+bin-path: rg
 install: |
   set -eu
   echo "installing ripgrep $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
@@ -15,4 +17,5 @@ install: |
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   curl -fsSL "$url" | tar -xz -C "$tmp" --strip-components=1
-  install -Dm755 "$tmp/rg" "$HOME/.local/bin/rg"
+  install -m755 "$tmp/rg" rg.next
+  mv rg.next rg

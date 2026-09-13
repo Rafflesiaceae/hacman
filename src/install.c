@@ -33,7 +33,7 @@ static int mkdir_p(const char *path)
     size_t i, n = strlen(path);
 
     if (n == 0 || n >= sizeof(copy)) {
-        fprintf(stderr, "hacman: embedded-file directory path is too long\n");
+        fprintf(stderr, "hacman: work directory path is too long\n");
         return -1;
     }
     memcpy(copy, path, n + 1);
@@ -131,6 +131,20 @@ int hm_workdir_reset(const char *workdir)
     return remove_tree(workdir);
 }
 
+int hm_workdir_ensure(const char *workdir)
+{
+    struct stat st;
+
+    if (mkdir_p(workdir) != 0) return -1;
+    /* The writable rule must name a real directory, never a cache entry that
+     * redirects policy elsewhere through a final-component symlink. */
+    if (lstat(workdir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "hacman: %s: sandbox work path is not a directory\n", workdir);
+        return -1;
+    }
+    return 0;
+}
+
 static int write_embedded_file(const hm_embedded_file *file, const char *workdir)
 {
     char        target[HM_PATH_MAX * 2 + 2];
@@ -198,7 +212,7 @@ int hm_materialize_files(const hm_project *p, const char *workdir)
 {
     size_t i;
 
-    if (mkdir_p(workdir) != 0) return -1;
+    if (hm_workdir_ensure(workdir) != 0) return -1;
     for (i = 0; i < p->file_count; ++i) {
         if (write_embedded_file(&p->files[i], workdir) != 0) return -1;
     }
@@ -274,7 +288,7 @@ static int write_response(const hm_check_result *res, char *path_out, size_t cap
 }
 
 int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
-               const hm_check_result *res)
+               const hm_check_result *res, const char *sandbox_workdir)
 {
     char  script_path[512];
     char  response_path[512];
@@ -293,6 +307,8 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         printf("hacman: %s: changed, but no 'install' script is configured\n", name);
         return 0;
     }
+
+    if (p->sandboxed && hm_workdir_ensure(sandbox_workdir) != 0) return -1;
 
     fp = temp_file("install", script_path, sizeof(script_path));
     if (fp == NULL) return -1;
@@ -320,6 +336,19 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         setenv("HACMAN_VERSION", new_mark, 1);
         setenv("HACMAN_PREVIOUS", old_mark ? old_mark : "", 1);
         if (have_response) setenv("HACMAN_RESPONSE", response_path, 1);
+
+        /* Sandboxed scripts naturally create relative and temporary output in
+         * their one writable tree. The absolute script and response paths stay
+         * readable through the global read-only rule. */
+        if (p->sandboxed) {
+            if (chdir(sandbox_workdir) != 0) {
+                fprintf(stderr, "hacman: %s: cannot enter sandbox work directory %s: %s\n", name,
+                        sandbox_workdir, strerror(errno));
+                _exit(126);
+            }
+            setenv("TMPDIR", sandbox_workdir, 1);
+            if (hm_sandbox_enter(sandbox_workdir) != 0) _exit(126);
+        }
 
         execv(HM_SHELL, argv);
         fprintf(stderr, "hacman: cannot execute %s: %s\n", HM_SHELL, strerror(errno));
@@ -364,7 +393,7 @@ cleanup:
  * No temporary file and no script: a single command is already the simplest
  * thing a shell can be handed. The caller records the run only if this
  * returns 0, so a failing command is retried on the next run. */
-int hm_command_run(const hm_project *p, const char *workdir)
+int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir)
 {
     char  command[HM_COMMAND_MAX + 1];
     char  name[HM_NAME_MAX + 1];
@@ -373,6 +402,8 @@ int hm_command_run(const hm_project *p, const char *workdir)
 
     hm_str_copy(command, sizeof(command), p->command);
     hm_str_copy(name, sizeof(name), p->name);
+
+    if (p->sandboxed && hm_workdir_ensure(sandbox_workdir) != 0) return -1;
 
     fflush(stdout);
 
@@ -388,6 +419,12 @@ int hm_command_run(const hm_project *p, const char *workdir)
         }
         setenv("HACMAN_NAME", name, 1);
         setenv("HACMAN_WORKDIR", workdir, 1);
+        if (p->sandboxed) {
+            /* Keep generic temporary-file users inside the only writable
+             * hierarchy even when the configured cwd is read-only. */
+            setenv("TMPDIR", sandbox_workdir, 1);
+            if (hm_sandbox_enter(sandbox_workdir) != 0) _exit(126);
+        }
 
         execl(HM_SHELL, HM_SHELL, "-c", command, (char *)NULL);
         fprintf(stderr, "hacman: cannot execute %s: %s\n", HM_SHELL, strerror(errno));

@@ -291,6 +291,10 @@ static int is_due(const hm_project *p, const hm_cache *c, long now, const hm_opt
 
     if (o->force) return 1;
 
+    /* A missing handoff program is never a useful cache hit. This especially
+     * matters for relative bin paths stored in cache-owned sandbox workdirs. */
+    if (p->bin_cached && access(p->bin_path, X_OK) != 0) return 1;
+
     /* An embedded project's record has a stable path but an identity that
      * changes with the command, file paths, or file contents. Changed inputs
      * and a missing executable always require setup. Otherwise embedded
@@ -298,7 +302,6 @@ static int is_due(const hm_project *p, const hm_cache *c, long now, const hm_opt
      * periodic runs with `schedule`. */
     if (p->file_count > 0) {
         if (!c->known) return 1;
-        if (p->bin_path[0] != '\0' && access(p->bin_path, X_OK) != 0) return 1;
         if (!p->schedule_explicit || p->sched_kind == HM_SCHED_NEVER) return 0;
     }
 
@@ -357,10 +360,10 @@ static int finish_locked(const hm_project *p, const hm_opts *o, int lock_fd, int
     return finish(p, o, rc);
 }
 
-/* An embedded project does not know its cache work directory until its cache
+/* A sandboxed project does not know its cache work directory until its cache
  * identity has been built. Resolve its relative bin-path once that directory
  * is available, before either the plan or the eventual exec sees it. */
-static int resolve_embedded_bin(hm_project *p, const hm_cache *c, const char *file)
+static int resolve_cached_bin(hm_project *p, const hm_cache *c, const char *file)
 {
     size_t base_len, bin_len;
 
@@ -400,7 +403,7 @@ static int run_command_project(const hm_project *p, hm_opts *o, long now)
             if (!cache.known && hm_workdir_reset(workdir) != 0) return HM_EXIT_FAILED;
             if (hm_materialize_files(p, workdir) != 0) return HM_EXIT_FAILED;
         }
-        if (hm_command_run(p, workdir) != 0) {
+        if (hm_command_run(p, workdir, cache.workdir) != 0) {
             /* Nothing is written: the last run stays whatever it was, so the
              * next invocation tries again. */
             return HM_EXIT_FAILED;
@@ -420,8 +423,8 @@ int main(int argc, char **argv)
     char             *source_path = NULL;
     hm_check_result   res;
     char              old_mark[HM_MARK_MAX + 1];
-    long              len, now, wait       = 0;
-    int               rc, changed, lock_fd = -1;
+    long              len, now, wait = 0;
+    int               rc, changed, missing_bin, lock_fd = -1;
 
     rc = parse_args(argc, argv, &o);
     if (rc != 0) return (rc > 0) ? HM_EXIT_OK : HM_EXIT_USAGE;
@@ -474,7 +477,7 @@ int main(int argc, char **argv)
     }
     hm_cache_init(&cache, p, cache_dir, source_path);
     free(source_path);
-    if (resolve_embedded_bin(&project, &cache, o.file) != 0) {
+    if (resolve_cached_bin(&project, &cache, o.file) != 0) {
         return HM_EXIT_USAGE;
     }
 
@@ -530,7 +533,8 @@ int main(int argc, char **argv)
     hm_str_copy(old_mark, sizeof(old_mark), (hm_str){cache.mark, strlen(cache.mark)});
     /* A project hacman has never seen counts as changed, so a fresh checkout
      * installs on its first run. Use --adopt to record instead. */
-    changed = !cache.known || strcmp(old_mark, res.mark) != 0;
+    missing_bin = p->bin_cached && access(p->bin_path, X_OK) != 0;
+    changed     = missing_bin || !cache.known || strcmp(old_mark, res.mark) != 0;
 
     if (!changed) {
         if (o.verbose) hm_out("ok       %S (%s)\n", p->name, res.mark);
@@ -539,7 +543,9 @@ int main(int argc, char **argv)
                              (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK);
     }
 
-    if (!cache.known) {
+    if (missing_bin && cache.known && strcmp(old_mark, res.mark) == 0) {
+        hm_out("missing  %S %s\n", p->name, p->bin_path);
+    } else if (!cache.known) {
         hm_out("new      %S %s\n", p->name, res.mark);
     } else {
         hm_out("changed  %S %s -> %s\n", p->name, old_mark, res.mark);
@@ -550,7 +556,7 @@ int main(int argc, char **argv)
     if (!o.adopt) {
         /* --- slow path ----------------------------------------------- */
         hm_out_flush(); /* the install script writes to the same terminal */
-        if (hm_install(p, old_mark, res.mark, &res) != 0) {
+        if (hm_install(p, old_mark, res.mark, &res, cache.workdir) != 0) {
             /* Nothing is written, so the next run repeats check and install. */
             return finish_locked(p, &o, lock_fd, HM_EXIT_FAILED);
         }

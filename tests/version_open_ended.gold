@@ -1,4 +1,6 @@
 name: go
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/url-eee9529e4ec50629.work
 url: https://go.dev/VERSION?m=text
 check: version
 version-prefix: go

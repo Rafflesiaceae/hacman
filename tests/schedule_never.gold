@@ -1,4 +1,6 @@
 name: manual-only
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/url-51a3deab7dcbf75a.work
 url: https://example.com/manual
 check: hash
 request: GET https://example.com/manual

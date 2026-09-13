@@ -80,6 +80,7 @@ hacman_sources = files(
   'src/cache.c',
   'src/check.c',
   'src/install.c',
+  'src/sandbox.c',
 )
 
 hacman = executable('hacman', hacman_sources,

@@ -35,7 +35,8 @@ files:
       "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/$archive" \
       -o "$stage/$archive"
     tar -xzf "$stage/$archive" -C "$stage"
-    "$stage/google-cloud-sdk/bin/gcloud" version >/dev/null
+    CLOUDSDK_CONFIG="$PWD/.gcloud-config" \
+      "$stage/google-cloud-sdk/bin/gcloud" version >/dev/null
 
     # Rotate only after the downloaded runtime proves executable.
     if [ -d "$PWD/google-cloud-sdk" ]; then

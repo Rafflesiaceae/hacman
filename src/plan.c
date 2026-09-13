@@ -108,6 +108,10 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
     hm_sched_describe(p, sched, sizeof(sched));
 
     hm_out("name: %S\n", p->name);
+    hm_out("sandboxed: %s\n", p->sandboxed ? "true" : "false");
+    if (p->sandboxed) {
+        hm_out("sandbox-write-dir: %s\n", c->workdir);
+    }
     if (p->kind == HM_KIND_COMMAND) {
         hm_out("command: %S\n", p->command);
         hm_out("workdir: %s\n", (p->file_count > 0) ? c->workdir : p->workdir_path);

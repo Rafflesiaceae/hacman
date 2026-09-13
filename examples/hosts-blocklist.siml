@@ -2,10 +2,12 @@
 # `check: hash` fingerprints the whole body - use it for URLs that serve no
 # useful validators. The downloaded body is handed to the script as
 # $HACMAN_RESPONSE, so it does not have to be fetched twice.
+# Keep the current list in this project's cache work directory.
 name: hosts-blocklist
 url: https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
 check: hash
 schedule: weekly
 install: |
   set -eu
-  sudo install -Dm644 "$HACMAN_RESPONSE" /etc/hosts.blocklist
+  install -m644 "$HACMAN_RESPONSE" hosts.blocklist.next
+  mv hosts.blocklist.next hosts.blocklist

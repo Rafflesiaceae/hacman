@@ -1,0 +1,10 @@
+name: host-maintenance
+sandboxed: false
+command: touch /var/lib/example/updated
+workdir: /var/lib/example
+run: /bin/sh -c <command>, in workdir
+record-when: the command exits 0
+schedule: 1w
+check-when: 604800 seconds after the last run
+cache-identity: cmd /var/lib/example $ touch /var/lib/example/updated
+cache-file: /home/hacman-test/.cache/hacman/cmd-6f4e53ab3d1d4fce

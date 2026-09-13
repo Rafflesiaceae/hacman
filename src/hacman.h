@@ -75,12 +75,14 @@ typedef struct {
     hm_sched_kind sched_kind;
     long          sched_interval;    /* seconds, for HM_SCHED_EVERY       */
     int           schedule_explicit; /* embedded commands opt into timing */
+    int           sandboxed;         /* restrict setup writes to cache workdir */
     hm_str        version_prefix;    /* HM_CHECK_VERSION: text before value  */
     hm_str        version_suffix;    /* HM_CHECK_VERSION: text after value   */
-    hm_str        bin;               /* raw {{VAR}} template, "" if unset     */
+    hm_str        bin;               /* raw {{VAR}} or cache-relative path    */
     /* The program this project sets up. When set, hacman execs it once the
      * setup is done, forwarding everything that followed FILE. */
     char             bin_path[HM_PATH_MAX + 1];
+    int              bin_cached;     /* resolved below the cache workdir */
     hm_str           install;        /* raw block-scalar region, still indented */
     size_t           install_indent; /* columns to strip from install lines  */
     hm_embedded_file files[HM_FILES_MAX];
@@ -157,7 +159,7 @@ typedef struct hm_cache_s {
     char key[HM_KEY_MAX + 1];           /* file name within the cache dir  */
     char identity[HM_IDENTITY_MAX + 1]; /* what that name stands for       */
     char path[HM_PATH_MAX + 1];         /* dir + "/" + key                 */
-    char workdir[HM_PATH_MAX + 1];      /* embedded-file command directory */
+    char workdir[HM_PATH_MAX + 1];      /* project's cache sandbox directory */
     char mark[HM_MARK_MAX + 1];         /* last observed etag/hash/version */
     long last_check;                    /* epoch seconds, 0 = never        */
     long last_change;                   /* epoch seconds, 0 = never        */
@@ -202,11 +204,14 @@ int hm_check(const hm_project *p, int timeout_secs, hm_check_result *res);
 /* Slow path: runs the project's install script. Clarity beats speed here.
  * Returns 0 on success, -1 if the script failed or could not be run. */
 int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
-               const hm_check_result *res);
+               const hm_check_result *res, const char *sandbox_workdir);
 
 /* Slow path for HM_KIND_COMMAND: runs `command` with the shell, in `workdir`.
  * Returns 0 on success, -1 if the command failed or could not be run. */
-int hm_command_run(const hm_project *p, const char *workdir);
+int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir);
+
+/* Creates a cache work directory without changing or clearing its contents. */
+int hm_workdir_ensure(const char *workdir);
 
 /* Removes an embedded work directory without following symlinks. A missing
  * directory is already clean. */
@@ -215,6 +220,11 @@ int hm_workdir_reset(const char *workdir);
 /* Writes every embedded file below `workdir`, creating directories as needed.
  * Existing files are replaced atomically. */
 int hm_materialize_files(const hm_project *p, const char *workdir);
+
+/* Restricts this process and its descendants to read/execute globally and
+ * full filesystem access below `workdir`. Returns -1 without weakening the
+ * process when Landlock is unavailable or policy setup fails. */
+int hm_sandbox_enter(const char *workdir);
 
 /* Replaces this process with the project's bin-path, passing `argv` (whose
  * first slot this fills in). Only ever returns on failure, with the exit code

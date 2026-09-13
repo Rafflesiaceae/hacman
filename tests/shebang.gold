@@ -1,4 +1,6 @@
 name: printf shebang-supported
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-e2d45689246619aa.work
 command: printf shebang-supported
 workdir: /home/hacman-test
 run: /bin/sh -c <command>, in workdir

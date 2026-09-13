@@ -1,0 +1,4 @@
+name: cached-tool
+url: https://example.com/tool
+bin-path: bin/tool
+install: install -Dm755 downloaded bin/tool

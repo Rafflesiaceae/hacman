@@ -1,4 +1,6 @@
 name: https://example.com/artifact.tar.gz
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/url-93e0124f9dd9345d.work
 url: https://example.com/artifact.tar.gz
 check: etag
 request: HEAD https://example.com/artifact.tar.gz

@@ -1,2 +1,3 @@
 command: echo hi
+sandboxed: false
 bin-path: bin/tool

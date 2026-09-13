@@ -186,13 +186,14 @@ void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir, const char
     o          = append_str(c->path, o, sizeof(c->path), c->key);
     c->path[o] = '\0';
 
-    if (p->file_count > 0) {
-        o             = append_str(c->workdir, 0, sizeof(c->workdir), dir);
-        o             = append_str(c->workdir, o, sizeof(c->workdir), "/");
-        o             = append_str(c->workdir, o, sizeof(c->workdir), c->key);
-        o             = append_str(c->workdir, o, sizeof(c->workdir), ".work");
-        c->workdir[o] = '\0';
-    }
+    /* Every project owns a writable sandbox directory. Embedded commands also
+     * use it as their source/build directory; other project kinds leave it
+     * empty until setup code actually needs to run. */
+    o             = append_str(c->workdir, 0, sizeof(c->workdir), dir);
+    o             = append_str(c->workdir, o, sizeof(c->workdir), "/");
+    o             = append_str(c->workdir, o, sizeof(c->workdir), c->key);
+    o             = append_str(c->workdir, o, sizeof(c->workdir), ".work");
+    c->workdir[o] = '\0';
 }
 
 /* Splits off the next tab-separated field of a record line. */
