@@ -21,6 +21,7 @@
 
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "config.h"
 
@@ -193,6 +194,19 @@ static int is_due(const hm_project *p, const hm_cache *c, long now, const hm_opt
     long elapsed;
 
     if (o->force) return 1;
+
+    /* Embedded projects are immutable, content-addressed builds: their cache
+     * identity already changes with the command, file paths, or file contents.
+     * A successful record therefore means there is no setup work to repeat.
+     * Rebuild a missing executable instead of handing an invalid cache entry
+     * to exec(), while projects without bin-path retain useful --adopt
+     * semantics based on the record alone. */
+    if (p->file_count > 0) {
+        if (!c->known) return 1;
+        if (p->bin_path[0] != '\0' && access(p->bin_path, X_OK) != 0) return 1;
+        return 0;
+    }
+
     if (p->sched_kind == HM_SCHED_ALWAYS) return 1;
     if (p->sched_kind == HM_SCHED_NEVER) {
         *wait_out = -1;
@@ -334,7 +348,9 @@ int main(int argc, char **argv)
     if (!is_due(p, &cache, now, &o, &wait)) {
         if (o.verbose) {
             char left[32];
-            if (wait < 0) {
+            if (p->file_count > 0) {
+                hm_out("skip     %S (embedded inputs unchanged)\n", p->name);
+            } else if (wait < 0) {
                 hm_out("skip     %S (schedule: never)\n", p->name);
             } else {
                 fmt_duration(wait, left, sizeof(left));

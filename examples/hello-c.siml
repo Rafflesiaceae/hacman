@@ -4,7 +4,6 @@
 name: embedded-hello
 command: meson setup build && meson compile -C build
 bin-path: build/hello
-schedule: always
 files:
   main.c: |
     #include <stdio.h>

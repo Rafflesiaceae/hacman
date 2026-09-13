@@ -118,17 +118,22 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
         hm_out("url: %S\n", p->url);
         print_check(p);
     }
-    hm_out("schedule: %s\n", sched);
-    switch (p->sched_kind) {
-    case HM_SCHED_ALWAYS:
-        hm_out("check-when: on every invocation\n");
-        break;
-    case HM_SCHED_NEVER:
-        hm_out("check-when: only with --force\n");
-        break;
-    case HM_SCHED_EVERY:
-        hm_out("check-when: %u seconds after the last run\n", (unsigned long)p->sched_interval);
-        break;
+    if (p->file_count > 0) {
+        hm_out("cache-policy: command and embedded-file contents\n");
+        hm_out("check-when: inputs change, cached executable is missing, or with --force\n");
+    } else {
+        hm_out("schedule: %s\n", sched);
+        switch (p->sched_kind) {
+        case HM_SCHED_ALWAYS:
+            hm_out("check-when: on every invocation\n");
+            break;
+        case HM_SCHED_NEVER:
+            hm_out("check-when: only with --force\n");
+            break;
+        case HM_SCHED_EVERY:
+            hm_out("check-when: %u seconds after the last run\n", (unsigned long)p->sched_interval);
+            break;
+        }
     }
 
     /* Which record decides "already done", and what it stands for: two files

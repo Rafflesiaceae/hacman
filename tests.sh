@@ -207,6 +207,46 @@ contains "embedded program completed" "embedded-prog"
 contains "embedded program receives option-looking arguments" "arg:--help"
 contains "embedded program preserves argument boundaries" "arg:two words"
 
+# Embedded command projects are content-addressed builds. Even `schedule:
+# always` must reuse the successful build until an input changes.
+cat >"$TMP/embedded-cached.siml" <<'EOF'
+name: embedded-cached
+command: echo built >> build.log && chmod +x runner
+bin-path: runner
+schedule: always
+files:
+  runner: |
+    #!/bin/sh
+    echo cached-v1
+EOF
+cached_build_dir="$TMP/cache-embedded-cached"
+expect "embedded cached build runs initially" 0 \
+    "$BIN" --cache "$cached_build_dir" "$TMP/embedded-cached.siml"
+contains "initial embedded executable runs" "cached-v1"
+expect "unchanged embedded build is reused" 0 \
+    "$BIN" -v --cache "$cached_build_dir" "$TMP/embedded-cached.siml"
+contains "embedded cache hit is explained" "embedded inputs unchanged"
+contains "cached embedded executable runs" "cached-v1"
+tests=$((tests + 1))
+if [ "$(find "$cached_build_dir" -name build.log -exec cat {} \; | wc -l)" = "1" ]; then
+    echo "[test] ok: unchanged embedded command ran only once"
+else
+    fail "unchanged embedded command was rerun"
+fi
+
+# Changing an embedded input selects a new content-addressed work directory
+# and performs exactly one new build there.
+sed 's/cached-v1/cached-v2/' "$TMP/embedded-cached.siml" >"$TMP/embedded-changed.siml"
+expect "changed embedded input builds again" 0 \
+    "$BIN" --cache "$cached_build_dir" "$TMP/embedded-changed.siml"
+contains "changed embedded executable runs" "cached-v2"
+tests=$((tests + 1))
+if [ "$(find "$cached_build_dir" -name build.log -exec cat {} \; | wc -l)" = "2" ]; then
+    echo "[test] ok: changed embedded input produced one new build"
+else
+    fail "changed embedded input did not produce exactly one new build"
+fi
+
 payload="$TMP/payload.txt"
 cache="$TMP/cache"
 echo "version 1.0.0" >"$payload"

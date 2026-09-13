@@ -301,7 +301,6 @@ its `.siml` file:
 name: embedded-hello
 command: meson setup build && meson compile -C build
 bin-path: build/hello
-schedule: always
 files:
   main.c: |
     #include <stdio.h>
@@ -318,7 +317,10 @@ files:
 See [`examples/hello-c.siml`](examples/hello-c.siml) for the runnable version.
 Running `./examples/hello-c.siml` materializes `main.c` and `meson.build`, builds
 them with Meson, and runs the resulting program. Arguments are forwarded to
-the built program in the same way as for any other `bin-path`.
+the built program in the same way as for any other `bin-path`. Later launches
+exec the cached program immediately. The command runs again only when its text,
+an embedded path, or embedded contents change, when the cached executable is
+missing, or when `--force` is used.
 
 `files` is a mapping from a filename to a literal block scalar. Filenames use
 SIML's mapping-key syntax (`[a-zA-Z_][a-zA-Z0-9_.-]*`); values must use `|`, so
@@ -328,9 +330,10 @@ writes every embedded file there, then runs the command there. The directory
 is also exported as `HACMAN_WORKDIR`.
 
 Materialization happens only immediately before a real command execution:
-schedule skips, `--plan`, `--check-only`, `--dry-run`, and `--adopt` do not
-touch the files. Paths and contents are included in the cache identity, so an
-edit gets a new work directory and is due on its next normal invocation.
+cache hits, `--plan`, `--check-only`, `--dry-run`, and `--adopt` do not touch
+the files. Embedded projects are content-addressed rather than scheduled.
+Paths, contents, and the command are included in the cache identity, so an edit
+gets a new work directory and builds on its next normal invocation.
 
 Unknown keys, a missing `url` and anything that would introduce a second
 project are hard errors, reported with a line number. Use `hacman --plan` to
@@ -375,6 +378,9 @@ A project that is not due costs no network traffic and no subprocess.
 
 The default is `daily`, i.e. a full 24h: nothing hacman watches is worth asking
 about more often than that unless the file says so explicitly.
+Command projects with embedded `files` are the exception: their inputs provide
+the invalidation signal, so they build once per content identity regardless of
+`schedule`.
 
 ### Check schemes — *how* change is decided
 

@@ -13,7 +13,7 @@ files:
     }
   message.txt: |
     built before the command
-schedule: never
-check-when: only with --force
+cache-policy: command and embedded-file contents
+check-when: inputs change, cached executable is missing, or with --force
 cache-identity: cmd files:e2d7338fb2fdd7f8 $ test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready
 cache-file: /home/hacman-test/.cache/hacman/cmd-af22cee75dcd5dad
