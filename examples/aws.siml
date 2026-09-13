@@ -10,17 +10,27 @@ files:
     #!/bin/sh
     set -eu
 
-    # The CLI remembers these user-local locations when updating itself.
-    export XDG_DATA_HOME="$PWD/data"
-    export XDG_BIN_HOME="$PWD/bin"
+    # AWS publishes separate CLI archives for the supported Linux architectures.
+    case "$(uname -m)" in
+      x86_64|amd64) release_arch=x86_64 ;;
+      aarch64|arm64) release_arch=aarch64 ;;
+      *)
+        echo "aws-cli: unsupported Linux architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+    esac
 
-    if [ -x "$XDG_BIN_HOME/aws" ]; then
-      "$XDG_BIN_HOME/aws" update
-      exit 0
-    fi
-
-    # AWS's installer selects the appropriate supported host package.
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    curl -fsSL https://awscli.amazonaws.com/v2/install.sh -o "$tmp/install.sh"
-    sh "$tmp/install.sh"
+    archive="awscli-exe-linux-$release_arch.zip"
+    curl -fsSL "https://awscli.amazonaws.com/$archive" -o "$tmp/$archive"
+    unzip -q "$tmp/$archive" -d "$tmp"
+
+    # The archive's installer needs --update after the initial private install.
+    if [ -x "$PWD/bin/aws" ]; then
+      "$tmp/aws/install" --install-dir "$PWD/aws-cli" \
+        --bin-dir "$PWD/bin" --update
+    else
+      "$tmp/aws/install" --install-dir "$PWD/aws-cli" \
+        --bin-dir "$PWD/bin"
+    fi
