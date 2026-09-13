@@ -357,6 +357,97 @@ class Suite:
             "HOME is not set; use --cache or HACMAN_CACHE",
         )
 
+    def trace_tests(self) -> None:
+        """Verify setup output policy and shell tracing from both option sources."""
+        command = self.temp / "trace-command.siml"
+        self.write(
+            command,
+            """name: trace-command
+command: printf 'command-out\\n'; printf 'command-err\\n' >&2
+schedule: always
+""",
+        )
+        quiet = self.run(
+            [self.binary, "--cache", self.temp / "cache-trace-quiet", command],
+            stderr_to_stdout=False,
+        )
+        self.check("quiet command succeeds", quiet.returncode == 0)
+        self.check(
+            "successful command output is hidden",
+            "command-out" not in quiet.stdout and "command-err" not in quiet.stderr,
+            f"stdout:\n{quiet.stdout}\nstderr:\n{quiet.stderr}",
+        )
+
+        trace_env = self.command_env({"HACMAN": "-x"})
+        self.expect_hacman(
+            "HACMAN=-x traces a command",
+            0,
+            "--cache",
+            self.temp / "cache-trace-env",
+            command,
+            env=trace_env,
+        )
+        self.contains("command trace is live", "+ printf command-out")
+        self.contains("traced command stdout is live", "command-out")
+        self.contains("traced command stderr is live", "command-err")
+
+        payload = self.temp / "trace-payload"
+        payload.write_text("payload\n", encoding="utf-8")
+        install = self.temp / "trace-install.siml"
+        self.write(
+            install,
+            f"""name: trace-install
+url: {payload.as_uri()}
+check: hash
+schedule: always
+install: printf 'install-out\\n'; printf 'install-err\\n' >&2
+""",
+        )
+        self.expect_hacman(
+            "quiet install succeeds",
+            0,
+            "--cache",
+            self.temp / "cache-install-quiet",
+            install,
+        )
+        self.missing("successful install stdout is hidden", "install-out")
+        self.missing("successful install stderr is hidden", "install-err")
+        self.expect_hacman(
+            "CLI -x traces an install",
+            0,
+            "-x",
+            "--cache",
+            self.temp / "cache-install-trace",
+            install,
+        )
+        self.contains("install trace is live", "+ printf install-out")
+        self.contains("traced install stdout is live", "install-out")
+        self.contains("traced install stderr is live", "install-err")
+
+        failing = self.temp / "trace-failing.siml"
+        self.write(
+            failing,
+            """name: trace-failing
+command: printf 'failure-out\\n'; printf 'failure-err\\n' >&2; exit 9
+schedule: always
+""",
+        )
+        failed = self.run(
+            [self.binary, "--cache", self.temp / "cache-trace-failing", failing],
+            stderr_to_stdout=False,
+        )
+        self.check("failing captured command exits 2", failed.returncode == 2)
+        self.check(
+            "failed setup stdout is replayed to stderr",
+            "failure-out" not in failed.stdout and "failure-out" in failed.stderr,
+            f"stdout:\n{failed.stdout}\nstderr:\n{failed.stderr}",
+        )
+        self.check(
+            "failed setup stderr is replayed to stderr",
+            "failure-err" not in failed.stdout and "failure-err" in failed.stderr,
+            f"stdout:\n{failed.stdout}\nstderr:\n{failed.stderr}",
+        )
+
     def embedded_tests(self) -> None:
         """Exercise embedded files, scheduled rebuilds, and serialization."""
         embedded_cache = self.temp / "cache-embedded"
@@ -381,7 +472,7 @@ class Suite:
             embedded_cache,
             "tests/embedded_files.siml",
         )
-        self.contains("embedded command completed", "embedded-ready")
+        self.missing("successful embedded command output is hidden", "embedded-ready")
 
         embedded_bin = self.temp / "embedded-bin.siml"
         self.write(
@@ -825,16 +916,18 @@ check: hash
 schedule: always
 install: |
   set -eu
-  echo "install name=$HACMAN_NAME prev=${{HACMAN_PREVIOUS:-none}}"
+  echo "install name=$HACMAN_NAME prev=${{HACMAN_PREVIOUS:-none}}" >> install.log
   if [ -n "${{HACMAN_RESPONSE:-}}" ]; then
-    echo "body=$(cat "$HACMAN_RESPONSE")"
+    echo "body=$(cat "$HACMAN_RESPONSE")" >> install.log
   fi
 """,
         )
         self.expect_hacman("first run installs", 0, "--cache", cache, project)
         self.contains("first run reports new", "new      demo")
-        self.contains("install script ran", "install name=demo prev=none")
-        self.contains("response file is passed", "body=version 1.0.0")
+        install_log = next(cache.glob("*.work/install.log"))
+        install_output = install_log.read_text(encoding="utf-8")
+        self.check("install script ran", "install name=demo prev=none" in install_output)
+        self.check("response file is passed", "body=version 1.0.0" in install_output)
         self.expect_hacman("unchanged run is quiet", 0, "--cache", cache, project)
         self.missing("no install on unchanged", "install name=demo")
         self.expect_hacman(
@@ -844,7 +937,17 @@ install: |
         payload.write_text("version 1.0.1\n", encoding="utf-8")
         self.expect_hacman("changed run installs again", 0, "--cache", cache, project)
         self.contains("change is reported with both marks", "changed  demo")
-        self.contains("previous mark reaches the script", "prev=")
+        install_output = install_log.read_text(encoding="utf-8")
+        install_lines = [
+            line for line in install_output.splitlines() if line.startswith("install name=")
+        ]
+        self.check(
+            "previous mark reaches the script",
+            len(install_lines) == 2
+            and install_lines[0] == "install name=demo prev=none"
+            and install_lines[1] != "install name=demo prev=none",
+            install_output,
+        )
 
         self.schedule_tests(payload)
         self.version_tests()
@@ -877,7 +980,7 @@ install: echo "installed"
         self.expect_hacman(
             "--force ignores the schedule", 0, "-f", "--cache", cache, schedule
         )
-        self.contains("forced run installs", "installed")
+        self.missing("successful forced install output is hidden", "installed")
 
         never = self.temp / "never.siml"
         self.write(
@@ -897,7 +1000,7 @@ install: echo "installed"
         self.expect_hacman(
             "schedule: never yields to --force", 0, "-f", "--cache", never_cache, never
         )
-        self.contains("forced manual project installs", "installed")
+        self.missing("successful manual install output is hidden", "installed")
 
     def version_tests(self) -> None:
         """Verify successful and failed version extraction."""
@@ -906,6 +1009,7 @@ install: echo "installed"
             '{"tag_name": "14.1.1", "name": "ripgrep 14.1.1"}\n', encoding="utf-8"
         )
         version = self.temp / "version.siml"
+        version_cache = self.temp / "cache-version"
         self.write(
             version,
             f"""name: versioned
@@ -914,13 +1018,16 @@ check: version
 version-prefix: "tag_name": "
 version-suffix: "
 schedule: always
-install: echo "got $HACMAN_VERSION"
+install: printf '%s\\n' "$HACMAN_VERSION" > observed-version
 """,
         )
-        self.expect_hacman(
-            "version extraction", 0, "--cache", self.temp / "cache-version", version
+        self.expect_hacman("version extraction", 0, "--cache", version_cache, version)
+        observed = list(version_cache.glob("*.work/observed-version"))
+        self.check(
+            "version is extracted between the anchors",
+            len(observed) == 1
+            and observed[0].read_text(encoding="utf-8") == "14.1.1\n",
         )
-        self.contains("version is extracted between the anchors", "got 14.1.1")
 
         bad = self.temp / "badversion.siml"
         self.write(
@@ -1026,7 +1133,12 @@ install: |
         )
         cache = self.temp / "cache-indent"
         self.expect_hacman(
-            "indentation inside the block is preserved", 0, "--cache", cache, project
+            "indentation inside the block is preserved",
+            0,
+            "-x",
+            "--cache",
+            cache,
+            project,
         )
         self.contains("nested shell block ran", "nested 2")
 
@@ -1414,6 +1526,7 @@ schedule: always
         with tempfile.TemporaryDirectory() as directory:
             self.temp = Path(directory)
             self.input_tests()
+            self.trace_tests()
             self.embedded_tests()
             self.sandbox_tests()
             self.url_pipeline_tests()

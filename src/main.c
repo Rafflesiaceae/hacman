@@ -51,6 +51,7 @@ typedef struct {
     int         adopt;
     int         plan;
     int         verbose;
+    int         trace;
     int         timeout;
 } hm_opts;
 
@@ -75,6 +76,7 @@ static const char usage_text[] =
     "      --cache DIR     cache directory (default: ~/.cache/hacman)\n"
     "  -t, --timeout SECS  per-request timeout (default: 15)\n"
     "  -v, --verbose       report an unchanged or skipped project too\n"
+    "  -x, --trace         show and trace command and install shells\n"
     "  -h, --help          show this help\n"
     "  -V, --version       show the version\n"
     "\n"
@@ -226,6 +228,8 @@ static int parse_arg_list(int argc, char **argv, int first, int env_only, hm_opt
             o->plan = 1;
         } else if (opt_is(a, "-v", "--verbose")) {
             o->verbose = 1;
+        } else if (opt_is(a, "-x", "--trace")) {
+            o->trace = 1;
         } else if (opt_is(a, "-h", "--help")) {
             hm_out("%s", usage_text);
             hm_out_flush();
@@ -403,7 +407,7 @@ static int run_command_project(const hm_project *p, hm_opts *o, long now)
             if (!cache.known && hm_workdir_reset(workdir) != 0) return HM_EXIT_FAILED;
             if (hm_materialize_files(p, workdir) != 0) return HM_EXIT_FAILED;
         }
-        if (hm_command_run(p, workdir, cache.workdir) != 0) {
+        if (hm_command_run(p, workdir, cache.workdir, o->trace) != 0) {
             /* Nothing is written: the last run stays whatever it was, so the
              * next invocation tries again. */
             return HM_EXIT_FAILED;
@@ -555,8 +559,8 @@ int main(int argc, char **argv)
 
     if (!o.adopt) {
         /* --- slow path ----------------------------------------------- */
-        hm_out_flush(); /* the install script writes to the same terminal */
-        if (hm_install(p, old_mark, res.mark, &res, cache.workdir) != 0) {
+        hm_out_flush(); /* Preserve status ordering before setup starts. */
+        if (hm_install(p, old_mark, res.mark, &res, cache.workdir, o.trace) != 0) {
             /* Nothing is written, so the next run repeats check and install. */
             return finish_locked(p, &o, lock_fd, HM_EXIT_FAILED);
         }

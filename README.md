@@ -176,6 +176,7 @@ usage: hacman [OPTIONS] FILE
       --cache DIR     cache directory (default: ~/.cache/hacman)
   -t, --timeout SECS  per-request timeout (default: 15)
   -v, --verbose       report an unchanged or skipped project too
+  -x, --trace         show and trace command and install shells
   -h, --help          show this help
   -V, --version       show the version
 ```
@@ -191,7 +192,7 @@ file argument added by the shebang:
 
 ```sh
 HACMAN=--help ./examples/hello-c.siml
-HACMAN='--verbose --timeout 30' ./examples/koca.siml --version
+HACMAN='-x --timeout 30' ./examples/koca.siml --version
 ```
 
 `HACMAN` accepts options only. Its value is split without starting a shell;
@@ -235,9 +236,12 @@ Exit codes:
 | `127` | the `bin-path` program could not be started |
 | *other* | whatever the `bin-path` program exited with |
 
-Output is quiet by default: one line when the project changed, plus whatever
-the install script or command prints. `-v` also reports an unchanged or skipped
-project. With a `bin-path`, all of hacman's own output moves to stderr.
+Output is quiet by default: hacman reports its own status, but discards stdout
+and stderr from a successful install script or command. If setup fails, its
+complete captured output is replayed to stderr before the failure diagnostic.
+`-x` instead shows setup output live and runs the shell with tracing enabled.
+`-v` also reports an unchanged or skipped project. With a `bin-path`, all of
+hacman's own output moves to stderr.
 
 ---
 
@@ -455,8 +459,10 @@ The script is run by `/bin/sh -e` with these variables:
 | `HACMAN_PREVIOUS` | the previously recorded marker, empty on first sight |
 | `HACMAN_RESPONSE` | path to the downloaded body (`hash`/`version` checks only) |
 
-Its output goes straight to the terminal. `HACMAN_KEEP_TEMP=1` keeps the
-generated script and response file for debugging.
+Its output is captured and discarded when the script succeeds, then replayed
+to stderr when it fails. Pass `-x` to stream it live and invoke the script as
+`/bin/sh -e -x`. `HACMAN_KEEP_TEMP=1` keeps the generated script and response
+file for debugging.
 
 This is where hacman deliberately stops being clever: an update is whatever
 `sh` can do, written inline next to the URL it belongs to.

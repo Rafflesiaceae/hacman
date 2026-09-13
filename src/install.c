@@ -3,9 +3,10 @@
  * For a url project that is the install script, run only once a change has
  * been found; for a command project it is the command itself, run only once
  * the schedule allows. Either way this is where ergonomics beats speed: it
- * uses stdio, writes real files to $TMPDIR, hands the script to a shell with a
- * documented set of HACMAN_* variables, and lets the output stream straight to
- * the terminal. Set HACMAN_KEEP_TEMP=1 to keep the generated files. */
+ * uses stdio, writes real files to $TMPDIR, and hands the script to a shell
+ * with a documented set of HACMAN_* variables. Successful setup output is
+ * hidden unless tracing is enabled; failed setup output is replayed to stderr.
+ * Set HACMAN_KEEP_TEMP=1 to keep the generated files. */
 
 #include "hacman.h"
 
@@ -25,6 +26,50 @@ static const char *tmpdir(void)
 {
     const char *dir = getenv("TMPDIR");
     return (dir != NULL && dir[0] != '\0') ? dir : "/tmp";
+}
+
+/* Successful setup is silent by default. A seekable anonymous file avoids
+ * pipe backpressure for noisy builds and lets failures replay every diagnostic
+ * to stderr after the child exits. Trace mode keeps output live instead. */
+static FILE *capture_file(int trace)
+{
+    FILE *fp;
+
+    if (trace) return NULL;
+    fp = tmpfile();
+    if (fp == NULL) {
+        fprintf(stderr, "hacman: cannot create setup-output capture: %s\n", strerror(errno));
+    }
+    return fp;
+}
+
+static int redirect_capture(FILE *fp)
+{
+    int fd = fileno(fp);
+
+    if (dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0) return -1;
+    if (fd != STDOUT_FILENO && fd != STDERR_FILENO) close(fd);
+    return 0;
+}
+
+static void replay_capture(FILE *fp)
+{
+    char    buf[8192];
+    int     fd = fileno(fp);
+    ssize_t count;
+
+    if (lseek(fd, 0, SEEK_SET) < 0) return;
+    while ((count = read(fd, buf, sizeof(buf))) > 0) {
+        size_t written = 0;
+        while (written < (size_t)count) {
+            ssize_t out = write(STDERR_FILENO, buf + written, (size_t)count - written);
+            if (out < 0) {
+                if (errno == EINTR) continue;
+                return;
+            }
+            written += (size_t)out;
+        }
+    }
 }
 
 static int mkdir_p(const char *path)
@@ -288,7 +333,7 @@ static int write_response(const hm_check_result *res, char *path_out, size_t cap
 }
 
 int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
-               const hm_check_result *res, const char *sandbox_workdir)
+               const hm_check_result *res, const char *sandbox_workdir, int trace)
 {
     char  script_path[512];
     char  response_path[512];
@@ -297,6 +342,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
     pid_t pid;
     int   status = 0;
     int   rc     = 0;
+    FILE *capture;
     char  name[HM_NAME_MAX + 1];
     char  url[HM_URL_MAX + 1];
 
@@ -320,6 +366,11 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
     have_response = (write_response(res, response_path, sizeof(response_path)) == 0);
 
     fflush(stdout);
+    capture = capture_file(trace);
+    if (!trace && capture == NULL) {
+        rc = -1;
+        goto cleanup;
+    }
 
     pid = fork();
     if (pid < 0) {
@@ -328,7 +379,14 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         goto cleanup;
     }
     if (pid == 0) {
-        char *const argv[] = {(char *)HM_SHELL, (char *)"-e", script_path, NULL};
+        char *const plain_argv[] = {(char *)HM_SHELL, (char *)"-e", script_path, NULL};
+        char *const trace_argv[] = {(char *)HM_SHELL, (char *)"-e", (char *)"-x", script_path,
+                                    NULL};
+
+        if (capture != NULL && redirect_capture(capture) != 0) {
+            fprintf(stderr, "hacman: cannot capture setup output: %s\n", strerror(errno));
+            _exit(126);
+        }
 
         setenv("HACMAN_NAME", name, 1);
         setenv("HACMAN_URL", url, 1);
@@ -350,7 +408,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
             if (hm_sandbox_enter(sandbox_workdir) != 0) _exit(126);
         }
 
-        execv(HM_SHELL, argv);
+        execv(HM_SHELL, trace ? trace_argv : plain_argv);
         fprintf(stderr, "hacman: cannot execute %s: %s\n", HM_SHELL, strerror(errno));
         _exit(127);
     }
@@ -364,6 +422,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
     }
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (capture != NULL) replay_capture(capture);
         if (WIFSIGNALED(status)) {
             fprintf(stderr, "hacman: %s: install script killed by signal %d\n", name,
                     WTERMSIG(status));
@@ -375,10 +434,12 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         /* Keep the script around; the state is not advanced either, so the
          * next run retries this project. */
         if (have_response) unlink(response_path);
+        if (capture != NULL) fclose(capture);
         return -1;
     }
 
 cleanup:
+    if (capture != NULL) fclose(capture);
     if (getenv("HACMAN_KEEP_TEMP") == NULL) {
         unlink(script_path);
         if (have_response) unlink(response_path);
@@ -393,12 +454,13 @@ cleanup:
  * No temporary file and no script: a single command is already the simplest
  * thing a shell can be handed. The caller records the run only if this
  * returns 0, so a failing command is retried on the next run. */
-int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir)
+int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir, int trace)
 {
     char  command[HM_COMMAND_MAX + 1];
     char  name[HM_NAME_MAX + 1];
     pid_t pid;
     int   status = 0;
+    FILE *capture;
 
     hm_str_copy(command, sizeof(command), p->command);
     hm_str_copy(name, sizeof(name), p->name);
@@ -406,13 +468,20 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
     if (p->sandboxed && hm_workdir_ensure(sandbox_workdir) != 0) return -1;
 
     fflush(stdout);
+    capture = capture_file(trace);
+    if (!trace && capture == NULL) return -1;
 
     pid = fork();
     if (pid < 0) {
         fprintf(stderr, "hacman: fork() failed: %s\n", strerror(errno));
+        if (capture != NULL) fclose(capture);
         return -1;
     }
     if (pid == 0) {
+        if (capture != NULL && redirect_capture(capture) != 0) {
+            fprintf(stderr, "hacman: cannot capture setup output: %s\n", strerror(errno));
+            _exit(126);
+        }
         if (chdir(workdir) != 0) {
             fprintf(stderr, "hacman: %s: cannot enter %s: %s\n", name, workdir, strerror(errno));
             _exit(127);
@@ -426,7 +495,11 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
             if (hm_sandbox_enter(sandbox_workdir) != 0) _exit(126);
         }
 
-        execl(HM_SHELL, HM_SHELL, "-c", command, (char *)NULL);
+        if (trace) {
+            execl(HM_SHELL, HM_SHELL, "-x", "-c", command, (char *)NULL);
+        } else {
+            execl(HM_SHELL, HM_SHELL, "-c", command, (char *)NULL);
+        }
         fprintf(stderr, "hacman: cannot execute %s: %s\n", HM_SHELL, strerror(errno));
         _exit(127);
     }
@@ -434,19 +507,25 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) {
             fprintf(stderr, "hacman: waitpid() failed: %s\n", strerror(errno));
+            if (capture != NULL) fclose(capture);
             return -1;
         }
     }
 
     if (WIFSIGNALED(status)) {
+        if (capture != NULL) replay_capture(capture);
         fprintf(stderr, "hacman: %s: command killed by signal %d\n", name, WTERMSIG(status));
+        if (capture != NULL) fclose(capture);
         return -1;
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (capture != NULL) replay_capture(capture);
         fprintf(stderr, "hacman: %s: command failed with exit code %d\n", name,
                 WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        if (capture != NULL) fclose(capture);
         return -1;
     }
+    if (capture != NULL) fclose(capture);
     return 0;
 }
 

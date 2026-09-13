@@ -204,11 +204,12 @@ int hm_check(const hm_project *p, int timeout_secs, hm_check_result *res);
 /* Slow path: runs the project's install script. Clarity beats speed here.
  * Returns 0 on success, -1 if the script failed or could not be run. */
 int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
-               const hm_check_result *res, const char *sandbox_workdir);
+               const hm_check_result *res, const char *sandbox_workdir, int trace);
 
 /* Slow path for HM_KIND_COMMAND: runs `command` with the shell, in `workdir`.
  * Returns 0 on success, -1 if the command failed or could not be run. */
-int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir);
+int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir,
+                   int trace);
 
 /* Creates a cache work directory without changing or clearing its contents. */
 int hm_workdir_ensure(const char *workdir);
