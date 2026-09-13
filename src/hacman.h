@@ -177,6 +177,11 @@ void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir, const char
  * known == 0), -1 on an unreadable file. */
 int hm_cache_load(hm_cache *c);
 
+/* Acquires this project's blocking update lock, creating the cache directory
+ * when needed. The descriptor owns the lock until hm_cache_unlock(). */
+int  hm_cache_lock(const hm_cache *c);
+void hm_cache_unlock(int lock_fd);
+
 /* Writes the record atomically, creating the cache directory as needed. */
 int hm_cache_save(const hm_cache *c);
 

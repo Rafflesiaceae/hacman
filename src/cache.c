@@ -11,9 +11,9 @@
  * embedded projects instead hash their input path so edits reuse one record
  * and work directory. The identity still doubles as a readable label.
  *
- * One file per record keeps the fast path down to a single small read, and
- * lets several hacman runs - one per project file - proceed in parallel
- * without losing each other's updates. */
+ * One file per record keeps the fast path down to a single small read. Slow
+ * paths additionally take a per-record lock, so unrelated projects proceed
+ * independently while concurrent updates of one project serialize. */
 
 #include "hacman.h"
 
@@ -222,6 +222,14 @@ int hm_cache_load(hm_cache *c)
     size_t      total = 0;
     const char *p, *end, *nl;
 
+    /* A caller may reload after waiting for another process. Clear only the
+     * mutable record state so a disappeared or replaced record cannot leave
+     * stale values from the first read behind. */
+    c->mark[0]     = '\0';
+    c->last_check  = 0;
+    c->last_change = 0;
+    c->known       = 0;
+
     fd = open(c->path, O_RDONLY);
     if (fd < 0) {
         /* No record yet is the normal state of a fresh cache. */
@@ -304,6 +312,66 @@ static void mkdir_p(const char *path)
     (void)mkdir(tmp, 0700);
 }
 
+/* Copies the directory portion of a cache-record path. */
+static void cache_parent(const hm_cache *c, char out[HM_PATH_MAX + 1])
+{
+    size_t i = 0;
+    size_t n = strlen(c->path);
+
+    while (n > 0 && c->path[n - 1] != '/') --n;
+    while (i + 1 < n && i + 1 < HM_PATH_MAX + 1) {
+        out[i] = c->path[i];
+        ++i;
+    }
+    out[i] = '\0';
+}
+
+int hm_cache_lock(const hm_cache *c)
+{
+    char         lock_path[HM_PATH_MAX + 6];
+    char         dir[HM_PATH_MAX + 1];
+    size_t       o;
+    int          fd;
+    struct flock lock;
+
+    /* Lock files are permanent siblings of records. Keeping the inode stable
+     * avoids the unlink/recreate race inherent in transient lock files. */
+    o            = append_str(lock_path, 0, sizeof(lock_path), c->path);
+    o            = append_str(lock_path, o, sizeof(lock_path), ".lock");
+    lock_path[o] = '\0';
+
+    fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0 && errno == ENOENT) {
+        /* Existing projects avoid all mkdir calls; only a fresh cache pays
+         * for creating its directory hierarchy before retrying the open. */
+        cache_parent(c, dir);
+        mkdir_p(dir);
+        fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    }
+    if (fd < 0) {
+        hm_err("hacman: %s: cannot open update lock\n", lock_path);
+        return -1;
+    }
+
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type   = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    while (fcntl(fd, F_SETLKW, &lock) != 0) {
+        if (errno == EINTR) continue;
+        hm_err("hacman: %s: cannot acquire update lock\n", lock_path);
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+void hm_cache_unlock(int lock_fd)
+{
+    /* close() releases a process-owned fcntl lock atomically; O_CLOEXEC is a
+     * second line of defence if a future error path reaches exec first. */
+    if (lock_fd >= 0) close(lock_fd);
+}
+
 int hm_cache_save(const hm_cache *c)
 {
     char   tmp_path[HM_PATH_MAX + 32];
@@ -319,16 +387,8 @@ int hm_cache_save(const hm_cache *c)
     tmp_path[o] = '\0';
 
     n = strlen(c->path);
-    while (n > 0 && c->path[n - 1] != '/') --n; /* strip the file name */
-    if (n > 1) {
-        size_t i = 0;
-        while (i + 1 < n && i + 1 < sizeof(dir)) {
-            dir[i] = c->path[i];
-            ++i;
-        }
-        dir[i] = '\0';
-        mkdir_p(dir);
-    }
+    cache_parent(c, dir);
+    if (n > 1) mkdir_p(dir);
 
     o = append_str(record_buf, 0, sizeof(record_buf), HM_CACHE_MAGIC);
     o = append_str(record_buf, o, sizeof(record_buf), c->identity);

@@ -222,6 +222,22 @@ static int is_due(const hm_project *p, const hm_cache *c, long now, const hm_opt
     return 0;
 }
 
+/* Explains a cache hit without adding work to the quiet fast path. */
+static void report_skip(const hm_project *p, const hm_opts *o, long wait)
+{
+    char left[32];
+
+    if (!o->verbose) return;
+    if (p->file_count > 0 && (!p->schedule_explicit || p->sched_kind == HM_SCHED_NEVER)) {
+        hm_out("skip     %S (embedded inputs unchanged)\n", p->name);
+    } else if (wait < 0) {
+        hm_out("skip     %S (schedule: never)\n", p->name);
+    } else {
+        fmt_duration(wait, left, sizeof(left));
+        hm_out("skip     %S (next run in %s)\n", p->name, left);
+    }
+}
+
 /* Last step of every path: flush what hacman had to say and, if the project
  * names a program, become it.
  *
@@ -236,6 +252,14 @@ static int finish(const hm_project *p, const hm_opts *o, int rc)
     if (o->plan || o->check_only || o->dry_run || o->adopt) return rc;
 
     return hm_exec_bin(p, o->prog_argv); /* only returns if exec failed */
+}
+
+/* Release slow-path serialization before handing control to the configured
+ * program or returning an error to the caller. */
+static int finish_locked(const hm_project *p, const hm_opts *o, int lock_fd, int rc)
+{
+    hm_cache_unlock(lock_fd);
+    return finish(p, o, rc);
 }
 
 /* An embedded project does not know its cache work directory until its cache
@@ -301,8 +325,8 @@ int main(int argc, char **argv)
     char             *source_path = NULL;
     hm_check_result   res;
     char              old_mark[HM_MARK_MAX + 1];
-    long              len, now, wait = 0;
-    int               rc, changed;
+    long              len, now, wait       = 0;
+    int               rc, changed, lock_fd = -1;
 
     rc = parse_args(argc, argv, &o);
     if (rc != 0) return (rc > 0) ? HM_EXIT_OK : HM_EXIT_USAGE;
@@ -373,30 +397,39 @@ int main(int argc, char **argv)
     now = (long)time(NULL);
 
     if (!is_due(p, &cache, now, &o, &wait)) {
-        if (o.verbose) {
-            char left[32];
-            if (p->file_count > 0 && (!p->schedule_explicit || p->sched_kind == HM_SCHED_NEVER)) {
-                hm_out("skip     %S (embedded inputs unchanged)\n", p->name);
-            } else if (wait < 0) {
-                hm_out("skip     %S (schedule: never)\n", p->name);
-            } else {
-                fmt_duration(wait, left, sizeof(left));
-                hm_out("skip     %S (next run in %s)\n", p->name, left);
-            }
-        }
+        report_skip(p, &o, wait);
         /* Nothing done, nothing written - and straight on to the program,
          * which is the common case for a shim. */
         return finish(p, &o, HM_EXIT_OK);
     }
 
+    /* Serialize only real slow-path work, leaving the overwhelmingly common
+     * cache-hit path completely lock-free. After acquiring the lock, reload
+     * and recheck: a process that waited for another updater will see its
+     * completed record and go directly to the cached program. */
+    if (!o.check_only && !o.dry_run) {
+        lock_fd = hm_cache_lock(&cache);
+        if (lock_fd < 0) return HM_EXIT_FAILED;
+        if (hm_cache_load(&cache) != 0) {
+            hm_cache_unlock(lock_fd);
+            return HM_EXIT_USAGE;
+        }
+        now  = (long)time(NULL);
+        wait = 0;
+        if (!is_due(p, &cache, now, &o, &wait)) {
+            report_skip(p, &o, wait);
+            return finish_locked(p, &o, lock_fd, HM_EXIT_OK);
+        }
+    }
+
     if (p->kind == HM_KIND_COMMAND) {
-        return finish(p, &o, run_command_project(p, &o, now));
+        return finish_locked(p, &o, lock_fd, run_command_project(p, &o, now));
     }
 
     if (hm_check(p, o.timeout, &res) != 0) {
         /* Nothing is recorded: a failed request must not push the next attempt
          * into the future. */
-        return finish(p, &o, HM_EXIT_FAILED);
+        return finish_locked(p, &o, lock_fd, HM_EXIT_FAILED);
     }
 
     hm_str_copy(old_mark, sizeof(old_mark), (hm_str){cache.mark, strlen(cache.mark)});
@@ -407,7 +440,8 @@ int main(int argc, char **argv)
     if (!changed) {
         if (o.verbose) hm_out("ok       %S (%s)\n", p->name, res.mark);
         cache.last_check = now;
-        return finish(p, &o, (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK);
+        return finish_locked(p, &o, lock_fd,
+                             (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK);
     }
 
     if (!cache.known) {
@@ -416,14 +450,14 @@ int main(int argc, char **argv)
         hm_out("changed  %S %s -> %s\n", p->name, old_mark, res.mark);
     }
 
-    if (o.check_only || o.dry_run) return finish(p, &o, HM_EXIT_CHANGED);
+    if (o.check_only || o.dry_run) return finish_locked(p, &o, lock_fd, HM_EXIT_CHANGED);
 
     if (!o.adopt) {
         /* --- slow path ----------------------------------------------- */
         hm_out_flush(); /* the install script writes to the same terminal */
         if (hm_install(p, old_mark, res.mark, &res) != 0) {
             /* Nothing is written, so the next run repeats check and install. */
-            return finish(p, &o, HM_EXIT_FAILED);
+            return finish_locked(p, &o, lock_fd, HM_EXIT_FAILED);
         }
     }
 
@@ -431,5 +465,6 @@ int main(int argc, char **argv)
     cache.last_check  = now;
     cache.last_change = now;
 
-    return finish(p, &o, (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK);
+    return finish_locked(p, &o, lock_fd,
+                         (hm_cache_save(&cache) != 0) ? HM_EXIT_FAILED : HM_EXIT_OK);
 }

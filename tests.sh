@@ -282,6 +282,60 @@ else
     fail "explicit schedule did not rerun embedded command"
 fi
 
+# Simultaneous due invocations share one updater. The leader is held inside
+# its command until all followers have had time to block on the cache lock.
+cat >"$TMP/embedded-concurrent.siml" <<EOF
+name: embedded-concurrent
+command: echo update >> update.log && touch "$TMP/update-started" && while [ ! -e "$TMP/update-release" ]; do sleep 0.01; done && cp runner program && chmod +x program
+bin-path: program
+schedule: 1h
+files:
+  runner: |
+    #!/bin/sh
+    echo concurrent-program
+EOF
+concurrent_cache="$TMP/cache-embedded-concurrent"
+concurrent_pids=()
+"$BIN" --cache "$concurrent_cache" "$TMP/embedded-concurrent.siml" \
+    >"$TMP/concurrent-0.out" 2>&1 &
+concurrent_pids+=("$!")
+while [ ! -e "$TMP/update-started" ] && kill -0 "${concurrent_pids[0]}" 2>/dev/null; do
+    sleep 0.01
+done
+for index in 1 2 3 4 5 6 7; do
+    "$BIN" --cache "$concurrent_cache" "$TMP/embedded-concurrent.siml" \
+        >"$TMP/concurrent-$index.out" 2>&1 &
+    concurrent_pids+=("$!")
+done
+sleep 0.1
+tests=$((tests + 1))
+concurrent_alive=1
+for pid in "${concurrent_pids[@]}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then concurrent_alive=0; fi
+done
+if [ "$concurrent_alive" = "1" ]; then
+    echo "[test] ok: concurrent invocations wait for updater"
+else
+    fail "a concurrent invocation exited before the updater finished"
+fi
+touch "$TMP/update-release"
+concurrent_failed=0
+for pid in "${concurrent_pids[@]}"; do
+    if ! wait "$pid"; then concurrent_failed=1; fi
+done
+tests=$((tests + 1))
+if [ "$concurrent_failed" = "0" ]; then
+    echo "[test] ok: concurrent invocations exec after update"
+else
+    fail "a concurrent invocation failed after the update"
+fi
+tests=$((tests + 1))
+if [ "$(find "$concurrent_cache" -name update.log -exec cat {} \; | wc -l)" = "1" ]; then
+    echo "[test] ok: concurrent invocations ran one updater"
+else
+    fail "concurrent invocations ran more than one updater"
+fi
+
 # Changing an embedded input clears and reuses its path-addressed work
 # directory, including removal of files left by the previous build.
 cached_workdir="$(find "$cached_build_dir" -maxdepth 1 -type d -name '*.work' -print -quit)"
@@ -525,11 +579,11 @@ fail "the command ran again despite the shared record"
 fi
 
 tests=$((tests + 1))
-if [ "$(find "$cmd_cache" -type f | wc -l)" = "1" ]; then
+if [ "$(find "$cmd_cache" -type f ! -name '*.lock' | wc -l)" = "1" ]; then
 echo "[test] ok: both files use one cache record"
 else
 fail "expected exactly one cache record"
-find "$cmd_cache" -type f | sed 's/^/    | /' >&2
+find "$cmd_cache" -type f ! -name '*.lock' | sed 's/^/    | /' >&2
 fi
 
 expect "--force runs a scheduled command again" 0 "$BIN" -f --cache "$cmd_cache" "$TMP/cmd-a.siml"

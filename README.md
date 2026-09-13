@@ -455,6 +455,12 @@ record and work directory. A record whose identity does not match is ignored
 rather than trusted, so changed embedded inputs rebuild instead of inheriting
 the prior successful state.
 
+When work is due, hacman takes a per-project advisory lock beside the cache
+record before checking or updating. A concurrent invocation blocks in the
+kernel, reloads the record after acquiring the lock, and skips duplicate work
+when the first invocation succeeded. The ordinary not-due path takes no lock,
+so serialization adds no syscall to cached shim launches.
+
 What the identity is made of decides what shares a record:
 
 | project | cache address and identity | consequence |
