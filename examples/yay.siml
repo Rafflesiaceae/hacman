@@ -1,0 +1,38 @@
+#!/usr/bin/env hacman
+# Keep a private yay binary current, then forward commands such as
+# `./examples/yay.siml -Syu` to it.
+name: yay
+url: https://api.github.com/repos/Jguer/yay/releases/latest
+check: version
+version-prefix: "tag_name": "
+version-suffix: "
+schedule: daily
+bin-path: {{HOME}}/.local/bin/yay
+install: |
+  set -eu
+
+  # GitHub release archives use Arch Linux's architecture names.
+  case "$(uname -s):$(uname -m)" in
+    Linux:x86_64|Linux:amd64) release_arch=x86_64 ;;
+    Linux:aarch64|Linux:arm64) release_arch=aarch64 ;;
+    Linux:armv7h|Linux:armv7l) release_arch=armv7h ;;
+    *)
+      echo "yay: unsupported platform: $(uname -s)-$(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  # The tag has a leading v, while the archive and directory names do not.
+  release_version=${HACMAN_VERSION#v}
+  release_dir="yay_${release_version}_${release_arch}"
+  archive="$release_dir.tar.gz"
+  download_url="https://github.com/Jguer/yay/releases/download/$HACMAN_VERSION/$archive"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+
+  curl -fsSL "$download_url" | tar -xz -C "$tmp"
+  "$tmp/$release_dir/yay" --version >/dev/null
+
+  # Replace the cached executable only after the new release runs successfully.
+  install -Dm755 "$tmp/$release_dir/yay" "$HOME/.local/bin/yay.next"
+  mv "$HOME/.local/bin/yay.next" "$HOME/.local/bin/yay"
