@@ -2,11 +2,11 @@ name: indented
 url: https://example.com/x
 check: hash
 request: GET https://example.com/x
-compare: an FNV-1a hash of the whole response body
+compare: an XXH3 hash of the whole response body
 schedule: 2w
 check-when: 1209600 seconds after the last run
 cache-identity: url hash https://example.com/x
-cache-file: /home/hacman-test/.cache/hacman/url-53643bae2a1e809b
+cache-file: /home/hacman-test/.cache/hacman/url-96cea8e79893536c
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
 install: |

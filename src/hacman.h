@@ -105,7 +105,7 @@ int    hm_str_eq_str(hm_str a, hm_str b);
 size_t hm_str_copy(char *dst, size_t cap, hm_str s);
 int    hm_parse_ulong(hm_str s, unsigned long *out);
 
-/* FNV-1a over `data`, written to `out17` as 16 hex digits plus NUL. */
+/* XXH3 over `data`, written to `out17` as 16 hex digits plus NUL. */
 void hm_hash_hex(const char *data, size_t len, char *out17);
 
 /* Reads a whole file (or standard input when path is "-") into `buf`.

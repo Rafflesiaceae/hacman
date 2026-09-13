@@ -25,36 +25,35 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define XXH_STATIC_LINKING_ONLY
+#include "xxhash.h"
+
 #define HM_CACHE_MAGIC "#hacman-cache 1 "
 
 static char record_buf[HM_RECORD_MAX];
 static char cache_dir_buf[HM_PATH_MAX + 1];
 
-static unsigned long long hash_bytes(unsigned long long h, const char *data, size_t len)
-{
-    size_t i;
-    for (i = 0; i < len; ++i) {
-        h ^= (unsigned char)data[i];
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
 static void embedded_hash(const hm_project *p, char out17[17])
 {
-    static const char  hex[] = "0123456789abcdef";
-    unsigned long long h     = 1469598103934665603ULL;
-    size_t             i;
+    static const char hex[] = "0123456789abcdef";
+    XXH3_state_t      state;
+    XXH64_hash_t      hash;
+    size_t            i;
 
+    /* The explicit separators prevent a path/content boundary from hashing
+     * like the same bytes split at a different position. */
+    XXH3_INITSTATE(&state);
+    (void)XXH3_64bits_reset(&state);
     for (i = 0; i < p->file_count; ++i) {
         const hm_embedded_file *f         = &p->files[i];
         const char              separator = '\0';
-        h                                 = hash_bytes(h, f->path.ptr, f->path.len);
-        h                                 = hash_bytes(h, &separator, 1);
-        h                                 = hash_bytes(h, f->content.ptr, f->content.len);
-        h                                 = hash_bytes(h, &separator, 1);
+        (void)XXH3_64bits_update(&state, f->path.ptr, f->path.len);
+        (void)XXH3_64bits_update(&state, &separator, 1);
+        (void)XXH3_64bits_update(&state, f->content.ptr, f->content.len);
+        (void)XXH3_64bits_update(&state, &separator, 1);
     }
-    for (i = 0; i < 16; ++i) out17[i] = hex[(h >> (60 - 4 * i)) & 0xF];
+    hash = XXH3_64bits_digest(&state);
+    for (i = 0; i < 16; ++i) out17[i] = hex[(hash >> (60 - 4 * i)) & 0xF];
     out17[16] = '\0';
 }
 

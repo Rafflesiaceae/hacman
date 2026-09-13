@@ -42,6 +42,18 @@ if get_option('static')
   endif
 endif
 
+# Keep third-party implementation files in separate static libraries so the
+# project's warning policy remains focused on maintained sources.
+xxhash_inc = include_directories('vendor/xxhash')
+xxhash_lib = static_library('xxhash', 'vendor/xxhash/xxhash.c',
+  include_directories: xxhash_inc,
+  install: false,
+)
+xxhash_dep = declare_dependency(
+  include_directories: xxhash_inc,
+  link_with: xxhash_lib,
+)
+
 # The vendored SIML parser is implemented directly by siml.h, which config.c
 # includes as its single translation unit.
 siml_inc = include_directories('vendor/siml')
@@ -66,7 +78,7 @@ hacman_sources = files(
 )
 
 hacman = executable('hacman', hacman_sources,
-  dependencies: siml_dep,
+  dependencies: [siml_dep, xxhash_dep],
   include_directories: include_directories('src'),
   link_args: link_args,
   install: true,

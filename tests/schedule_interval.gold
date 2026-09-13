@@ -6,5 +6,5 @@ compare: the ETag header, or Last-Modified when absent
 schedule: 30m
 check-when: 1800 seconds after the last run
 cache-identity: url etag https://example.com/feed
-cache-file: /home/hacman-test/.cache/hacman/url-5ad8738d7dfa27aa
+cache-file: /home/hacman-test/.cache/hacman/url-c8354353ccd6653e
 install: (none - a change would only be reported)

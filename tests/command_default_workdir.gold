@@ -6,4 +6,4 @@ record-when: the command exits 0
 schedule: 1w
 check-when: 604800 seconds after the last run
 cache-identity: cmd /home/hacman-test $ journalctl --vacuum-time=30d
-cache-file: /home/hacman-test/.cache/hacman/cmd-a00b9c710bb53c5c
+cache-file: /home/hacman-test/.cache/hacman/cmd-a7364c66f35cc228

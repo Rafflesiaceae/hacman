@@ -1,9 +1,9 @@
 name: embedded
 command: test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready
-workdir: /home/hacman-test/.cache/hacman/cmd-7afdf520f1c635e7.work
+workdir: /home/hacman-test/.cache/hacman/cmd-af22cee75dcd5dad.work
 run: /bin/sh -c <command>, in workdir
 record-when: the command exits 0
-files-dir: /home/hacman-test/.cache/hacman/cmd-7afdf520f1c635e7.work
+files-dir: /home/hacman-test/.cache/hacman/cmd-af22cee75dcd5dad.work
 files-written: before command execution
 files:
   main.c: |
@@ -15,5 +15,5 @@ files:
     built before the command
 schedule: never
 check-when: only with --force
-cache-identity: cmd files:9fc63406c2889885 $ test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready
-cache-file: /home/hacman-test/.cache/hacman/cmd-7afdf520f1c635e7
+cache-identity: cmd files:e2d7338fb2fdd7f8 $ test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready
+cache-file: /home/hacman-test/.cache/hacman/cmd-af22cee75dcd5dad

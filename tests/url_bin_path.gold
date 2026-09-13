@@ -8,7 +8,7 @@ compare: the text between version-prefix and version-suffix
 schedule: 1d
 check-when: 86400 seconds after the last run
 cache-identity: url version https://api.github.com/repos/BurntSushi/ripgrep/releases/latest ["tag_name": ".."]
-cache-file: /home/hacman-test/.cache/hacman/url-bed88c6ea71b8628
+cache-file: /home/hacman-test/.cache/hacman/url-4a4d729cef133a4b
 bin-path: /home/hacman-test/.local/bin/rg
 exec: bin-path, with every argument that followed FILE
 install-shell: /bin/sh -e <script>

@@ -38,7 +38,7 @@ static void print_check(const hm_project *p)
 
     case HM_CHECK_HASH:
         hm_out("request: GET %S\n", p->url);
-        hm_out("compare: an FNV-1a hash of the whole response body\n");
+        hm_out("compare: an XXH3 hash of the whole response body\n");
         break;
 
     case HM_CHECK_VERSION:

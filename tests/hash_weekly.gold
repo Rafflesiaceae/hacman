@@ -2,11 +2,11 @@ name: hosts-blocklist
 url: https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
 check: hash
 request: GET https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
-compare: an FNV-1a hash of the whole response body
+compare: an XXH3 hash of the whole response body
 schedule: 1w
 check-when: 604800 seconds after the last run
 cache-identity: url hash https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
-cache-file: /home/hacman-test/.cache/hacman/url-eb660646f0153bc1
+cache-file: /home/hacman-test/.cache/hacman/url-b374f8b5d3d4c8a0
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
 install: |
