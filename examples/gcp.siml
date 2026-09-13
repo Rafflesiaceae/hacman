@@ -1,0 +1,40 @@
+#!/usr/bin/env hacman
+# Keep a private Google Cloud CLI current, then forward commands such as
+# `./examples/gcp.siml projects list` to it.
+name: google-cloud-cli
+command: sh update-gcp.sh
+schedule: daily
+bin-path: google-cloud-sdk/bin/gcloud
+files:
+  update-gcp.sh: |
+    #!/bin/sh
+    set -eu
+
+    # Preserve installed components when refreshing an existing SDK.
+    if [ -x google-cloud-sdk/bin/gcloud ]; then
+      google-cloud-sdk/bin/gcloud components update --quiet
+      exit 0
+    fi
+
+    # Google publishes separate CLI archives for supported Linux architectures.
+    case "$(uname -m)" in
+      x86_64|amd64) release_arch=x86_64 ;;
+      aarch64|arm64) release_arch=arm ;;
+      *)
+        echo "google-cloud-cli: unsupported Linux architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+    esac
+
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    archive="google-cloud-cli-linux-$release_arch.tar.gz"
+    curl -fsSL \
+      "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/$archive" \
+      -o "$tmp/$archive"
+    tar -xzf "$tmp/$archive" -C "$tmp"
+
+    # Configure the staged SDK without changing the caller's shell profile.
+    "$tmp/google-cloud-sdk/install.sh" --quiet \
+      --usage-reporting=false --command-completion=false --path-update=false
+    mv "$tmp/google-cloud-sdk" google-cloud-sdk

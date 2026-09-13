@@ -1,0 +1,18 @@
+#!/usr/bin/env hacman
+# Keep a private Azure CLI current, then forward commands such as
+# `./examples/azure.siml account show` to it.
+name: azure-cli
+command: sh update-azure.sh
+schedule: daily
+bin-path: azure-cli/bin/az
+files:
+  update-azure.sh: |
+    #!/bin/sh
+    set -eu
+
+    # A virtual environment keeps Azure CLI packages out of the system Python.
+    if [ ! -x azure-cli/bin/python ]; then
+      python3 -m venv azure-cli
+    fi
+    azure-cli/bin/python -m pip install --disable-pip-version-check \
+      --upgrade azure-cli
