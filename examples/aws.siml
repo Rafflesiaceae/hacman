@@ -2,48 +2,49 @@
 # Keep a private AWS CLI v2 current, then forward commands such as
 # `./examples/aws.siml sts get-caller-identity` to it.
 name: aws-cli
-command: sh update-aws.sh
+# Watch the x86_64 artifact as the release marker and select the local asset
+# in the install block below.
+url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+check: etag
 schedule: daily
 bin-path: aws/dist/aws
-files:
-  update-aws.sh: |
-    #!/bin/sh
-    set -eu
+install: |
+  set -eu
 
-    # Recover the last good runtime if a previous replacement was interrupted.
-    previous="$PWD/.aws-previous"
-    if [ ! -d "$PWD/aws" ] && [ -d "$previous" ]; then
+  # Recover the last good runtime if a previous replacement was interrupted.
+  previous="$PWD/.aws-previous"
+  if [ ! -d "$PWD/aws" ] && [ -d "$previous" ]; then
+    mv "$previous" "$PWD/aws"
+  fi
+  rm -rf "$previous"
+
+  # AWS publishes separate CLI archives for the supported Linux architectures.
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=x86_64 ;;
+    aarch64|arm64) release_arch=aarch64 ;;
+    *)
+      echo "aws-cli: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  # Stage the complete self-contained runtime beside the active copy.
+  stage="$(mktemp -d "$PWD/.aws-update.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  archive="awscli-exe-linux-$release_arch.zip"
+  curl -fsSL "https://awscli.amazonaws.com/$archive" -o "$stage/$archive"
+  unzip -q "$stage/$archive" 'aws/dist/*' -d "$stage"
+  "$stage/aws/dist/aws" --version >/dev/null
+
+  # Rotate only after the downloaded runtime proves executable.
+  if [ -d "$PWD/aws" ]; then
+    mv "$PWD/aws" "$previous"
+  fi
+  if mv "$stage/aws" "$PWD/aws"; then
+    rm -rf "$previous"
+  else
+    if [ -d "$previous" ]; then
       mv "$previous" "$PWD/aws"
     fi
-    rm -rf "$previous"
-
-    # AWS publishes separate CLI archives for the supported Linux architectures.
-    case "$(uname -m)" in
-      x86_64|amd64) release_arch=x86_64 ;;
-      aarch64|arm64) release_arch=aarch64 ;;
-      *)
-        echo "aws-cli: unsupported Linux architecture: $(uname -m)" >&2
-        exit 1
-        ;;
-    esac
-
-    # Stage the complete self-contained runtime beside the active copy.
-    stage="$(mktemp -d "$PWD/.aws-update.XXXXXX")"
-    trap 'rm -rf "$stage"' EXIT
-    archive="awscli-exe-linux-$release_arch.zip"
-    curl -fsSL "https://awscli.amazonaws.com/$archive" -o "$stage/$archive"
-    unzip -q "$stage/$archive" 'aws/dist/*' -d "$stage"
-    "$stage/aws/dist/aws" --version >/dev/null
-
-    # Rotate only after the downloaded runtime proves executable.
-    if [ -d "$PWD/aws" ]; then
-      mv "$PWD/aws" "$previous"
-    fi
-    if mv "$stage/aws" "$PWD/aws"; then
-      rm -rf "$previous"
-    else
-      if [ -d "$previous" ]; then
-        mv "$previous" "$PWD/aws"
-      fi
-      exit 1
-    fi
+    exit 1
+  fi
