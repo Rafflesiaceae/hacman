@@ -231,13 +231,12 @@ contains "embedded program completed" "embedded-prog"
 contains "embedded program receives option-looking arguments" "arg:--help"
 contains "embedded program preserves argument boundaries" "arg:two words"
 
-# Embedded command projects fingerprint their inputs. Even `schedule: always`
-# must reuse the successful build until an input changes.
+# Embedded command projects without an explicit schedule fingerprint their
+# inputs and reuse the successful build until an input changes.
 cat >"$TMP/embedded-cached.siml" <<'EOF'
 name: embedded-cached
 command: echo built >> build.log && chmod +x runner
 bin-path: runner
-schedule: always
 files:
   runner: |
     #!/bin/sh
@@ -256,6 +255,31 @@ if [ "$(find "$cached_build_dir" -name build.log -exec cat {} \; | wc -l)" = "1"
     echo "[test] ok: unchanged embedded command ran only once"
 else
     fail "unchanged embedded command was rerun"
+fi
+
+# An explicit schedule adds periodic runs while keeping the executable and any
+# command-owned state inside the same generated work directory.
+cat >"$TMP/embedded-scheduled.siml" <<'EOF'
+name: embedded-scheduled
+command: echo checked >> checks.log && cp runner program && chmod +x program
+bin-path: program
+schedule: always
+files:
+  runner: |
+    #!/bin/sh
+    echo scheduled-program
+EOF
+scheduled_cache="$TMP/cache-embedded-scheduled"
+expect "scheduled embedded command runs initially" 0 \
+    "$BIN" --cache "$scheduled_cache" "$TMP/embedded-scheduled.siml"
+contains "scheduled embedded executable runs" "scheduled-program"
+expect "scheduled embedded command runs again" 0 \
+    "$BIN" --cache "$scheduled_cache" "$TMP/embedded-scheduled.siml"
+tests=$((tests + 1))
+if [ "$(find "$scheduled_cache" -name checks.log -exec cat {} \; | wc -l)" = "2" ]; then
+    echo "[test] ok: explicit schedule reran embedded command"
+else
+    fail "explicit schedule did not rerun embedded command"
 fi
 
 # Changing an embedded input clears and reuses its path-addressed work

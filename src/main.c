@@ -197,15 +197,14 @@ static int is_due(const hm_project *p, const hm_cache *c, long now, const hm_opt
     if (o->force) return 1;
 
     /* An embedded project's record has a stable path but an identity that
-     * changes with the command, file paths, or file contents. A successful
-     * matching record therefore means there is no setup work to repeat.
-     * Rebuild a missing executable instead of handing an invalid cache entry
-     * to exec(), while projects without bin-path retain useful --adopt
-     * semantics based on the record alone. */
+     * changes with the command, file paths, or file contents. Changed inputs
+     * and a missing executable always require setup. Otherwise embedded
+     * commands remain content-driven unless their file explicitly opts into
+     * periodic runs with `schedule`. */
     if (p->file_count > 0) {
         if (!c->known) return 1;
         if (p->bin_path[0] != '\0' && access(p->bin_path, X_OK) != 0) return 1;
-        return 0;
+        if (!p->schedule_explicit || p->sched_kind == HM_SCHED_NEVER) return 0;
     }
 
     if (p->sched_kind == HM_SCHED_ALWAYS) return 1;
@@ -376,7 +375,7 @@ int main(int argc, char **argv)
     if (!is_due(p, &cache, now, &o, &wait)) {
         if (o.verbose) {
             char left[32];
-            if (p->file_count > 0) {
+            if (p->file_count > 0 && (!p->schedule_explicit || p->sched_kind == HM_SCHED_NEVER)) {
                 hm_out("skip     %S (embedded inputs unchanged)\n", p->name);
             } else if (wait < 0) {
                 hm_out("skip     %S (schedule: never)\n", p->name);

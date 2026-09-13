@@ -73,10 +73,11 @@ typedef struct {
     char          workdir_path[HM_PATH_MAX + 1];
     hm_check_kind check;
     hm_sched_kind sched_kind;
-    long          sched_interval; /* seconds, for HM_SCHED_EVERY          */
-    hm_str        version_prefix; /* HM_CHECK_VERSION: text before value  */
-    hm_str        version_suffix; /* HM_CHECK_VERSION: text after value   */
-    hm_str        bin;            /* raw {{VAR}} template, "" if unset     */
+    long          sched_interval;    /* seconds, for HM_SCHED_EVERY       */
+    int           schedule_explicit; /* embedded commands opt into timing */
+    hm_str        version_prefix;    /* HM_CHECK_VERSION: text before value  */
+    hm_str        version_suffix;    /* HM_CHECK_VERSION: text after value   */
+    hm_str        bin;               /* raw {{VAR}} template, "" if unset     */
     /* The program this project sets up. When set, hacman execs it once the
      * setup is done, forwarding everything that followed FILE. */
     char             bin_path[HM_PATH_MAX + 1];

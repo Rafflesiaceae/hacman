@@ -331,7 +331,10 @@ is also exported as `HACMAN_WORKDIR`.
 
 Materialization happens only immediately before a real command execution:
 cache hits, `--plan`, `--check-only`, `--dry-run`, and `--adopt` do not touch
-the files. Embedded projects are input-fingerprinted rather than scheduled.
+the files. Embedded projects are input-fingerprinted rather than scheduled by
+default. Setting `schedule` explicitly also reruns their command at that
+interval, which is useful for cached download shims that need periodic update
+checks while retaining their executable in the generated work directory.
 The canonical absolute `.siml` path selects a stable cache record and work
 directory. That source path, the embedded paths and contents, and the command
 form the identity stored in that record; when the inputs change, hacman clears
@@ -383,8 +386,9 @@ A project that is not due costs no network traffic and no subprocess.
 The default is `daily`, i.e. a full 24h: nothing hacman watches is worth asking
 about more often than that unless the file says so explicitly.
 Command projects with embedded `files` are the exception: their inputs provide
-the invalidation signal, so they build once per content identity regardless of
-`schedule`.
+the invalidation signal, so without an explicit `schedule` they build once per
+content identity. An explicit schedule adds time-based command runs without
+giving up input-based invalidation.
 
 ### Check schemes — *how* change is decided
 

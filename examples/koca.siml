@@ -1,31 +1,42 @@
 #!/usr/bin/env hacman
-# Keep the downloaded Koca binary for normal invocations and ask GitHub for a
-# newer release no more often than the configurable schedule below.
+# Keep Koca in this project's cmd-*.work directory, checking GitHub for a new
+# release no more often than the configurable schedule below.
 name: koca
-url: https://api.github.com/repos/koca-build/koca/releases/latest
-check: version
-version-prefix: "tag_name": "
-version-suffix: "
-schedule: 1h
-bin-path: {{HOME}}/.cache/hacman/koca
-install: |
-  set -eu
+command: sh update-koca.sh
+schedule: daily
+bin-path: koca
+files:
+  update-koca.sh: |
+    #!/bin/sh
+    set -eu
 
-  # Koca names its release architectures differently from uname on Linux.
-  case "$(uname -m)" in
-    x86_64|amd64) release_arch=x64 ;;
-    aarch64|arm64) release_arch=arm64 ;;
-    *)
-      echo "koca: unsupported Linux architecture: $(uname -m)" >&2
+    # Koca names its release architectures differently from uname on Linux.
+    case "$(uname -m)" in
+      x86_64|amd64) release_arch=x64 ;;
+      aarch64|arm64) release_arch=arm64 ;;
+      *)
+        echo "koca: unsupported Linux architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+    esac
+
+    release_json="$(curl -fsSL https://api.github.com/repos/koca-build/koca/releases/latest)"
+    release_version="$(printf '%s\n' "$release_json" |
+      sed -n 's/^[[:space:]]*"tag_name": "\([^"]*\)".*/\1/p')"
+    if [ -z "$release_version" ]; then
+      echo "koca: latest release has no tag_name" >&2
       exit 1
-      ;;
-  esac
+    fi
 
-  asset="koca-linux-$release_arch"
-  download_url="https://github.com/koca-build/koca/releases/download/$HACMAN_VERSION/$asset"
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+    # Leave an unchanged cached binary alone after the scheduled version check.
+    if [ -x koca ] && [ -f .koca-version ] &&
+       [ "$(cat .koca-version)" = "$release_version" ]; then
+      exit 0
+    fi
 
-  curl -fsSL "$download_url" -o "$tmp/$asset"
-  # Keep the executable beside hacman's own persistent cache records.
-  install -Dm755 "$tmp/$asset" "$HOME/.cache/hacman/koca"
+    asset="koca-linux-$release_arch"
+    download_url="https://github.com/koca-build/koca/releases/download/$release_version/$asset"
+    curl -fsSL "$download_url" -o koca.next
+    chmod 755 koca.next
+    mv koca.next koca
+    printf '%s\n' "$release_version" >.koca-version

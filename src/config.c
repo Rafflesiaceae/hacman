@@ -267,6 +267,9 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
                     "weekly, monthly or <n>[smhdw]");
             return -1;
         }
+        /* Embedded commands normally rebuild only when their inputs change;
+         * spelling out a schedule opts them into periodic command runs. */
+        p->schedule_explicit = 1;
     } else if (hm_str_eq(key, "version-prefix")) {
         c->seen_version   = 1;
         p->version_prefix = value;

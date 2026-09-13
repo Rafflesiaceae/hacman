@@ -121,7 +121,19 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
     if (p->file_count > 0) {
         hm_out("cache-policy: input path, command, and embedded-file contents\n");
         hm_out("workdir-policy: stable per input path, cleared when inputs change\n");
-        hm_out("check-when: inputs change, cached executable is missing, or with --force\n");
+        if (!p->schedule_explicit || p->sched_kind == HM_SCHED_NEVER) {
+            hm_out("check-when: inputs change, cached executable is missing, or with --force\n");
+        } else {
+            hm_out("schedule: %s\n", sched);
+            if (p->sched_kind == HM_SCHED_ALWAYS) {
+                hm_out("check-when: inputs change, cached executable is missing, or on every "
+                       "invocation\n");
+            } else {
+                hm_out("check-when: inputs change, cached executable is missing, or %u seconds "
+                       "after the last run\n",
+                       (unsigned long)p->sched_interval);
+            }
+        }
     } else {
         hm_out("schedule: %s\n", sched);
         switch (p->sched_kind) {
