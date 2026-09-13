@@ -115,6 +115,13 @@ done
 # Every shipped example must resolve, too.
 for siml in examples/*.siml; do
     [ -e "$siml" ] || continue
+    # Merge tools may leave untracked conflict snapshots beside an example;
+    # those are working files, not examples shipped by the project.
+    case "$(basename "$siml")" in
+        *_BASE_[0-9]*.siml|*_LOCAL_[0-9]*.siml|*_REMOTE_[0-9]*.siml|*_BACKUP_[0-9]*.siml)
+            continue
+            ;;
+    esac
     tests=$((tests + 1))
     if out="$(plan "$siml" 2>&1)"; then
         echo "[test] ok: $siml plans"
