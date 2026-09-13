@@ -1,0 +1,3 @@
+#!/usr/bin/env hacman
+command: printf shebang-supported
+schedule: never

@@ -486,6 +486,8 @@ int hm_config_parse(const char *buf, size_t len, const char *origin,
         switch (t) {
         case SIML_EVENT_STREAM_START:
         case SIML_EVENT_DOCUMENT_END:
+        /* A shebang is stream-level trivia; it does not change the project. */
+        case SIML_EVENT_SHEBANG:
         case SIML_EVENT_COMMENT:
             break;
 

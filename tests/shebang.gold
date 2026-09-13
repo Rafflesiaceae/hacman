@@ -1,0 +1,9 @@
+name: printf shebang-supported
+command: printf shebang-supported
+workdir: /home/hacman-test
+run: /bin/sh -c <command>, in workdir
+record-when: the command exits 0
+schedule: never
+check-when: only with --force
+cache-identity: cmd /home/hacman-test $ printf shebang-supported
+cache-file: /home/hacman-test/.cache/hacman/cmd-8abe5468a8fdeb61

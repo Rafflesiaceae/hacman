@@ -452,8 +452,12 @@ interrupted or failed run leaves nothing behind.
 
 ### SIML gotchas
 
-SIML is strict, which is what makes it fast to parse. Two rules surprise people
-writing project files by hand:
+SIML is strict, which is what makes it fast to parse. A few rules surprise
+people writing project files by hand:
+
+- A project may start with `#!/usr/bin/env hacman`, allowing an executable
+  `.siml` file to invoke hacman directly. The shebang is stream-level metadata
+  and does not otherwise affect the project or its plan.
 
 - **No blank lines** outside of block scalars, and no trailing whitespace. Use
   comment lines to separate entries.
