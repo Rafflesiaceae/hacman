@@ -1,0 +1,10 @@
+# full-line comment before the first item
+id:
+  value: 42  # the answer
+# another comment
+flags: [ONE,TWO]   # trailing comment
+description: |
+  line1
+  # this hash is not a comment
+  line3
+# vim: set ft=yaml:

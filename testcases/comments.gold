@@ -1,0 +1,22 @@
+STREAM_START
+COMMENT # full-line comment before the first item
+DOCUMENT_START
+MAPPING_START
+MAPPING_ENTRY_HEADER key=id
+MAPPING_START
+SCALAR key=value value='42'  # (spaces=2) the answer
+MAPPING_END
+COMMENT # another comment
+SEQUENCE_START style=flow key=flags  # (spaces=3) trailing comment
+SCALAR value='ONE'
+SCALAR value='TWO'
+SEQUENCE_END
+BLOCK_SCALAR_START key=description
+BLOCK_SCALAR_LINE 'line1'
+BLOCK_SCALAR_LINE '# this hash is not a comment'
+BLOCK_SCALAR_LINE 'line3'
+BLOCK_SCALAR_END
+COMMENT # vim: set ft=yaml:
+MAPPING_END
+DOCUMENT_END
+STREAM_END

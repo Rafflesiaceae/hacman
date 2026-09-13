@@ -1,0 +1,7 @@
+ab:
+  # comment before sequence child
+  - first
+  - second
+cd:
+  # comment before mapping child
+  key: value

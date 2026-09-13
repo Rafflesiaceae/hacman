@@ -1,0 +1,33 @@
+STREAM_START
+DOCUMENT_START
+MAPPING_START
+SCALAR key=id value='nested_flow'
+SEQUENCE_START style=flow key=matrix
+SEQUENCE_START style=flow
+SCALAR value='1'
+SCALAR value='2'
+SEQUENCE_END
+SEQUENCE_START style=flow
+SCALAR value='3'
+SCALAR value='4'
+SEQUENCE_END
+SEQUENCE_END
+SEQUENCE_START style=flow key=mixed
+SCALAR value='a'
+SEQUENCE_START style=flow
+SCALAR value='b'
+SCALAR value='c'
+SEQUENCE_END
+SCALAR value='d'
+SEQUENCE_END
+SEQUENCE_START style=flow key=empty_nested
+SEQUENCE_START style=flow
+SEQUENCE_END
+SEQUENCE_START style=flow
+SCALAR value='x'
+SEQUENCE_END
+SEQUENCE_END
+COMMENT # vim: set ft=yaml:
+MAPPING_END
+DOCUMENT_END
+STREAM_END

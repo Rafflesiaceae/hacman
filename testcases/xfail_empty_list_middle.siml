@@ -1,0 +1,3 @@
+id: empty_list_middle
+tags: [alpha,,beta]
+# vim: set ft=yaml:

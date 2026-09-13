@@ -1,0 +1,31 @@
+STREAM_START
+DOCUMENT_START
+MAPPING_START
+SCALAR key=id value='single_line_lists'
+SEQUENCE_START style=flow key=hash_in_list
+SCALAR value='va#lue'
+SCALAR value='mid#tag'
+SEQUENCE_END
+SEQUENCE_START style=flow key=trim_spaces_list
+SCALAR value='spaced_item'
+SCALAR value='trailing'
+SEQUENCE_END
+SEQUENCE_START style=flow key=pipe_like_list
+SCALAR value='pipeish'
+SCALAR value='nested-ish'
+SEQUENCE_END
+MAPPING_END
+DOCUMENT_END
+DOCUMENT_START
+MAPPING_START
+SCALAR key=id value='scalar_fields'
+SCALAR key=comment_trimmed value='value before comment'  # (spaces=3) trailing comment
+SCALAR key=hash_literal value='value#hash'
+SEQUENCE_START style=flow key=list_inline_comment  # (spaces=2) inline list comment
+SCALAR value='foo'
+SCALAR value='bar'
+SEQUENCE_END
+COMMENT # vim: set ft=yaml:
+MAPPING_END
+DOCUMENT_END
+STREAM_END

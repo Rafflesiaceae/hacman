@@ -1,0 +1,6 @@
+id: block_content_doc_separator
+foo:
+  bar: qwe
+text: |
+    foo
+    bar

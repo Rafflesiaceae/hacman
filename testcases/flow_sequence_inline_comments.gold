@@ -1,0 +1,11 @@
+STREAM_START
+DOCUMENT_START
+MAPPING_START
+SCALAR key=number value='9#1'  # (spaces=7) just a number
+SEQUENCE_START style=flow key=foo  # (spaces=3) just a flow sequence
+SCALAR value='bar'
+SCALAR value='ba#z'
+SEQUENCE_END
+MAPPING_END
+DOCUMENT_END
+STREAM_END

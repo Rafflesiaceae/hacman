@@ -1,0 +1,7 @@
+- id: r_fullscreen
+  default: 1
+  flags: [CVAR_ARCHIVE,CVAR_TEMP]
+- id: cl_sensitivity
+  default: 3.0
+  flags: []
+# vim: set ft=yaml:

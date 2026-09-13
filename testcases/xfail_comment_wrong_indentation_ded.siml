@@ -1,0 +1,5 @@
+foo:
+  bar: 1
+# comment
+  # comment
+baz: 2

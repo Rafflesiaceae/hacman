@@ -1,0 +1,9 @@
+STREAM_START
+DOCUMENT_START
+MAPPING_START
+SCALAR key=foo value='baz'
+SCALAR key=bar value='baz'
+SCALAR key=foo value='bar'
+MAPPING_END
+DOCUMENT_END
+STREAM_END

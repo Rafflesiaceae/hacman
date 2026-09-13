@@ -1,0 +1,8 @@
+simple-key: alpha
+with.dots: bravo
+hyphenated-key: charlie
+mix.ed-key_1: delta
+list-key.with-dash: [one-two,three.four]
+literal.key: |
+  echoes of a dashed-key literal
+# vim: set ft=yaml:
