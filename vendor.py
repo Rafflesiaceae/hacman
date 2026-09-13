@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# vendor v0.4 (2026-09-13) (1156f0efe39bd810)
+# vendor v0.6 (2026-09-14) (bf312b6bbe0c697f)
 #
 # Updates vendor dependencies via git subtrees
 #
@@ -8,10 +8,13 @@
 # REQUIRES: python git
 import json
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import urllib.request
 
 from dataclasses import dataclass, asdict
 from typing import Dict, List
@@ -19,6 +22,13 @@ from typing import Dict, List
 VENDOR_DIR = "./vendor"
 VENDOR_JSON_PATH = "./vendor/vendor.json"
 VENDOR_REPLACE_JSON_PATH = "./vendor/vendor_replace.json"
+
+# Self-updates always follow the canonical script on the main branch.
+UPDATE_URL = (
+    "https://raw.githubusercontent.com/Rafflesiaceae/vendor/"
+    "refs/heads/main/vendor.py"
+)
+VERSION_HEADER = re.compile(rb"^# vendor v([0-9]+(?:\.[0-9]+)*)\b", re.MULTILINE)
 
 # Markers delimiting the section this script owns inside `.git/info/exclude`.
 # Everything between them is rewritten on every run, everything outside of
@@ -34,15 +44,6 @@ class VendorConfig:
     rev: str
 
 
-@dataclass
-class VendorUpdate:
-    """A completed subtree update waiting to be consolidated."""
-
-    name: str
-    rev: str
-    squash_commit: str
-
-
 def run_cmd(cmd, cwd=None):
     try:
         result = subprocess.check_output(cmd, shell=False, cwd=cwd, text=True).strip()
@@ -50,6 +51,70 @@ def run_cmd(cmd, cwd=None):
     except subprocess.CalledProcessError as e:
         print(f"Command failed: {' '.join(e.cmd)}")
         sys.exit(1)
+
+
+def update_self():
+    """Atomically replace this script with the latest canonical version."""
+    script_path = os.path.realpath(__file__)
+
+    # Reject an unexpected response before it can replace a working script.
+    with urllib.request.urlopen(UPDATE_URL, timeout=30) as response:
+        updated_contents = response.read()
+    version_match = VERSION_HEADER.search(updated_contents)
+    if version_match is None:
+        raise ValueError("downloaded script has no valid vendor version header")
+    try:
+        compile(updated_contents, UPDATE_URL, "exec")
+    except SyntaxError as error:
+        raise ValueError(f"downloaded script is not valid Python: {error}") from error
+
+    version = version_match.group(1).decode("ascii")
+    with open(script_path, "rb") as script:
+        current_contents = script.read()
+    if current_contents == updated_contents:
+        print(f"Already updated to v{version}.")
+        return
+
+    update_action = "Updated"
+    current_version_match = VERSION_HEADER.search(current_contents)
+    if current_version_match is not None:
+        # Compare numeric components and treat omitted trailing zeroes as
+        # equivalent, so versions such as 1.10 and 1.9 sort correctly.
+        updated_parts = tuple(int(part) for part in version.split("."))
+        current_parts = tuple(
+            int(part)
+            for part in current_version_match.group(1).decode("ascii").split(".")
+        )
+        width = max(len(updated_parts), len(current_parts))
+        updated_key = updated_parts + (0,) * (width - len(updated_parts))
+        current_key = current_parts + (0,) * (width - len(current_parts))
+        if updated_key < current_key:
+            update_action = "Downgraded"
+
+    temporary_path = None
+    try:
+        # A sibling temporary file keeps os.replace atomic on the target
+        # filesystem, while copying the mode retains direct executability.
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=os.path.dirname(script_path),
+            prefix=f".{os.path.basename(script_path)}.",
+            delete=False,
+        ) as temporary:
+            temporary_path = temporary.name
+            temporary.write(updated_contents)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        mode = stat.S_IMODE(os.stat(script_path).st_mode)
+        os.chmod(temporary_path, mode)
+        os.replace(temporary_path, script_path)
+        temporary_path = None
+    finally:
+        # Clean up a partial sibling file when writing or replacing fails.
+        if temporary_path is not None and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+    print(f"{update_action} vendor.py to v{version}.")
 
 
 # --- replacements ---------------------------------------------------------
@@ -397,7 +462,7 @@ def manage_subtree(repo_url, name, rev):
         print(
             f"Subtree at '{target_path}' is already at revision '{rev}', skipping update."
         )
-        return None
+        return
 
     require_clean_worktree_for_subtree(target_path)
 
@@ -438,54 +503,23 @@ def manage_subtree(repo_url, name, rev):
         )
         raise SystemExit(1) from None
 
-    print(f"Subtree at '{target_path}' is now at revision '{rev}'.\n")
-    # With --squash, git subtree makes its merge commit's second parent the
-    # synthetic commit that records the imported upstream revision. Keep that
-    # parent reachable when the per-subtree merge commits are consolidated.
-    squash_commit = run_cmd(["git", "rev-parse", "HEAD^2"])
-    return VendorUpdate(name, rev, squash_commit)
-
-
-def consolidate_subtree_updates(original_head, updates):
-    """Replace per-subtree merges with one merge containing every update."""
-    if not updates:
-        return
-
-    if len(updates) == 1:
-        commit_message = (
-            f"vendor: Upgraded {updates[0].name} to '{updates[0].rev}'"
-        )
-    else:
-        commit_message = "vendor: Upgrade dependencies\n\n"
-        commit_message += "\n".join(
-            f"- {update.name}: {update.rev}" for update in updates
-        )
-
-    # The current tree contains all sequential subtree updates. Re-parenting
-    # that tree directly drops their individual merge commits while retaining
-    # each synthetic squash commit for future `git subtree pull` operations.
-    final_tree = run_cmd(["git", "rev-parse", "HEAD^{tree}"])
-    commit_args = ["git", "commit-tree", final_tree, "-p", original_head]
-    for update in updates:
-        commit_args.extend(["-p", update.squash_commit])
+    commit_message = f"vendor: Upgraded {name} to '{rev}'"
 
     with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmpfile:
         tmpfile.write(commit_message)
         tmpfile_path = tmpfile.name
 
     try:
-        consolidated_commit = run_cmd(commit_args + ["-F", tmpfile_path])
-        subprocess.check_call(["git", "reset", consolidated_commit])
-        # Preserve the script's existing opportunity to edit the generated
-        # vendor commit message, but prompt only once for the whole update.
         subprocess.check_call(
             ["git", "commit", "--amend", "--edit", "-F", tmpfile_path]
         )
     except subprocess.CalledProcessError:
-        print("Failed to create the consolidated vendor update commit.")
+        print(f"Failed to amend commit for subtree at {target_path}.")
         sys.exit(1)
     finally:
         os.unlink(tmpfile_path)
+
+    print(f"Subtree at '{target_path}' is now at revision '{rev}'.\n")
 
 
 def load_vendor_config() -> List[VendorConfig]:
@@ -509,11 +543,17 @@ def load_vendor_config() -> List[VendorConfig]:
         return configs
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    """Parse command-line arguments and run the requested operation."""
     import argparse
 
     parser = argparse.ArgumentParser(
         description="Manage git subtree based on vendor.json"
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="update vendor.py itself from the latest version and exit",
     )
     parser.add_argument(
         "--restore-replacements",
@@ -529,21 +569,29 @@ if __name__ == "__main__":
         help="list the currently active replacements and exit",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if args.update:
+        try:
+            update_self()
+        except (OSError, ValueError) as error:
+            print(f"Cannot update vendor.py: {error}", file=sys.stderr)
+            return 1
+        return 0
 
     if args.status:
         print_replacement_status()
-        sys.exit(0)
+        return 0
 
     if args.restore_replacements:
         restore_all_replacements()
-        sys.exit(0)
+        return 0
 
     try:
         replacements = apply_replacements()
     except (ValueError, json.JSONDecodeError) as e:
         print(e)
-        sys.exit(1)
+        return 1
     if replacements:
         print()
 
@@ -551,11 +599,9 @@ if __name__ == "__main__":
         vendor_configs = load_vendor_config()
     except (FileNotFoundError, ValueError) as e:
         print(e)
-        sys.exit(1)
+        return 1
 
     print(f"Updating subtrees according to: '{VENDOR_JSON_PATH}'\n")
-    original_head = run_cmd(["git", "rev-parse", "HEAD"])
-    updates = []
     for vendor in vendor_configs:
         # A replaced dependency is a symlink to a local directory, pulling a
         # subtree into it would write through the link and defeat the purpose.
@@ -565,8 +611,9 @@ if __name__ == "__main__":
                 f"'{replacements[vendor.name]}'.\n"
             )
             continue
-        update = manage_subtree(vendor.repo_url, vendor.name, vendor.rev)
-        if update:
-            updates.append(update)
+        manage_subtree(vendor.repo_url, vendor.name, vendor.rev)
+    return 0
 
-    consolidate_subtree_updates(original_head, updates)
+
+if __name__ == "__main__":
+    raise SystemExit(main())
