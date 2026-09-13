@@ -1,0 +1,26 @@
+#!/usr/bin/env hacman
+# Keep a private AWS CLI v2 current, then forward commands such as
+# `./examples/aws.siml sts get-caller-identity` to it.
+name: aws-cli
+command: sh update-aws.sh
+schedule: daily
+bin-path: bin/aws
+files:
+  update-aws.sh: |
+    #!/bin/sh
+    set -eu
+
+    # The CLI remembers these user-local locations when updating itself.
+    export XDG_DATA_HOME="$PWD/data"
+    export XDG_BIN_HOME="$PWD/bin"
+
+    if [ -x "$XDG_BIN_HOME/aws" ]; then
+      "$XDG_BIN_HOME/aws" update
+      exit 0
+    fi
+
+    # AWS's installer selects the appropriate supported host package.
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL https://awscli.amazonaws.com/v2/install.sh -o "$tmp/install.sh"
+    sh "$tmp/install.sh"
