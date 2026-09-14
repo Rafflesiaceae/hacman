@@ -1,0 +1,65 @@
+#!/usr/bin/env hacman
+# Keep a private Vault CLI current, then forward commands such as
+# `./examples/vault.siml status` to it.
+name: vault-cli
+# Watch HashiCorp's checkpoint API for the current release version, then
+# download and verify the matching platform archive in the install block.
+url: https://checkpoint-api.hashicorp.com/v1/check/vault
+check: version
+version-prefix: "current_version":"
+version-suffix: "
+schedule: daily
+bin-path: vault/vault
+install: |
+  set -eu
+
+  # Recover the last good runtime if a previous replacement was interrupted.
+  previous="$PWD/.vault-previous"
+  if [ ! -d "$PWD/vault" ] && [ -d "$previous" ]; then
+    mv "$previous" "$PWD/vault"
+  fi
+  rm -rf "$previous"
+
+  # HashiCorp publishes separate archives for the supported Linux architectures.
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=amd64 ;;
+    aarch64|arm64) release_arch=arm64 ;;
+    *)
+      echo "vault-cli: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  # Stage the archive and check it against HashiCorp's published checksums.
+  stage="$(mktemp -d "$PWD/.vault-update.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  base="https://releases.hashicorp.com/vault/$HACMAN_VERSION"
+  archive="vault_${HACMAN_VERSION}_linux_${release_arch}.zip"
+  curl -fsSL "$base/$archive" -o "$stage/$archive"
+  curl -fsSL "$base/vault_${HACMAN_VERSION}_SHA256SUMS" -o "$stage/SHA256SUMS"
+  expected="$(awk -v f="$archive" '$2 == f { print $1 }' "$stage/SHA256SUMS")"
+  if [ -z "$expected" ]; then
+    echo "vault-cli: no checksum entry for $archive" >&2
+    exit 1
+  fi
+  actual="$(sha256sum "$stage/$archive" | cut -d' ' -f1)"
+  if [ "$actual" != "$expected" ]; then
+    echo "vault-cli: checksum mismatch for $archive" >&2
+    exit 1
+  fi
+  mkdir "$stage/vault"
+  unzip -q "$stage/$archive" -d "$stage/vault"
+  "$stage/vault/vault" --version >/dev/null
+
+  # Rotate only after the downloaded runtime proves executable.
+  if [ -d "$PWD/vault" ]; then
+    mv "$PWD/vault" "$previous"
+  fi
+  if mv "$stage/vault" "$PWD/vault"; then
+    rm -rf "$previous"
+  else
+    if [ -d "$previous" ]; then
+      mv "$previous" "$PWD/vault"
+    fi
+    exit 1
+  fi
