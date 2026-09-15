@@ -1,0 +1,38 @@
+#!/usr/bin/env hacman
+# Keep a private GitHub CLI current, then forward commands such as
+# `./examples/gh.siml pr list` to it.
+# The downloaded binary stays in this project's cache work directory.
+name: gh
+url: https://api.github.com/repos/cli/cli/releases/latest
+check: version
+version-prefix: "tag_name": "
+version-suffix: "
+schedule: daily
+bin-path: gh
+install: |
+  set -eu
+
+  # GitHub release archives use Go's architecture names.
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=amd64 ;;
+    aarch64|arm64) release_arch=arm64 ;;
+    *)
+      echo "gh: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  # The tag has a leading v, while the archive and directory names do not.
+  release_version=${HACMAN_VERSION#v}
+  release_dir="gh_${release_version}_linux_${release_arch}"
+  archive="$release_dir.tar.gz"
+  download_url="https://github.com/cli/cli/releases/download/$HACMAN_VERSION/$archive"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+
+  curl -fsSL "$download_url" | tar -xz -C "$tmp"
+  "$tmp/$release_dir/bin/gh" --version >/dev/null
+
+  # Replace the cached executable only after the new release runs successfully.
+  install -m755 "$tmp/$release_dir/bin/gh" gh.next
+  mv gh.next gh
