@@ -1,0 +1,29 @@
+#!/usr/bin/env hacman
+# Build the latest xdotool release in this project's cache, then forward
+# commands such as `./examples/xdotool.siml getmouselocation` to it. Building
+# needs make, a C compiler, pkg-config and the X11 development libraries.
+name: xdotool
+url: https://api.github.com/repos/jordansissel/xdotool/releases/latest
+check: version
+version-prefix: "tag_name": "
+version-suffix: "
+schedule: daily
+bin-path: xdotool
+install: |
+  set -eu
+
+  tmp="$(mktemp -d "$PWD/.xdotool-update.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  archive_url="https://github.com/jordansissel/xdotool/archive/refs/tags/$HACMAN_VERSION.tar.gz"
+  curl -fsSL "$archive_url" -o "$tmp/source.tar.gz"
+  mkdir "$tmp/source"
+  tar -xzf "$tmp/source.tar.gz" -C "$tmp/source" --strip-components=1
+
+  # This target includes libxdo in the executable, so no private shared
+  # library or runtime search path is needed in the cache.
+  make -C "$tmp/source" xdotool.static
+  test -x "$tmp/source/xdotool.static"
+
+  # Keep the previous executable intact until the new build is complete.
+  install -m755 "$tmp/source/xdotool.static" xdotool.next
+  mv xdotool.next xdotool
