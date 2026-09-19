@@ -221,8 +221,8 @@ When a project names a `bin-path`, hacman:
 
 - prints its own status output on **stderr**, prefixed with `hacman: `, so the
   program owns stdout;
-- runs the program once the setup succeeds, prefixes each stderr line from it
-  with `hacman: `, and passes its exit status through;
+- runs the program once the setup succeeds with its original stdout and stderr,
+  and passes its exit status through;
 - hands over even when the schedule said "not yet", which is the common case:
   the whole detour is two file reads and a comparison;
 - does **not** hand over when the setup failed (exit 2), or under `--plan`,
@@ -245,10 +245,12 @@ Exit codes:
 
 Output is quiet by default: hacman reports its own status, but discards stdout
 and stderr from a successful install script or command. If setup fails, its
-complete captured output is replayed to stderr before the failure diagnostic.
-`-x` instead shows setup output live and runs the shell with tracing enabled.
+complete captured output is replayed to stderr before the failure diagnostic;
+displayed setup stderr is prefixed with `hacman: `. `-x` instead shows setup
+output live and runs the shell with tracing enabled, prefixing its stderr.
 `-v` also reports an unchanged or skipped project. With a `bin-path`, all of
-hacman's own output moves to stderr.
+hacman's own output moves to stderr, while the wrapped program's stdout and
+stderr remain untouched.
 
 ---
 

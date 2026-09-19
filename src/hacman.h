@@ -97,6 +97,8 @@ typedef struct {
  *              %d (long), %c (int), %% */
 void hm_out(const char *fmt, ...); /* buffered status output     */
 void hm_err(const char *fmt, ...); /* unbuffered stderr          */
+void hm_err_bytes(const char *data, size_t len); /* prefixed external stderr */
+void hm_err_stream_end(void); /* terminates a partial external line */
 void hm_out_flush(void);
 
 /* Redirects hm_out() to `fd`. hacman's own chatter moves to stderr when it is

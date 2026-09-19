@@ -25,6 +25,7 @@ static size_t out_len;
 static int    out_fd = 1;
 static int    out_prefix_stderr;
 static int    stderr_line_start = 1;
+static const char stderr_prefix[] = "hacman: ";
 
 /* write(2) with EINTR/short-write handling. */
 static void hm_write_all(int fd, const char *s, size_t len)
@@ -116,20 +117,22 @@ void hm_out_target(int fd)
     stderr_line_start = 1;
 }
 
-/* Prefixes buffered status lines when hacman is acting as a shim. Keeping the
- * prefixing here means status output and relayed program diagnostics use the
- * same visible marker on stderr. */
-static void hm_write_prefixed_stderr(const char *s, size_t len)
+/* Prefixes stderr lines while allowing messages that already carry hacman's
+ * marker to pass through once. This also handles multi-line usage text. */
+static void hm_write_prefixed_stderr(const char *s, size_t len, int keep_existing_prefix)
 {
-    static const char prefix[] = "hacman: ";
-    size_t            offset    = 0;
+    size_t offset = 0;
 
     while (offset < len) {
         const char *newline;
         size_t      part;
 
         if (stderr_line_start) {
-            hm_write_all(STDERR_FILENO, prefix, sizeof(prefix) - 1);
+            if (!keep_existing_prefix ||
+                len - offset < sizeof(stderr_prefix) - 1 ||
+                memcmp(s + offset, stderr_prefix, sizeof(stderr_prefix) - 1) != 0) {
+                hm_write_all(STDERR_FILENO, stderr_prefix, sizeof(stderr_prefix) - 1);
+            }
             stderr_line_start = 0;
         }
         newline = (const char *)memchr(s + offset, '\n', len - offset);
@@ -140,11 +143,25 @@ static void hm_write_prefixed_stderr(const char *s, size_t len)
     }
 }
 
+void hm_err_bytes(const char *data, size_t len)
+{
+    hm_out_flush();
+    hm_write_prefixed_stderr(data, len, 1);
+}
+
+void hm_err_stream_end(void)
+{
+    if (!stderr_line_start) {
+        hm_write_all(STDERR_FILENO, "\n", 1);
+        stderr_line_start = 1;
+    }
+}
+
 void hm_out_flush(void)
 {
     if (out_len > 0) {
         if (out_prefix_stderr) {
-            hm_write_prefixed_stderr(out_buf, out_len);
+            hm_write_prefixed_stderr(out_buf, out_len, 0);
         } else {
             hm_write_all(out_fd, out_buf, out_len);
         }
@@ -164,7 +181,11 @@ void hm_out(const char *fmt, ...)
 
     if (n > HM_OUT_CAP - out_len) hm_out_flush();
     if (n > HM_OUT_CAP) {
-        hm_write_all(out_fd, line, n);
+        if (out_prefix_stderr) {
+            hm_write_prefixed_stderr(line, n, 0);
+        } else {
+            hm_write_all(out_fd, line, n);
+        }
         return;
     }
     memcpy(out_buf + out_len, line, n);
@@ -183,7 +204,10 @@ void hm_err(const char *fmt, ...)
     n = hm_vformat(line, sizeof(line), fmt, ap);
     va_end(ap);
 
-    hm_write_all(2, line, n);
+    /* A previous streamed diagnostic may have ended without a newline. Keep
+     * the next hacman message on its own clearly marked line. */
+    hm_err_stream_end();
+    hm_write_prefixed_stderr(line, n, 1);
 }
 
 int hm_str_eq(hm_str a, const char *lit)

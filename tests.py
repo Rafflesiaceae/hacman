@@ -389,7 +389,7 @@ schedule: always
         )
         self.contains("command trace is live", "+ printf command-out")
         self.contains("traced command stdout is live", "command-out")
-        self.contains("traced command stderr is live", "command-err")
+        self.contains("traced command stderr is prefixed", "hacman: command-err")
 
         payload = self.temp / "trace-payload"
         payload.write_text("payload\n", encoding="utf-8")
@@ -422,7 +422,7 @@ install: printf 'install-out\\n'; printf 'install-err\\n' >&2
         )
         self.contains("install trace is live", "+ printf install-out")
         self.contains("traced install stdout is live", "install-out")
-        self.contains("traced install stderr is live", "install-err")
+        self.contains("traced install stderr is prefixed", "hacman: install-err")
 
         failing = self.temp / "trace-failing.siml"
         self.write(
@@ -439,12 +439,12 @@ schedule: always
         self.check("failing captured command exits 2", failed.returncode == 2)
         self.check(
             "failed setup stdout is replayed to stderr",
-            "failure-out" not in failed.stdout and "failure-out" in failed.stderr,
+            "failure-out" not in failed.stdout and "hacman: failure-out" in failed.stderr,
             f"stdout:\n{failed.stdout}\nstderr:\n{failed.stderr}",
         )
         self.check(
             "failed setup stderr is replayed to stderr",
-            "failure-err" not in failed.stdout and "failure-err" in failed.stderr,
+            "failure-err" not in failed.stdout and "hacman: failure-err" in failed.stderr,
             f"stdout:\n{failed.stdout}\nstderr:\n{failed.stderr}",
         )
 
@@ -1477,17 +1477,17 @@ schedule: always
 """,
         )
         # Capture stderr separately so this checks the exact line-oriented
-        # relay output rather than only checking a combined stream.
+        # status prefix while proving the handed-off program is untouched.
         stderr_result = self.run(
             [self.binary, "-v", "--cache", self.temp / "cache-stderr", stderr_shim],
             env=env,
             stderr_to_stdout=False,
         )
         self.check(
-            "shim stderr lines are prefixed",
+            "hacman status is prefixed and program stderr is untouched",
             stderr_result.stderr
-            == "hacman: run      stderr-shim\nhacman: first problem\n"
-            "hacman: second problem\nhacman: last problem",
+            == "hacman: run      stderr-shim\nfirst problem\n"
+            "second problem\nlast problem",
             f"stdout:\n{stderr_result.stdout}stderr:\n{stderr_result.stderr}",
         )
         self.check("program stdout remains unchanged", stderr_result.stdout == "program output\n")

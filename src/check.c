@@ -10,6 +10,7 @@
 #include "hacman.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -25,6 +26,7 @@ static int run_curl(const char *url, int head_only, int timeout_secs, size_t *ou
     const char *argv[16];
     int         argc = 0;
     int         fds[2];
+    int         stderr_fd[2];
     pid_t       pid;
     size_t      total = 0;
 
@@ -56,34 +58,94 @@ static int run_curl(const char *url, int head_only, int timeout_secs, size_t *ou
         hm_err("hacman: pipe() failed\n");
         return -1;
     }
+    if (pipe(stderr_fd) != 0) {
+        hm_err("hacman: stderr pipe() failed\n");
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
 
     pid = fork();
     if (pid < 0) {
         hm_err("hacman: fork() failed\n");
         close(fds[0]);
         close(fds[1]);
+        close(stderr_fd[0]);
+        close(stderr_fd[1]);
         return -1;
     }
     if (pid == 0) {
         close(fds[0]);
+        close(stderr_fd[0]);
         if (dup2(fds[1], 1) < 0) _exit(127);
+        if (dup2(stderr_fd[1], 2) < 0) _exit(127);
         close(fds[1]);
+        close(stderr_fd[1]);
         execvp(HM_CURL, (char *const *)argv);
         _exit(127);
     }
 
     close(fds[1]);
-    for (;;) {
-        ssize_t n = read(fds[0], body_buf + total, sizeof(body_buf) - total - 1);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            break;
+    close(stderr_fd[1]);
+    {
+        int out_open = 1;
+        int err_open = 1;
+
+        while (out_open || err_open) {
+            struct pollfd poll_fds[2];
+            int           out_slot = -1;
+            int           err_slot = -1;
+            int           count;
+
+            if (out_open) {
+                out_slot = 0;
+                poll_fds[out_slot].fd     = fds[0];
+                poll_fds[out_slot].events = POLLIN;
+                poll_fds[out_slot].revents = 0;
+            }
+            if (err_open) {
+                err_slot = (out_slot >= 0) ? out_slot + 1 : 0;
+                poll_fds[err_slot].fd     = stderr_fd[0];
+                poll_fds[err_slot].events = POLLIN;
+                poll_fds[err_slot].revents = 0;
+            }
+            count = (out_open ? 1 : 0) + (err_open ? 1 : 0);
+            if (poll(poll_fds, (nfds_t)count, -1) < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+
+            if (out_open && (poll_fds[out_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
+                char    discard[8192];
+                char   *destination = total < sizeof(body_buf) - 1 ? body_buf + total : discard;
+                size_t  capacity = total < sizeof(body_buf) - 1
+                                       ? sizeof(body_buf) - total - 1
+                                       : sizeof(discard);
+                ssize_t n = read(fds[0], destination, capacity);
+
+                if (n > 0 && destination != discard) total += (size_t)n;
+                if (n == 0 || (n < 0 && errno != EINTR)) {
+                    close(fds[0]);
+                    fds[0] = -1;
+                    out_open = 0;
+                }
+            }
+            if (err_open && (poll_fds[err_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
+                char    buf[8192];
+                ssize_t n = read(stderr_fd[0], buf, sizeof(buf));
+
+                if (n > 0) hm_err_bytes(buf, (size_t)n);
+                if (n == 0 || (n < 0 && errno != EINTR)) {
+                    close(stderr_fd[0]);
+                    stderr_fd[0] = -1;
+                    err_open = 0;
+                }
+            }
         }
-        if (n == 0) break;
-        total += (size_t)n;
-        if (total + 1 >= sizeof(body_buf)) break; /* truncate oversized bodies */
     }
-    close(fds[0]);
+    if (fds[0] >= 0) close(fds[0]);
+    if (stderr_fd[0] >= 0) close(stderr_fd[0]);
+    hm_err_stream_end();
     body_buf[total] = '\0';
 
     {

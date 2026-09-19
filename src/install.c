@@ -60,78 +60,22 @@ static void replay_capture(FILE *fp)
 
     if (lseek(fd, 0, SEEK_SET) < 0) return;
     while ((count = read(fd, buf, sizeof(buf))) > 0) {
-        size_t written = 0;
-        while (written < (size_t)count) {
-            ssize_t out = write(STDERR_FILENO, buf + written, (size_t)count - written);
-            if (out < 0) {
-                if (errno == EINTR) continue;
-                return;
-            }
-            written += (size_t)out;
-        }
+        hm_err_bytes(buf, (size_t)count);
     }
+    hm_err_stream_end();
 }
 
-/* Writes all bytes unless the destination fails. The stderr relay must keep
- * reading even after its destination disappears, otherwise a child can block
- * forever on a full pipe while the parent waits for it. */
-static int write_all(int fd, const char *buf, size_t len)
+/* Streams setup stderr through hm_err_bytes so live diagnostics identify
+ * hacman while the final bin-path program can still inherit stderr directly. */
+static void relay_setup_stderr(int fd)
 {
-    size_t written = 0;
+    char    buf[8192];
+    ssize_t count;
 
-    while (written < len) {
-        ssize_t count = write(fd, buf + written, len - written);
-        if (count < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        written += (size_t)count;
+    while ((count = read(fd, buf, sizeof(buf))) > 0) {
+        hm_err_bytes(buf, (size_t)count);
     }
-    return 0;
-}
-
-/* Prefixes every physical line from the program's stderr while preserving
- * its bytes and streaming the output as it arrives. A final unterminated line
- * still receives a prefix, just like a newline-terminated line does. */
-static int relay_prefixed_stderr(int fd)
-{
-    static const char prefix[] = "hacman: ";
-    char             buf[8192];
-    int              at_line_start = 1;
-    int              output_ok     = 1;
-
-    for (;;) {
-        ssize_t count = read(fd, buf, sizeof(buf));
-        size_t  offset;
-
-        if (count < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        if (count == 0) return output_ok ? 0 : -1;
-
-        offset = 0;
-        while (offset < (size_t)count) {
-            const char *newline;
-            size_t      part;
-
-            if (at_line_start) {
-                if (output_ok && write_all(STDERR_FILENO, prefix, sizeof(prefix) - 1) != 0) {
-                    output_ok = 0;
-                }
-                at_line_start = 0;
-            }
-
-            newline = (const char *)memchr(buf + offset, '\n', (size_t)count - offset);
-            part    = newline != NULL ? (size_t)(newline - (buf + offset)) + 1
-                                      : (size_t)count - offset;
-            if (output_ok && write_all(STDERR_FILENO, buf + offset, part) != 0) {
-                output_ok = 0;
-            }
-            offset += part;
-            if (buf[offset - 1] == '\n') at_line_start = 1;
-        }
-    }
+    hm_err_stream_end();
 }
 
 static int mkdir_p(const char *path)
@@ -418,6 +362,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
     int   status = 0;
     int   rc     = 0;
     FILE *capture;
+    int   stderr_pipe[2] = {-1, -1};
     char  name[HM_NAME_MAX + 1];
     char  url[HM_URL_MAX + 1];
 
@@ -425,7 +370,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
     hm_str_copy(url, sizeof(url), p->url);
 
     if (p->install.len == 0) {
-        printf("hacman: %s: changed, but no 'install' script is configured\n", name);
+        fprintf(stderr, "hacman: %s: changed, but no 'install' script is configured\n", name);
         return 0;
     }
 
@@ -446,10 +391,17 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         rc = -1;
         goto cleanup;
     }
+    if (trace && pipe(stderr_pipe) != 0) {
+        fprintf(stderr, "hacman: cannot create setup stderr pipe: %s\n", strerror(errno));
+        rc = -1;
+        goto cleanup;
+    }
 
     pid = fork();
     if (pid < 0) {
         fprintf(stderr, "hacman: fork() failed: %s\n", strerror(errno));
+        if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
+        if (stderr_pipe[1] >= 0) close(stderr_pipe[1]);
         rc = -1;
         goto cleanup;
     }
@@ -458,6 +410,11 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         char *const trace_argv[] = {(char *)HM_SHELL, (char *)"-e", (char *)"-x", script_path,
                                     NULL};
 
+        if (trace) {
+            close(stderr_pipe[0]);
+            if (dup2(stderr_pipe[1], STDERR_FILENO) < 0) _exit(126);
+            if (stderr_pipe[1] != STDERR_FILENO) close(stderr_pipe[1]);
+        }
         if (capture != NULL && redirect_capture(capture) != 0) {
             fprintf(stderr, "hacman: cannot capture setup output: %s\n", strerror(errno));
             _exit(126);
@@ -488,6 +445,13 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         _exit(127);
     }
 
+    if (trace) {
+        close(stderr_pipe[1]);
+        relay_setup_stderr(stderr_pipe[0]);
+        close(stderr_pipe[0]);
+        stderr_pipe[0] = -1;
+        stderr_pipe[1] = -1;
+    }
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) {
             fprintf(stderr, "hacman: waitpid() failed: %s\n", strerror(errno));
@@ -514,6 +478,8 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
     }
 
 cleanup:
+    if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
+    if (stderr_pipe[1] >= 0) close(stderr_pipe[1]);
     if (capture != NULL) fclose(capture);
     if (getenv("HACMAN_KEEP_TEMP") == NULL) {
         unlink(script_path);
@@ -536,6 +502,7 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
     pid_t pid;
     int   status = 0;
     FILE *capture;
+    int   stderr_pipe[2] = {-1, -1};
 
     hm_str_copy(command, sizeof(command), p->command);
     hm_str_copy(name, sizeof(name), p->name);
@@ -545,14 +512,25 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
     fflush(stdout);
     capture = capture_file(trace);
     if (!trace && capture == NULL) return -1;
+    if (trace && pipe(stderr_pipe) != 0) {
+        fprintf(stderr, "hacman: cannot create setup stderr pipe: %s\n", strerror(errno));
+        return -1;
+    }
 
     pid = fork();
     if (pid < 0) {
         fprintf(stderr, "hacman: fork() failed: %s\n", strerror(errno));
+        if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
+        if (stderr_pipe[1] >= 0) close(stderr_pipe[1]);
         if (capture != NULL) fclose(capture);
         return -1;
     }
     if (pid == 0) {
+        if (trace) {
+            close(stderr_pipe[0]);
+            if (dup2(stderr_pipe[1], STDERR_FILENO) < 0) _exit(126);
+            if (stderr_pipe[1] != STDERR_FILENO) close(stderr_pipe[1]);
+        }
         if (capture != NULL && redirect_capture(capture) != 0) {
             fprintf(stderr, "hacman: cannot capture setup output: %s\n", strerror(errno));
             _exit(126);
@@ -579,6 +557,13 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
         _exit(127);
     }
 
+    if (trace) {
+        close(stderr_pipe[1]);
+        relay_setup_stderr(stderr_pipe[0]);
+        close(stderr_pipe[0]);
+        stderr_pipe[0] = -1;
+        stderr_pipe[1] = -1;
+    }
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) {
             fprintf(stderr, "hacman: waitpid() failed: %s\n", strerror(errno));
@@ -604,64 +589,24 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
     return 0;
 }
 
-/* Runs the program this project sets up.
+/* Becomes the program this project sets up.
  *
  * `argv` is the tail of hacman's own argv starting at the FILE slot, so
  * overwriting that slot with the resolved bin-path yields exactly the argument
  * vector the program should see - already NUL-terminated, with no copying and
  * no limit on how many arguments may be forwarded.
  *
- * A child is required here instead of execv() so hacman can identify stderr
- * from the handed-off program. The parent relays that stream with a prefix,
- * while stdout remains directly connected to the caller. */
+ * execv() replaces the process, so the program inherits the terminal and its
+ * exit status becomes hacman's. This only returns if the program could not be
+ * started at all. */
 int hm_exec_bin(const hm_project *p, char **argv)
 {
-    int   fds[2];
-    pid_t pid;
-    int   status = 0;
-
-    if (pipe(fds) != 0) {
-        fprintf(stderr, "hacman: cannot create program stderr pipe: %s\n", strerror(errno));
-        return 127;
-    }
-
     argv[0] = (char *)p->bin_path;
 
     fflush(stdout);
-    pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "hacman: fork() failed: %s\n", strerror(errno));
-        close(fds[0]);
-        close(fds[1]);
-        return 127;
-    }
+    hm_err_stream_end();
+    execv(p->bin_path, argv);
 
-    if (pid == 0) {
-        int saved_errno;
-
-        close(fds[0]);
-        if (dup2(fds[1], STDERR_FILENO) < 0) _exit(127);
-        if (fds[1] != STDERR_FILENO) close(fds[1]);
-
-        execv(p->bin_path, argv);
-        saved_errno = errno;
-        dprintf(STDERR_FILENO, "cannot execute %s: %s\n", p->bin_path,
-                strerror(saved_errno));
-        _exit(127);
-    }
-
-    close(fds[1]);
-    (void)relay_prefixed_stderr(fds[0]);
-    close(fds[0]);
-
-    while (waitpid(pid, &status, 0) < 0) {
-        if (errno != EINTR) {
-            fprintf(stderr, "hacman: waitpid() failed: %s\n", strerror(errno));
-            return 127;
-        }
-    }
-
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    fprintf(stderr, "hacman: cannot execute %s: %s\n", p->bin_path, strerror(errno));
     return 127;
 }
