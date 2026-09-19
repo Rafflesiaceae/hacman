@@ -1,0 +1,12 @@
+[
+  {
+    "repo_url": "https://github.com/Rafflesiaceae/siml.git",
+    "name": "siml",
+    "rev": "main"
+  },
+  {
+    "repo_url": "https://github.com/Cyan4973/xxHash.git",
+    "name": "xxhash",
+    "rev": "v0.8.3"
+  }
+]
