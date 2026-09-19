@@ -535,6 +535,17 @@ files:
         )
         self.contains("embedded cache hit is explained", "embedded inputs unchanged")
         self.contains("cached embedded executable runs", "cached-v1")
+        workdir = next(cached_dir.glob("*.work"))
+        readonly_tree = workdir / "readonly-tree"
+        readonly_nested = readonly_tree / "nested"
+        readonly_nested.mkdir(parents=True)
+        readonly_marker = readonly_nested / "marker"
+        readonly_marker.write_text("remove me\n", encoding="utf-8")
+        readonly_marker.chmod(0o444)
+        # Match Go's module cache, which removes owner write permission from
+        # downloaded module directories before hacman later clears the tree.
+        readonly_nested.chmod(0o555)
+        readonly_tree.chmod(0o555)
         build_logs = list(cached_dir.glob("*.work/build.log"))
         self.check(
             "unchanged embedded command ran only once",
@@ -578,7 +589,6 @@ files:
 
         self.concurrent_embedded_test()
 
-        workdir = next(cached_dir.glob("*.work"))
         (workdir / "stale-output").touch()
         embedded_cached.write_text(
             embedded_cached.read_text(encoding="utf-8").replace(
@@ -603,6 +613,10 @@ files:
             "changed embedded input cleared stale build outputs",
             not (workdir / "stale-output").exists()
             and (workdir / "build.log").read_text(encoding="utf-8").strip() == "built",
+        )
+        self.check(
+            "changed embedded input removed read-only stale directories",
+            not readonly_tree.exists(),
         )
 
         embedded_copy = self.temp / "embedded-copy.siml"

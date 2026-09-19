@@ -111,8 +111,21 @@ static int remove_tree(const char *path)
 
     if (S_ISDIR(st.st_mode)) {
         struct dirent *entry;
-        DIR           *dir = opendir(path);
+        mode_t         writable_mode = st.st_mode | S_IRUSR | S_IWUSR | S_IXUSR;
+        DIR           *dir;
 
+        /* Tools such as Go deliberately make cache directories read-only.
+         * This workspace belongs to hacman, so restore owner traversal and
+         * write permissions before removing entries below it. */
+        if ((st.st_mode & (S_IRUSR | S_IWUSR | S_IXUSR)) !=
+            (S_IRUSR | S_IWUSR | S_IXUSR) &&
+            chmod(path, writable_mode) != 0) {
+            fprintf(stderr, "hacman: %s: cannot make stale work directory writable: %s\n", path,
+                    strerror(errno));
+            return -1;
+        }
+
+        dir = opendir(path);
         if (dir == NULL) {
             fprintf(stderr, "hacman: %s: cannot open stale work directory: %s\n", path,
                     strerror(errno));
