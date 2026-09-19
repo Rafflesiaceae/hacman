@@ -23,6 +23,8 @@
 static char   out_buf[HM_OUT_CAP];
 static size_t out_len;
 static int    out_fd = 1;
+static int    out_prefix_stderr;
+static int    stderr_line_start = 1;
 
 /* write(2) with EINTR/short-write handling. */
 static void hm_write_all(int fd, const char *s, size_t len)
@@ -109,13 +111,43 @@ static size_t hm_vformat(char *dst, size_t cap, const char *fmt, va_list ap)
 void hm_out_target(int fd)
 {
     hm_out_flush();
-    out_fd = fd;
+    out_fd            = fd;
+    out_prefix_stderr = (fd == STDERR_FILENO);
+    stderr_line_start = 1;
+}
+
+/* Prefixes buffered status lines when hacman is acting as a shim. Keeping the
+ * prefixing here means status output and relayed program diagnostics use the
+ * same visible marker on stderr. */
+static void hm_write_prefixed_stderr(const char *s, size_t len)
+{
+    static const char prefix[] = "hacman: ";
+    size_t            offset    = 0;
+
+    while (offset < len) {
+        const char *newline;
+        size_t      part;
+
+        if (stderr_line_start) {
+            hm_write_all(STDERR_FILENO, prefix, sizeof(prefix) - 1);
+            stderr_line_start = 0;
+        }
+        newline = (const char *)memchr(s + offset, '\n', len - offset);
+        part    = newline != NULL ? (size_t)(newline - (s + offset)) + 1 : len - offset;
+        hm_write_all(STDERR_FILENO, s + offset, part);
+        offset += part;
+        if (s[offset - 1] == '\n') stderr_line_start = 1;
+    }
 }
 
 void hm_out_flush(void)
 {
     if (out_len > 0) {
-        hm_write_all(out_fd, out_buf, out_len);
+        if (out_prefix_stderr) {
+            hm_write_prefixed_stderr(out_buf, out_len);
+        } else {
+            hm_write_all(out_fd, out_buf, out_len);
+        }
         out_len = 0;
     }
 }

@@ -72,6 +72,68 @@ static void replay_capture(FILE *fp)
     }
 }
 
+/* Writes all bytes unless the destination fails. The stderr relay must keep
+ * reading even after its destination disappears, otherwise a child can block
+ * forever on a full pipe while the parent waits for it. */
+static int write_all(int fd, const char *buf, size_t len)
+{
+    size_t written = 0;
+
+    while (written < len) {
+        ssize_t count = write(fd, buf + written, len - written);
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        written += (size_t)count;
+    }
+    return 0;
+}
+
+/* Prefixes every physical line from the program's stderr while preserving
+ * its bytes and streaming the output as it arrives. A final unterminated line
+ * still receives a prefix, just like a newline-terminated line does. */
+static int relay_prefixed_stderr(int fd)
+{
+    static const char prefix[] = "hacman: ";
+    char             buf[8192];
+    int              at_line_start = 1;
+    int              output_ok     = 1;
+
+    for (;;) {
+        ssize_t count = read(fd, buf, sizeof(buf));
+        size_t  offset;
+
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (count == 0) return output_ok ? 0 : -1;
+
+        offset = 0;
+        while (offset < (size_t)count) {
+            const char *newline;
+            size_t      part;
+
+            if (at_line_start) {
+                if (output_ok && write_all(STDERR_FILENO, prefix, sizeof(prefix) - 1) != 0) {
+                    output_ok = 0;
+                }
+                at_line_start = 0;
+            }
+
+            newline = (const char *)memchr(buf + offset, '\n', (size_t)count - offset);
+            part    = newline != NULL ? (size_t)(newline - (buf + offset)) + 1
+                                      : (size_t)count - offset;
+            if (output_ok && write_all(STDERR_FILENO, buf + offset, part) != 0) {
+                output_ok = 0;
+            }
+            offset += part;
+            if (buf[offset - 1] == '\n') at_line_start = 1;
+        }
+    }
+}
+
 static int mkdir_p(const char *path)
 {
     char   copy[HM_PATH_MAX * 2 + 2];
@@ -542,23 +604,64 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
     return 0;
 }
 
-/* Becomes the program this project sets up.
+/* Runs the program this project sets up.
  *
  * `argv` is the tail of hacman's own argv starting at the FILE slot, so
  * overwriting that slot with the resolved bin-path yields exactly the argument
  * vector the program should see - already NUL-terminated, with no copying and
  * no limit on how many arguments may be forwarded.
  *
- * execv() replaces the process, so the program inherits the terminal and its
- * exit status becomes hacman's. This only returns if the program could not be
- * started at all. */
+ * A child is required here instead of execv() so hacman can identify stderr
+ * from the handed-off program. The parent relays that stream with a prefix,
+ * while stdout remains directly connected to the caller. */
 int hm_exec_bin(const hm_project *p, char **argv)
 {
+    int   fds[2];
+    pid_t pid;
+    int   status = 0;
+
+    if (pipe(fds) != 0) {
+        fprintf(stderr, "hacman: cannot create program stderr pipe: %s\n", strerror(errno));
+        return 127;
+    }
+
     argv[0] = (char *)p->bin_path;
 
     fflush(stdout);
-    execv(p->bin_path, argv);
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "hacman: fork() failed: %s\n", strerror(errno));
+        close(fds[0]);
+        close(fds[1]);
+        return 127;
+    }
 
-    fprintf(stderr, "hacman: cannot execute %s: %s\n", p->bin_path, strerror(errno));
+    if (pid == 0) {
+        int saved_errno;
+
+        close(fds[0]);
+        if (dup2(fds[1], STDERR_FILENO) < 0) _exit(127);
+        if (fds[1] != STDERR_FILENO) close(fds[1]);
+
+        execv(p->bin_path, argv);
+        saved_errno = errno;
+        dprintf(STDERR_FILENO, "cannot execute %s: %s\n", p->bin_path,
+                strerror(saved_errno));
+        _exit(127);
+    }
+
+    close(fds[1]);
+    (void)relay_prefixed_stderr(fds[0]);
+    close(fds[0]);
+
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            fprintf(stderr, "hacman: waitpid() failed: %s\n", strerror(errno));
+            return 127;
+        }
+    }
+
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return 127;
 }

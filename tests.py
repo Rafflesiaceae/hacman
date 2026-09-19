@@ -1456,6 +1456,42 @@ schedule: 6h
             result.stdout == "prog-ran\narg:x\n",
         )
 
+        stderr_program = bin_dir / "stderr-prog"
+        self.write(
+            stderr_program,
+            """#!/bin/sh
+printf 'first problem\nsecond problem\nlast problem' >&2
+printf 'program output\n'
+""",
+            executable=True,
+        )
+        stderr_shim = self.temp / "stderr-shim.siml"
+        self.write(
+            stderr_shim,
+            f"""name: stderr-shim
+sandboxed: false
+command: :
+workdir: {{{{TMPDIR_FOR_TEST}}}}
+bin-path: {stderr_program}
+schedule: always
+""",
+        )
+        # Capture stderr separately so this checks the exact line-oriented
+        # relay output rather than only checking a combined stream.
+        stderr_result = self.run(
+            [self.binary, "-v", "--cache", self.temp / "cache-stderr", stderr_shim],
+            env=env,
+            stderr_to_stdout=False,
+        )
+        self.check(
+            "shim stderr lines are prefixed",
+            stderr_result.stderr
+            == "hacman: run      stderr-shim\nhacman: first problem\n"
+            "hacman: second problem\nhacman: last problem",
+            f"stdout:\n{stderr_result.stdout}stderr:\n{stderr_result.stderr}",
+        )
+        self.check("program stdout remains unchanged", stderr_result.stdout == "program output\n")
+
         fail_program = bin_dir / "failprog"
         self.write(fail_program, "#!/bin/sh\nexit 3\n", executable=True)
         shim_fail = self.temp / "shim-fail.siml"

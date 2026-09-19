@@ -219,9 +219,10 @@ hacman -v proj.siml --plan -v      # -v is hacman's; --plan -v go to the program
 
 When a project names a `bin-path`, hacman:
 
-- prints its own status output on **stderr**, so the program owns stdout;
-- `exec()`s the program once the setup succeeded — the program inherits the
-  terminal, and its exit status becomes hacman's;
+- prints its own status output on **stderr**, prefixed with `hacman: `, so the
+  program owns stdout;
+- runs the program once the setup succeeds, prefixes each stderr line from it
+  with `hacman: `, and passes its exit status through;
 - hands over even when the schedule said "not yet", which is the common case:
   the whole detour is two file reads and a comparison;
 - does **not** hand over when the setup failed (exit 2), or under `--plan`,
