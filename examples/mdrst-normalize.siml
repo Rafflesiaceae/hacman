@@ -1,0 +1,1648 @@
+#!/usr/bin/env hacman
+# A complete Go project carried by one .siml file. Run it directly with hacman.
+# Repairs mixed Markdown/rST, then canonicalizes through a real rST parser/writer.
+name: mdrst-normalize
+command: mkdir -p build .go-tmp/sys .go-tmp/work .go-cache .go-path && export TMPDIR="$PWD/.go-tmp/sys" GOTMPDIR="$PWD/.go-tmp/work" GOCACHE="$PWD/.go-cache" GOPATH="$PWD/.go-path" GOWORK=off GOENV=off GOTOOLCHAIN=auto && unset GOFLAGS && go get github.com/go-richdoc/rst@latest && go test ./... && go build -trimpath -ldflags='-s -w' -o build/mdrst-normalize ./cmd/mdrst-normalize
+bin-path: build/mdrst-normalize
+files:
+  go.mod: |
+    module example.com/mdrst-normalize
+
+    go 1.26.4
+  cmd/mdrst-normalize/main.go: |
+    package main
+
+    import (
+    	"bytes"
+    	"flag"
+    	"fmt"
+    	"io"
+    	"os"
+    	"path/filepath"
+
+    	"example.com/mdrst-normalize/internal/normalize"
+    	"example.com/mdrst-normalize/internal/rstcanon"
+    )
+
+    func main() {
+    	var (
+    		outPath = flag.String("o", "", "write normalized rST to FILE instead of replacing the input")
+    		stdout  = flag.Bool("stdout", false, "write to stdout instead of replacing a named input file")
+    		inPlace = flag.Bool("w", false, "rewrite the input file in place (default for a named FILE; retained for compatibility)")
+    		check   = flag.Bool("check", false, "exit 1 if the input is not already fully canonical")
+    		verbose = flag.Bool("v", false, "print normalization statistics to stderr")
+    	)
+    	flag.Usage = func() {
+    		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [options] [FILE|-]\n\n", filepath.Base(os.Args[0]))
+    		fmt.Fprintln(flag.CommandLine.Output(), "Normalize Markdown accidentally mixed into reStructuredText, then parse and re-render canonical rST.")
+    		fmt.Fprintln(flag.CommandLine.Output(), "A named FILE is replaced atomically by default, but only after every normalization/parsing/rendering step succeeds.")
+    		fmt.Fprintln(flag.CommandLine.Output(), "With no FILE, or FILE '-', input is read from stdin and output is written to stdout.")
+    		fmt.Fprintln(flag.CommandLine.Output())
+    		flag.PrintDefaults()
+    	}
+    	flag.Parse()
+
+    	if flag.NArg() > 1 {
+    		flag.Usage()
+    		os.Exit(2)
+    	}
+    	if *outPath != "" && *stdout {
+    		fatal("-o and -stdout are mutually exclusive")
+    	}
+    	if *inPlace && (*outPath != "" || *stdout) {
+    		fatal("-w cannot be combined with -o or -stdout")
+    	}
+
+    	inputName := "-"
+    	if flag.NArg() == 1 {
+    		inputName = flag.Arg(0)
+    	}
+    	if *inPlace && inputName == "-" {
+    		fatal("-w requires an input file")
+    	}
+
+    	in, err := readInput(inputName)
+    	if err != nil {
+    		fatal("read input: %v", err)
+    	}
+
+    	// Stage 1: repair Markdown syntax leaked into an otherwise-rST document.
+    	pre, stats := normalize.Normalize(string(in))
+
+    	// Stage 2: feed the repaired text through a real rST parser and rST writer.
+    	// Nothing is written to disk unless this entire stage succeeds. The rST
+    	// canonicalizer also collapses deterministic parser/writer cycles so repeated
+    	// invocations cannot toggle the file between equivalent renderings.
+    	out, rstPasses, err := rstcanon.Canonicalize([]byte(pre))
+    	if err != nil {
+    		fatal("canonical rST round-trip: %v", err)
+    	}
+
+    	if *verbose {
+    		fmt.Fprintf(os.Stderr,
+    			"headings=%d fenced-code=%d repaired-fences=%d inline-code=%d links=%d images=%d tables=%d quotes=%d lists=%d references=%d rst-passes=%d changed=%t\n",
+    			stats.Headings, stats.FencedCode, stats.RepairedFences, stats.InlineCode,
+    			stats.Links, stats.Images, stats.Tables, stats.Quotes, stats.Lists, stats.References,
+    			rstPasses, !bytes.Equal(out, in),
+    		)
+    		for _, warning := range stats.Warnings {
+    			fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
+    		}
+    	}
+
+    	changed := !bytes.Equal(out, in)
+    	if *check {
+    		if changed {
+    			os.Exit(1)
+    		}
+    		return
+    	}
+
+    	switch {
+    	case *outPath != "":
+    		if err := writeOutput(*outPath, out); err != nil {
+    			fatal("write %s: %v", *outPath, err)
+    		}
+    	case *stdout || inputName == "-":
+    		if _, err := os.Stdout.Write(out); err != nil {
+    			fatal("write stdout: %v", err)
+    		}
+    	default:
+    		// Named files are in-place by default. atomicWrite creates and fully
+    		// flushes a sibling temporary file before rename(2), so a parsing,
+    		// rendering, write or fsync failure never truncates the original file.
+    		if changed {
+    			if err := atomicWrite(inputName, out); err != nil {
+    				fatal("rewrite %s: %v", inputName, err)
+    			}
+    		}
+    	}
+    }
+
+    func readInput(name string) ([]byte, error) {
+    	if name == "-" {
+    		return io.ReadAll(os.Stdin)
+    	}
+    	return os.ReadFile(name)
+    }
+
+    func writeOutput(name string, data []byte) error {
+    	if name == "-" {
+    		_, err := os.Stdout.Write(data)
+    		return err
+    	}
+    	return os.WriteFile(name, data, 0o644)
+    }
+
+    func atomicWrite(name string, data []byte) error {
+    	st, err := os.Stat(name)
+    	if err != nil {
+    		return err
+    	}
+    	dir := filepath.Dir(name)
+    	f, err := os.CreateTemp(dir, ".mdrst-normalize-*")
+    	if err != nil {
+    		return err
+    	}
+    	tmp := f.Name()
+    	committed := false
+    	defer func() {
+    		_ = f.Close()
+    		if !committed {
+    			_ = os.Remove(tmp)
+    		}
+    	}()
+
+    	if err := f.Chmod(st.Mode().Perm()); err != nil {
+    		return err
+    	}
+    	if _, err := f.Write(data); err != nil {
+    		return err
+    	}
+    	if err := f.Sync(); err != nil {
+    		return err
+    	}
+    	if err := f.Close(); err != nil {
+    		return err
+    	}
+    	if err := os.Rename(tmp, name); err != nil {
+    		return err
+    	}
+    	committed = true
+    	return nil
+    }
+
+    func fatal(format string, args ...any) {
+    	fmt.Fprintf(os.Stderr, "mdrst-normalize: "+format+"\n", args...)
+    	os.Exit(2)
+    }
+  internal/normalize/normalize.go: |
+    package normalize
+
+    import (
+    	"fmt"
+    	"regexp"
+    	"strings"
+    	"unicode"
+    	"unicode/utf8"
+    )
+
+    type Stats struct {
+    	Headings       int
+    	FencedCode     int
+    	RepairedFences int
+    	InlineCode     int
+    	Links          int
+    	Images         int
+    	Tables         int
+    	Quotes         int
+    	Lists          int
+    	References     int
+    	Warnings       []string
+    }
+
+    type outLine struct {
+    	text string
+    	raw  bool
+    }
+
+    var (
+    	atxHeadingRE   = regexp.MustCompile(`^\s{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$`)
+    	fenceRE        = regexp.MustCompile(`^\s*(` + "`{3,}|~{3,}" + `)(.*)$`)
+    	bulletRE       = regexp.MustCompile(`^(\s*)[-+*]\s+(.*)$`)
+    	orderedParenRE = regexp.MustCompile(`^(\s*)([0-9]+|[A-Za-z])\)\s+(.*)$`)
+    	refDefRE       = regexp.MustCompile(`^\s*\[([^\]^][^\]]*)\]:\s*(\S+)(?:\s+.*)?$`)
+    	footnoteDefRE  = regexp.MustCompile(`^\s*\[\^([0-9]+)\]:\s*(.*)$`)
+    	blockImageRE   = regexp.MustCompile(`^\s*!\[([^\]]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)\s*$`)
+    	mdImageRE      = regexp.MustCompile(`!\[([^\]]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)`)
+    	mdLinkRE       = regexp.MustCompile(`\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)`)
+    	mdRefLinkRE    = regexp.MustCompile(`\[([^\]]+)\]\[([^\]]+)\]`)
+    	mdFootnoteRE   = regexp.MustCompile(`\[\^([0-9]+)\]`)
+    	autoLinkRE     = regexp.MustCompile(`<((?:https?|mailto):[^>]+)>`)
+    	strikeRE       = regexp.MustCompile(`~~([^~\n]+)~~`)
+    )
+
+    var headingChars = map[int]rune{
+    	1: '=',
+    	2: '-',
+    	3: '~',
+    	4: '^',
+    	5: '"',
+    	6: '\'',
+    }
+
+    var adornLevel = map[rune]int{
+    	'=':  1,
+    	'-':  2,
+    	'~':  3,
+    	'^':  4,
+    	'"':  5,
+    	'\'': 6,
+    }
+
+    func Normalize(input string) (string, Stats) {
+    	var stats Stats
+    	input = strings.TrimPrefix(input, "\ufeff")
+    	input = strings.ReplaceAll(input, "\r\n", "\n")
+    	input = strings.ReplaceAll(input, "\r", "\n")
+    	lines := strings.Split(input, "\n")
+
+    	leakedHeading, removeFence := detectLeakedHeadingFences(lines)
+    	for i := range lines {
+    		if removeFence[i] {
+    			continue
+    		}
+    		if isRedundantRSTLiteralFenceClose(lines, i) {
+    			removeFence[i] = true
+    		}
+    	}
+    	stats.RepairedFences = len(removeFence)
+
+    	out := make([]outLine, 0, len(lines)+32)
+    	for i := 0; i < len(lines); {
+    		if removeFence[i] {
+    			i++
+    			continue
+    		}
+
+    		if level, ok := leakedHeading[i]; ok {
+    			emitHeading(&out, strings.TrimSpace(lines[i]), level)
+    			stats.Headings++
+    			i++
+    			continue
+    		}
+
+    		if i+2 < len(lines) && isAdornmentLine(lines[i]) && !removeFence[i] &&
+    			strings.TrimSpace(lines[i+1]) != "" && sameAdornment(lines[i], lines[i+2]) {
+    			ch, _ := adornment(lines[i])
+    			level := levelForAdornment(ch)
+    			emitHeading(&out, strings.TrimSpace(lines[i+1]), level)
+    			stats.Headings++
+    			i += 3
+    			continue
+    		}
+
+    		if m := atxHeadingRE.FindStringSubmatch(lines[i]); m != nil {
+    			level := len(m[1])
+    			title := strings.TrimSpace(m[2])
+    			emitHeading(&out, normalizeInline(title, &stats), level)
+    			stats.Headings++
+    			i++
+    			continue
+    		}
+
+    		if i+1 < len(lines) && strings.TrimSpace(lines[i]) != "" && isAdornmentLine(lines[i+1]) {
+    			ch, _ := adornment(lines[i+1])
+    			if looksLikeHeadingText(lines[i]) {
+    				emitHeading(&out, normalizeInline(strings.TrimSpace(lines[i]), &stats), levelForAdornment(ch))
+    				stats.Headings++
+    				i += 2
+    				continue
+    			}
+    		}
+
+    		if opener, info, ok := parseFence(lines[i]); ok {
+    			close := findFenceClose(lines, i+1, opener, removeFence)
+    			if close < 0 {
+    				if info == "" && onlyBlankAfter(lines, i+1) {
+    					stats.Warnings = append(stats.Warnings, fmt.Sprintf("removed unmatched empty fence at line %d", i+1))
+    					i++
+    					continue
+    				}
+    				stats.Warnings = append(stats.Warnings, fmt.Sprintf("unterminated fenced block starting at line %d; treated through EOF as code", i+1))
+    				close = len(lines)
+    			}
+    			code := lines[i+1 : close]
+    			emitFencedCode(&out, code, normalizeFenceLanguage(info))
+    			stats.FencedCode++
+    			if close == len(lines) {
+    				i = close
+    			} else {
+    				i = close + 1
+    			}
+    			continue
+    		}
+
+    		if isLiteralIntroducer(lines[i]) {
+    			end, ok := literalBlockEnd(lines, i)
+    			if ok {
+    				appendNormal(&out, rtrim(lines[i]))
+    				for j := i + 1; j < end; j++ {
+    					appendRaw(&out, lines[j])
+    				}
+    				i = end
+    				continue
+    			}
+    		}
+
+    		if isDirective(lines[i]) {
+    			end := directiveBlockEnd(lines, i)
+    			appendNormal(&out, rtrim(lines[i]))
+    			for j := i + 1; j < end; j++ {
+    				appendRaw(&out, lines[j])
+    			}
+    			i = end
+    			continue
+    		}
+
+    		if i+1 < len(lines) && looksPipeRow(lines[i]) && looksTableDelimiter(lines[i+1]) {
+    			end, grid := convertPipeTable(lines, i, &stats)
+    			for _, l := range grid {
+    				appendNormal(&out, l)
+    			}
+    			stats.Tables++
+    			i = end
+    			continue
+    		}
+
+    		if m := blockImageRE.FindStringSubmatch(lines[i]); m != nil {
+    			ensureBlankBefore(&out)
+    			appendNormal(&out, ".. image:: "+m[2])
+    			if strings.TrimSpace(m[1]) != "" {
+    				appendNormal(&out, "   :alt: "+strings.TrimSpace(m[1]))
+    			}
+    			appendNormal(&out, "")
+    			stats.Images++
+    			i++
+    			continue
+    		}
+
+    		if m := footnoteDefRE.FindStringSubmatch(lines[i]); m != nil {
+    			ensureBlankBefore(&out)
+    			appendNormal(&out, fmt.Sprintf(".. [%s] %s", m[1], normalizeInline(m[2], &stats)))
+    			stats.References++
+    			i++
+    			continue
+    		}
+
+    		if m := refDefRE.FindStringSubmatch(lines[i]); m != nil {
+    			ensureBlankBefore(&out)
+    			appendNormal(&out, fmt.Sprintf(".. _%s: %s", strings.TrimSpace(m[1]), m[2]))
+    			stats.References++
+    			i++
+    			continue
+    		}
+
+    		if strings.HasPrefix(strings.TrimLeft(lines[i], " \t"), ">") {
+    			for i < len(lines) && strings.HasPrefix(strings.TrimLeft(lines[i], " \t"), ">") {
+    				appendNormal(&out, normalizeQuoteLine(lines[i], &stats))
+    				stats.Quotes++
+    				i++
+    			}
+    			continue
+    		}
+
+    		if isThematicBreak(lines[i]) {
+    			ensureBlankBefore(&out)
+    			appendNormal(&out, "----")
+    			appendNormal(&out, "")
+    			i++
+    			continue
+    		}
+
+    		if m := bulletRE.FindStringSubmatch(lines[i]); m != nil {
+    			appendNormal(&out, m[1]+"* "+normalizeInline(m[2], &stats))
+    			stats.Lists++
+    			i++
+    			continue
+    		}
+    		if m := orderedParenRE.FindStringSubmatch(lines[i]); m != nil {
+    			appendNormal(&out, m[1]+m[2]+". "+normalizeInline(m[3], &stats))
+    			stats.Lists++
+    			i++
+    			continue
+    		}
+
+    		appendNormal(&out, normalizeInline(rtrim(lines[i]), &stats))
+    		i++
+    	}
+
+    	out = compactNormalBlankLines(out)
+    	for len(out) > 0 && strings.TrimSpace(out[len(out)-1].text) == "" {
+    		out = out[:len(out)-1]
+    	}
+
+    	var b strings.Builder
+    	for _, l := range out {
+    		b.WriteString(l.text)
+    		b.WriteByte('\n')
+    	}
+    	return b.String(), stats
+    }
+
+    func detectLeakedHeadingFences(lines []string) (map[int]int, map[int]bool) {
+    	headings := make(map[int]int)
+    	remove := make(map[int]bool)
+    	for i, line := range lines {
+    		opener, info, ok := parseFence(line)
+    		if !ok || info != "" || opener[0] != '`' {
+    			continue
+    		}
+    		p := prevNonBlank(lines, i-1)
+    		n := nextNonBlank(lines, i+1)
+    		if p < 0 || n < 0 || i-p > 2 {
+    			continue
+    		}
+    		if !looksLikeLeakedHeadingTitle(lines[p]) || looksCodeLike(lines[n]) {
+    			continue
+    		}
+    		if strings.TrimSpace(lines[p]) == "::" || strings.HasSuffix(strings.TrimSpace(lines[p]), "::") {
+    			continue
+    		}
+    		headings[p] = 3
+    		remove[i] = true
+    	}
+    	return headings, remove
+    }
+
+    func isRedundantRSTLiteralFenceClose(lines []string, i int) bool {
+    	_, info, ok := parseFence(lines[i])
+    	if !ok || info != "" {
+    		return false
+    	}
+    	j := i - 1
+    	for j >= 0 && strings.TrimSpace(lines[j]) == "" {
+    		j--
+    	}
+    	if j < 0 || !isIndented(lines[j]) {
+    		return false
+    	}
+    	for ; j >= 0; j-- {
+    		if _, _, fence := parseFence(lines[j]); fence {
+    			return false
+    		}
+    		if strings.TrimSpace(lines[j]) == "" || isIndented(lines[j]) {
+    			continue
+    		}
+    		return strings.TrimSpace(lines[j]) == "::"
+    	}
+    	return false
+    }
+
+    func looksLikeLeakedHeadingTitle(s string) bool {
+    	s = strings.TrimSpace(s)
+    	if s == "" || len(s) > 80 || strings.ContainsAny(s, "`|{}[]=<>\\") {
+    		return false
+    	}
+    	if strings.ContainsAny(s[len(s)-1:], ":;,.!?") {
+    		return false
+    	}
+    	if strings.HasPrefix(s, ".. ") || strings.HasPrefix(s, "#") || strings.HasPrefix(s, "*") || strings.HasPrefix(s, "-") || strings.HasPrefix(s, "+") {
+    		return false
+    	}
+    	words := strings.Fields(s)
+    	if len(words) == 0 || len(words) > 12 {
+    		return false
+    	}
+    	stops := map[string]bool{"a": true, "an": true, "and": true, "as": true, "at": true, "by": true, "for": true, "from": true, "in": true, "of": true, "on": true, "or": true, "the": true, "to": true, "vs": true, "with": true}
+    	significant := 0
+    	for _, w := range words {
+    		w = strings.Trim(w, "()[]")
+    		if w == "" {
+    			continue
+    		}
+    		lw := strings.ToLower(w)
+    		if stops[lw] {
+    			continue
+    		}
+    		r, _ := utf8.DecodeRuneInString(w)
+    		if !(unicode.IsUpper(r) || unicode.IsDigit(r)) {
+    			return false
+    		}
+    		significant++
+    	}
+    	return significant > 0
+    }
+
+    func looksCodeLike(s string) bool {
+    	t := strings.TrimSpace(s)
+    	if t == "" {
+    		return false
+    	}
+    	if bulletRE.MatchString(t) || orderedParenRE.MatchString(t) {
+    		return false
+    	}
+    	if strings.HasPrefix(t, ".. ") {
+    		return false
+    	}
+    	if strings.HasSuffix(t, ":") && len(strings.Fields(t)) <= 8 {
+    		return false
+    	}
+    	if strings.ContainsAny(t, "{}();=$") || strings.HasPrefix(t, "#include") || strings.HasPrefix(t, "./") || strings.HasPrefix(t, "CC=") {
+    		return true
+    	}
+    	r, _ := utf8.DecodeRuneInString(t)
+    	if unicode.IsLower(r) || strings.HasPrefix(t, "-") {
+    		return true
+    	}
+    	return false
+    }
+
+    func parseFence(line string) (opener, info string, ok bool) {
+    	m := fenceRE.FindStringSubmatch(line)
+    	if m == nil {
+    		return "", "", false
+    	}
+    	return m[1], strings.TrimSpace(m[2]), true
+    }
+
+    func findFenceClose(lines []string, start int, opener string, remove map[int]bool) int {
+    	ch := opener[0]
+    	min := len(opener)
+    	for i := start; i < len(lines); i++ {
+    		if remove[i] {
+    			continue
+    		}
+    		run, info, ok := parseFence(lines[i])
+    		if !ok || info != "" || run[0] != ch || len(run) < min {
+    			continue
+    		}
+    		return i
+    	}
+    	return -1
+    }
+
+    func normalizeFenceLanguage(info string) string {
+    	info = strings.TrimSpace(info)
+    	if info == "" {
+    		return ""
+    	}
+    	first := strings.Fields(info)[0]
+    	if strings.HasPrefix(first, "{.") && strings.HasSuffix(first, "}") {
+    		first = strings.TrimSuffix(strings.TrimPrefix(first, "{."), "}")
+    	}
+    	first = strings.TrimPrefix(first, ".")
+    	switch strings.ToLower(first) {
+    	case "sh", "shell":
+    		return "bash"
+    	case "py":
+    		return "python"
+    	case "golang":
+    		return "go"
+    	}
+    	return first
+    }
+
+    func emitFencedCode(out *[]outLine, code []string, lang string) {
+    	code = dedentCode(code)
+    	prev := lastNonBlank(*out)
+    	alreadyLiteral := prev >= 0 && (strings.TrimSpace((*out)[prev].text) == "::" || strings.HasSuffix(strings.TrimSpace((*out)[prev].text), "::"))
+    	if !alreadyLiteral {
+    		ensureBlankBefore(out)
+    		if lang != "" {
+    			appendNormal(out, ".. code-block:: "+lang)
+    		} else {
+    			appendNormal(out, "::")
+    		}
+    	}
+    	appendNormal(out, "")
+    	for _, line := range code {
+    		if line == "" {
+    			appendRaw(out, "")
+    		} else {
+    			appendRaw(out, "    "+line)
+    		}
+    	}
+    	appendNormal(out, "")
+    }
+
+    func dedentCode(code []string) []string {
+    	min := -1
+    	for _, line := range code {
+    		if strings.TrimSpace(line) == "" {
+    			continue
+    		}
+    		n := 0
+    		for n < len(line) && line[n] == ' ' {
+    			n++
+    		}
+    		if min < 0 || n < min {
+    			min = n
+    		}
+    	}
+    	if min <= 0 {
+    		return code
+    	}
+    	out := make([]string, len(code))
+    	for i, line := range code {
+    		if len(line) >= min {
+    			out[i] = line[min:]
+    		} else {
+    			out[i] = line
+    		}
+    	}
+    	return out
+    }
+
+    func emitHeading(out *[]outLine, title string, level int) {
+    	if level < 1 {
+    		level = 1
+    	}
+    	if level > 6 {
+    		level = 6
+    	}
+    	ensureBlankBefore(out)
+    	appendNormal(out, title)
+    	n := utf8.RuneCountInString(title)
+    	if n < 3 {
+    		n = 3
+    	}
+    	appendNormal(out, strings.Repeat(string(headingChars[level]), n))
+    	appendNormal(out, "")
+    }
+
+    func isAdornmentLine(s string) bool {
+    	_, n := adornment(s)
+    	return n >= 3
+    }
+
+    func adornment(s string) (rune, int) {
+    	t := strings.TrimSpace(s)
+    	if t == "" {
+    		return 0, 0
+    	}
+    	var first rune
+    	count := 0
+    	for _, r := range t {
+    		if count == 0 {
+    			first = r
+    			if !strings.ContainsRune("=-~^\"':+*.#_", r) {
+    				return 0, 0
+    			}
+    		} else if r != first {
+    			return 0, 0
+    		}
+    		count++
+    	}
+    	return first, count
+    }
+
+    func sameAdornment(a, b string) bool {
+    	ca, na := adornment(a)
+    	cb, nb := adornment(b)
+    	return na >= 3 && nb >= 3 && ca == cb
+    }
+
+    func levelForAdornment(ch rune) int {
+    	if n, ok := adornLevel[ch]; ok {
+    		return n
+    	}
+    	return 3
+    }
+
+    func looksLikeHeadingText(s string) bool {
+    	t := strings.TrimSpace(s)
+    	if t == "" || len(t) > 160 || strings.HasPrefix(t, ".. ") {
+    		return false
+    	}
+    	return !bulletRE.MatchString(t) && !orderedParenRE.MatchString(t)
+    }
+
+    func isLiteralIntroducer(line string) bool {
+    	t := strings.TrimSpace(line)
+    	return t == "::" || (strings.HasSuffix(t, "::") && !strings.HasPrefix(t, ".. "))
+    }
+
+    func literalBlockEnd(lines []string, i int) (int, bool) {
+    	j := i + 1
+    	if j >= len(lines) || strings.TrimSpace(lines[j]) != "" {
+    		return i + 1, false
+    	}
+    	j++
+    	if j >= len(lines) || !isIndented(lines[j]) {
+    		return i + 1, false
+    	}
+    	seen := false
+    	for j < len(lines) {
+    		if strings.TrimSpace(lines[j]) == "" {
+    			j++
+    			continue
+    		}
+    		if !isIndented(lines[j]) {
+    			break
+    		}
+    		seen = true
+    		j++
+    	}
+    	return j, seen
+    }
+
+    func isDirective(line string) bool {
+    	t := strings.TrimSpace(line)
+    	return strings.HasPrefix(t, ".. ") && strings.Contains(t, "::")
+    }
+
+    func directiveBlockEnd(lines []string, i int) int {
+    	j := i + 1
+    	for j < len(lines) {
+    		if strings.TrimSpace(lines[j]) == "" {
+    			j++
+    			continue
+    		}
+    		if !isIndented(lines[j]) {
+    			break
+    		}
+    		j++
+    	}
+    	return j
+    }
+
+    func isIndented(s string) bool {
+    	return strings.HasPrefix(s, " ") || strings.HasPrefix(s, "\t")
+    }
+
+    func looksPipeRow(s string) bool {
+    	t := strings.TrimSpace(s)
+    	return strings.Contains(t, "|") && !strings.HasPrefix(t, ".. ")
+    }
+
+    func looksTableDelimiter(s string) bool {
+    	cells := splitPipeRow(s)
+    	if len(cells) == 0 {
+    		return false
+    	}
+    	for _, c := range cells {
+    		c = strings.TrimSpace(c)
+    		c = strings.TrimPrefix(c, ":")
+    		c = strings.TrimSuffix(c, ":")
+    		if len(c) < 3 || strings.Trim(c, "-") != "" {
+    			return false
+    		}
+    	}
+    	return true
+    }
+
+    func splitPipeRow(s string) []string {
+    	t := strings.TrimSpace(s)
+    	if strings.HasPrefix(t, "|") {
+    		t = t[1:]
+    	}
+    	if strings.HasSuffix(t, "|") && !strings.HasSuffix(t, `\|`) {
+    		t = t[:len(t)-1]
+    	}
+    	var cells []string
+    	var b strings.Builder
+    	escaped := false
+    	codeTicks := 0
+    	for i := 0; i < len(t); i++ {
+    		c := t[i]
+    		if escaped {
+    			if c == '|' {
+    				b.WriteByte('|')
+    			} else {
+    				b.WriteByte('\\')
+    				b.WriteByte(c)
+    			}
+    			escaped = false
+    			continue
+    		}
+    		if c == '\\' {
+    			escaped = true
+    			continue
+    		}
+    		if c == '`' {
+    			codeTicks ^= 1
+    			b.WriteByte(c)
+    			continue
+    		}
+    		if c == '|' && codeTicks == 0 {
+    			cells = append(cells, strings.TrimSpace(b.String()))
+    			b.Reset()
+    			continue
+    		}
+    		b.WriteByte(c)
+    	}
+    	if escaped {
+    		b.WriteByte('\\')
+    	}
+    	cells = append(cells, strings.TrimSpace(b.String()))
+    	return cells
+    }
+
+    func convertPipeTable(lines []string, start int, stats *Stats) (int, []string) {
+    	header := splitPipeRow(lines[start])
+    	cols := len(header)
+    	rows := [][]string{header}
+    	i := start + 2
+    	for i < len(lines) && strings.TrimSpace(lines[i]) != "" && looksPipeRow(lines[i]) {
+    		row := splitPipeRow(lines[i])
+    		if len(row) > cols {
+    			cols = len(row)
+    		}
+    		rows = append(rows, row)
+    		i++
+    	}
+    	for r := range rows {
+    		for len(rows[r]) < cols {
+    			rows[r] = append(rows[r], "")
+    		}
+    		for c := range rows[r] {
+    			rows[r][c] = normalizeInline(rows[r][c], stats)
+    		}
+    	}
+    	widths := make([]int, cols)
+    	for _, row := range rows {
+    		for c, cell := range row {
+    			w := utf8.RuneCountInString(cell)
+    			if w > widths[c] {
+    				widths[c] = w
+    			}
+    		}
+    	}
+    	border := func(fill rune) string {
+    		var b strings.Builder
+    		b.WriteByte('+')
+    		for _, w := range widths {
+    			b.WriteString(strings.Repeat(string(fill), w+2))
+    			b.WriteByte('+')
+    		}
+    		return b.String()
+    	}
+    	render := func(row []string) string {
+    		var b strings.Builder
+    		b.WriteByte('|')
+    		for c, cell := range row {
+    			b.WriteByte(' ')
+    			b.WriteString(cell)
+    			b.WriteString(strings.Repeat(" ", widths[c]-utf8.RuneCountInString(cell)+1))
+    			b.WriteByte('|')
+    		}
+    		return b.String()
+    	}
+    	var out []string
+    	out = append(out, border('-'), render(rows[0]), border('='))
+    	for _, row := range rows[1:] {
+    		out = append(out, render(row), border('-'))
+    	}
+    	return i, out
+    }
+
+    func normalizeQuoteLine(line string, stats *Stats) string {
+    	t := strings.TrimLeft(line, " \t")
+    	depth := 0
+    	for strings.HasPrefix(t, ">") {
+    		depth++
+    		t = strings.TrimPrefix(t, ">")
+    		if strings.HasPrefix(t, " ") {
+    			t = t[1:]
+    		}
+    	}
+    	return strings.Repeat("    ", depth) + normalizeInline(t, stats)
+    }
+
+    func isThematicBreak(s string) bool {
+    	t := strings.ReplaceAll(strings.TrimSpace(s), " ", "")
+    	if len(t) < 3 {
+    		return false
+    	}
+    	ch := t[0]
+    	if ch != '-' && ch != '*' && ch != '_' {
+    		return false
+    	}
+    	for i := 1; i < len(t); i++ {
+    		if t[i] != ch {
+    			return false
+    		}
+    	}
+    	return true
+    }
+
+    func normalizeInline(s string, stats *Stats) string {
+    	if s == "" {
+    		return s
+    	}
+
+    	s = autoLinkRE.ReplaceAllString(s, "$1")
+
+    	s = mdImageRE.ReplaceAllStringFunc(s, func(m string) string {
+    		sub := mdImageRE.FindStringSubmatch(m)
+    		stats.Images++
+    		alt := strings.TrimSpace(sub[1])
+    		if alt == "" {
+    			return sub[2]
+    		}
+    		return alt + " (" + sub[2] + ")"
+    	})
+    	s = mdLinkRE.ReplaceAllStringFunc(s, func(m string) string {
+    		sub := mdLinkRE.FindStringSubmatch(m)
+    		stats.Links++
+    		return "`" + sub[1] + " <" + sub[2] + ">`_"
+    	})
+    	s = mdRefLinkRE.ReplaceAllStringFunc(s, func(m string) string {
+    		sub := mdRefLinkRE.FindStringSubmatch(m)
+    		stats.Links++
+    		return "`" + sub[1] + " <" + sub[2] + "_>`_"
+    	})
+    	s = mdFootnoteRE.ReplaceAllStringFunc(s, func(m string) string {
+    		sub := mdFootnoteRE.FindStringSubmatch(m)
+    		stats.References++
+    		return "[" + sub[1] + "]_"
+    	})
+    	s = strikeRE.ReplaceAllString(s, "$1")
+    	s = normalizeBackticks(s, stats)
+    	return s
+    }
+
+    func normalizeBackticks(s string, stats *Stats) string {
+    	var b strings.Builder
+    	for i := 0; i < len(s); {
+    		if s[i] != '`' {
+    			b.WriteByte(s[i])
+    			i++
+    			continue
+    		}
+    		run := 1
+    		for i+run < len(s) && s[i+run] == '`' {
+    			run++
+    		}
+    		if run >= 2 {
+    			end := strings.Index(s[i+run:], strings.Repeat("`", run))
+    			if end < 0 {
+    				b.WriteString(s[i : i+run])
+    				i += run
+    				continue
+    			}
+    			end += i + run
+    			b.WriteString(s[i : end+run])
+    			i = end + run
+    			continue
+    		}
+
+    		end := strings.IndexByte(s[i+1:], '`')
+    		if end < 0 {
+    			b.WriteByte('`')
+    			i++
+    			continue
+    		}
+    		end += i + 1
+    		rolePrefix := i > 0 && s[i-1] == ':'
+    		rstRef := end+1 < len(s) && s[end+1] == '_'
+    		if rolePrefix || rstRef {
+    			b.WriteString(s[i : end+1])
+    			i = end + 1
+    			continue
+    		}
+    		content := s[i+1 : end]
+    		if strings.HasPrefix(content, " ") && strings.HasSuffix(content, " ") && len(content) > 2 {
+    			content = content[1 : len(content)-1]
+    		}
+    		b.WriteString("``")
+    		b.WriteString(content)
+    		b.WriteString("``")
+    		stats.InlineCode++
+    		i = end + 1
+    	}
+    	return b.String()
+    }
+
+    func appendNormal(out *[]outLine, s string) {
+    	*out = append(*out, outLine{text: s})
+    }
+
+    func appendRaw(out *[]outLine, s string) {
+    	*out = append(*out, outLine{text: s, raw: true})
+    }
+
+    func ensureBlankBefore(out *[]outLine) {
+    	if len(*out) == 0 {
+    		return
+    	}
+    	if strings.TrimSpace((*out)[len(*out)-1].text) != "" {
+    		appendNormal(out, "")
+    	}
+    }
+
+    func lastNonBlank(out []outLine) int {
+    	for i := len(out) - 1; i >= 0; i-- {
+    		if strings.TrimSpace(out[i].text) != "" {
+    			return i
+    		}
+    	}
+    	return -1
+    }
+
+    func compactNormalBlankLines(in []outLine) []outLine {
+    	out := make([]outLine, 0, len(in))
+    	normalBlank := false
+    	for _, l := range in {
+    		if l.raw {
+    			out = append(out, l)
+    			normalBlank = false
+    			continue
+    		}
+    		if strings.TrimSpace(l.text) == "" {
+    			if normalBlank {
+    				continue
+    			}
+    			normalBlank = true
+    			out = append(out, outLine{text: ""})
+    			continue
+    		}
+    		normalBlank = false
+    		out = append(out, outLine{text: rtrim(l.text)})
+    	}
+    	return out
+    }
+
+    func rtrim(s string) string {
+    	return strings.TrimRight(s, " \t")
+    }
+
+    func prevNonBlank(lines []string, i int) int {
+    	for ; i >= 0; i-- {
+    		if strings.TrimSpace(lines[i]) != "" {
+    			return i
+    		}
+    	}
+    	return -1
+    }
+
+    func nextNonBlank(lines []string, i int) int {
+    	for ; i < len(lines); i++ {
+    		if strings.TrimSpace(lines[i]) != "" {
+    			return i
+    		}
+    	}
+    	return -1
+    }
+
+    func onlyBlankAfter(lines []string, i int) bool {
+    	for ; i < len(lines); i++ {
+    		if strings.TrimSpace(lines[i]) != "" {
+    			return false
+    		}
+    	}
+    	return true
+    }
+  internal/normalize/normalize_test.go: |
+    package normalize
+
+    import (
+    	"strings"
+    	"testing"
+    )
+
+    func TestMarkdownToRST(t *testing.T) {
+    	in := `# Project
+
+    ## Overview
+
+    Use ` + "`code`" + ` and [docs](https://example.com).
+
+    - one
+    + two
+    3) three
+
+    > quoted
+
+    ` + "```go" + `
+    fmt.Println("hi")
+    ` + "```" + `
+    `
+    	wantContains := []string{
+    		"Project\n=======",
+    		"Overview\n--------",
+    		"Use ``code`` and `docs <https://example.com>`_.",
+    		"* one\n* two\n3. three",
+    		"    quoted",
+    		".. code-block:: go\n\n    fmt.Println(\"hi\")",
+    	}
+    	got, _ := Normalize(in)
+    	for _, want := range wantContains {
+    		if !strings.Contains(got, want) {
+    			t.Fatalf("missing %q in:\n%s", want, got)
+    		}
+    	}
+    }
+
+    func TestPlanStyleLeakedFenceBecomesHeading(t *testing.T) {
+    	in := "## Architecture\n\nData Plane\n\n```\n\nLatency-sensitive functionality remains native.\n\nControl and Debug Plane\n```\n\nLua provides diagnostics.\n"
+    	got, st := Normalize(in)
+    	if st.RepairedFences != 2 {
+    		t.Fatalf("repaired fences = %d, want 2", st.RepairedFences)
+    	}
+    	if strings.Contains(got, "```") {
+    		t.Fatalf("stray markdown fence survived:\n%s", got)
+    	}
+    	if !strings.Contains(got, "Data Plane\n~~~~~~~~~~") {
+    		t.Fatalf("Data Plane not converted to level-3 heading:\n%s", got)
+    	}
+    	if !strings.Contains(got, "Control and Debug Plane\n~~~~~~~~~~~~~~~~~~~~~~~") {
+    		t.Fatalf("Control heading not converted:\n%s", got)
+    	}
+    }
+
+    func TestRSTLiteralWithMarkdownFenceWrapper(t *testing.T) {
+    	in := "Example:\n\n::\n\n```\nhello *world*\n```\n"
+    	got, _ := Normalize(in)
+    	if strings.Count(got, "::") != 1 {
+    		t.Fatalf("expected exactly one literal introducer:\n%s", got)
+    	}
+    	if !strings.Contains(got, "    hello *world*") {
+    		t.Fatalf("code content not preserved:\n%s", got)
+    	}
+    }
+
+    func TestPipeTable(t *testing.T) {
+    	in := "| Name | Value |\n| --- | ---: |\n| a | `b` |\n"
+    	got, _ := Normalize(in)
+    	want := "+------+-------+\n| Name | Value |\n+======+=======+\n| a    | ``b`` |\n+------+-------+"
+    	if !strings.Contains(got, want) {
+    		t.Fatalf("table mismatch; got:\n%s", got)
+    	}
+    }
+
+    func TestReferencesImagesAndFootnotes(t *testing.T) {
+    	in := "![logo](logo.png)\n\n[site]: https://example.com\n\nSee [Example][site] and note[^1].\n\n[^1]: detail\n"
+    	got, _ := Normalize(in)
+    	for _, want := range []string{
+    		".. image:: logo.png\n   :alt: logo",
+    		".. _site: https://example.com",
+    		"`Example <site_>`_",
+    		"note[1]_",
+    		".. [1] detail",
+    	} {
+    		if !strings.Contains(got, want) {
+    			t.Fatalf("missing %q in:\n%s", want, got)
+    		}
+    	}
+    }
+
+    func TestIdempotent(t *testing.T) {
+    	in := "# T\n\nUse `x`.\n\n```bash\necho hi\n```\n"
+    	once, _ := Normalize(in)
+    	twice, _ := Normalize(once)
+    	if once != twice {
+    		t.Fatalf("normalization is not idempotent\n--- once ---\n%s\n--- twice ---\n%s", once, twice)
+    	}
+    }
+  internal/rstcanon/rstcanon.go: |
+    // Package rstcanon performs the final syntax-aware rST canonicalization pass.
+    package rstcanon
+
+    import (
+    	"bytes"
+    	"crypto/sha256"
+    	"fmt"
+    	"strconv"
+    	"strings"
+
+    	richrst "github.com/go-richdoc/rst"
+    )
+
+    // maxPasses bounds pathological writers that keep changing the document without
+    // ever reaching a fixed point or repeating a previous rendering. Real formatter
+    // oscillations are handled explicitly below and are not considered an error.
+    const maxPasses = 16
+
+    // Canonicalize parses src as reStructuredText and renders the resulting document
+    // back to reStructuredText using the real rST writer.
+    //
+    // Most parser/writer pairs reach a fixed point. Some writers, however, can
+    // oscillate between two or more semantically equivalent serializations. A hard
+    // "must converge" rule therefore rejects valid documents such as some large,
+    // mixed real-world inputs. To remain deterministic and idempotent, we detect a
+    // repeated rendering and choose the lexicographically smallest byte sequence in
+    // that cycle as its canonical representative.
+    //
+    // Every state participating in a detected cycle has either been parsed
+    // successfully or was emitted by the writer from a successfully parsed state.
+    // The selected representative is parsed once more before it is returned. The
+    // caller should replace an input file only when this function returns nil error.
+    func Canonicalize(src []byte) ([]byte, int, error) {
+    	return canonicalizeWith(src, func(in []byte) ([]byte, error) {
+    		doc, err := richrst.Parse(in)
+    		if err != nil {
+    			return nil, fmt.Errorf("parse: %w", err)
+    		}
+    		out, err := richrst.Write(doc)
+    		if err != nil {
+    			return nil, fmt.Errorf("render: %w", err)
+    		}
+    		return out, nil
+    	}, func(in []byte) error {
+    		if _, err := richrst.Parse(in); err != nil {
+    			return fmt.Errorf("parse rendered output: %w", err)
+    		}
+    		return nil
+    	})
+    }
+
+    type roundTripFunc func([]byte) ([]byte, error)
+    type validateFunc func([]byte) error
+
+    func canonicalizeWith(src []byte, roundTrip roundTripFunc, validate validateFunc) ([]byte, int, error) {
+    	current := canonicalInputBytes(src)
+
+    	// states contains each unique state in traversal order. seen maps its exact
+    	// bytes to that index. Including the initial state lets us detect cycles that
+    	// return to the input after one or more writer passes.
+    	states := [][]byte{bytes.Clone(current)}
+    	seen := map[string]int{string(current): 0}
+
+    	for pass := 1; pass <= maxPasses; pass++ {
+    		next, err := roundTrip(current)
+    		if err != nil {
+    			return nil, pass, fmt.Errorf("pass %d (%s): %w", pass, transitionContext(current), err)
+    		}
+    		next = canonicalInputBytes(next)
+
+    		if bytes.Equal(next, current) {
+    			if err := validate(next); err != nil {
+    				return nil, pass, fmt.Errorf("validate fixed point after pass %d (%s): %w", pass, stateSummary(next), err)
+    			}
+    			return next, pass, nil
+    		}
+
+    		if first, ok := seen[string(next)]; ok {
+    			// next repeats states[first], so states[first:] is exactly the cycle.
+    			chosen := smallest(states[first:])
+    			if err := validate(chosen); err != nil {
+    				return nil, pass, fmt.Errorf(
+    					"validate cycle representative after pass %d (cycle starts at pass %d, length %d, chosen %s): %w",
+    					pass, first, len(states)-first, stateSummary(chosen), err,
+    				)
+    			}
+    			return chosen, pass, nil
+    		}
+
+    		seen[string(next)] = len(states)
+    		states = append(states, bytes.Clone(next))
+    		current = next
+    	}
+
+    	return nil, maxPasses, nonConvergenceError(states)
+    }
+
+    func nonConvergenceError(states [][]byte) error {
+    	var b strings.Builder
+    	fmt.Fprintf(&b,
+    		"parser/renderer did not stabilize and did not repeat a prior rendering after %d passes\n",
+    		len(states)-1,
+    	)
+    	fmt.Fprintf(&b, "render history (pass 0 is the repaired input):\n")
+    	fmt.Fprintf(&b, "  pass  0: %s\n", stateSummary(states[0]))
+    	for i := 1; i < len(states); i++ {
+    		fmt.Fprintf(&b, "  pass %2d: %s; %s\n", i, stateSummary(states[i]), describeDifference(states[i-1], states[i]))
+    	}
+
+    	if len(states) >= 2 {
+    		a := states[len(states)-2]
+    		b2 := states[len(states)-1]
+    		off := firstDifferenceOffset(a, b2)
+    		line, col := lineColumn(a, off)
+    		fmt.Fprintf(&b,
+    			"last transition detail: pass %d -> %d first differs at byte %d, line %d, column %d\n",
+    			len(states)-2, len(states)-1, off, line, col,
+    		)
+    		fmt.Fprintf(&b, "  before: %s\n", quotedLineAt(a, off))
+    		fmt.Fprintf(&b, "  after:  %s", quotedLineAt(b2, off))
+    	}
+
+    	return fmt.Errorf("%s", b.String())
+    }
+
+    func stateSummary(data []byte) string {
+    	sum := sha256.Sum256(data)
+    	return fmt.Sprintf("bytes=%d sha256=%x", len(data), sum[:6])
+    }
+
+    func transitionContext(data []byte) string {
+    	return stateSummary(data)
+    }
+
+    func describeDifference(before, after []byte) string {
+    	off := firstDifferenceOffset(before, after)
+    	line, col := lineColumn(before, off)
+    	delta := len(after) - len(before)
+    	return fmt.Sprintf(
+    		"delta=%+d first-change=byte:%d line:%d col:%d %s -> %s",
+    		delta, off, line, col, quotedLineAt(before, off), quotedLineAt(after, off),
+    	)
+    }
+
+    func firstDifferenceOffset(a, b []byte) int {
+    	n := len(a)
+    	if len(b) < n {
+    		n = len(b)
+    	}
+    	for i := 0; i < n; i++ {
+    		if a[i] != b[i] {
+    			return i
+    		}
+    	}
+    	return n
+    }
+
+    func lineColumn(data []byte, off int) (line, col int) {
+    	if off < 0 {
+    		off = 0
+    	}
+    	if off > len(data) {
+    		off = len(data)
+    	}
+    	line, col = 1, 1
+    	for _, c := range data[:off] {
+    		if c == '\n' {
+    			line++
+    			col = 1
+    		} else {
+    			col++
+    		}
+    	}
+    	return line, col
+    }
+
+    func quotedLineAt(data []byte, off int) string {
+    	if off < 0 {
+    		off = 0
+    	}
+    	if off > len(data) {
+    		off = len(data)
+    	}
+    	start := bytes.LastIndexByte(data[:off], '\n') + 1
+    	end := len(data)
+    	if rel := bytes.IndexByte(data[off:], '\n'); rel >= 0 {
+    		end = off + rel
+    	}
+    	line := string(data[start:end])
+    	runes := []rune(line)
+    	const maxRunes = 140
+    	if len(runes) > maxRunes {
+    		// Keep context from both ends. This is deliberately a single-line excerpt
+    		// so non-convergence diagnostics remain readable even for giant tables/code.
+    		line = string(runes[:90]) + " … " + string(runes[len(runes)-40:])
+    	}
+    	return strconv.Quote(line)
+    }
+
+    func smallest(states [][]byte) []byte {
+    	best := states[0]
+    	for _, state := range states[1:] {
+    		if bytes.Compare(state, best) < 0 {
+    			best = state
+    		}
+    	}
+    	return bytes.Clone(best)
+    }
+
+    func canonicalInputBytes(src []byte) []byte {
+    	src = bytes.TrimPrefix(src, []byte{0xef, 0xbb, 0xbf})
+    	src = bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
+    	src = bytes.ReplaceAll(src, []byte("\r"), []byte("\n"))
+
+    	// The rest of the tool and the rST writer both operate on text files with a
+    	// final LF. Keep exactly one terminal newline without touching internal
+    	// blank lines; structural whitespace is owned by the rST parser/writer.
+    	src = bytes.TrimRight(src, "\n")
+    	return append(bytes.Clone(src), '\n')
+    }
+  internal/rstcanon/rstcanon_test.go: |
+    package rstcanon
+
+    import (
+    	"bytes"
+    	"fmt"
+    	"strings"
+    	"testing"
+    )
+
+    func TestCanonicalizeIsStableAcrossInvocations(t *testing.T) {
+    	in := []byte("Title\n=====\n\n* one\n* two\n\nExample::\n\n    hello\n")
+
+    	once, passes, err := Canonicalize(in)
+    	if err != nil {
+    		t.Fatalf("first canonicalization: %v", err)
+    	}
+    	if passes < 1 || passes > maxPasses {
+    		t.Fatalf("passes=%d", passes)
+    	}
+
+    	twice, _, err := Canonicalize(once)
+    	if err != nil {
+    		t.Fatalf("second canonicalization: %v", err)
+    	}
+    	if !bytes.Equal(once, twice) {
+    		t.Fatalf("canonical rST changed on a second invocation\n--- once ---\n%s\n--- twice ---\n%s", once, twice)
+    	}
+    }
+
+    func TestCanonicalizeCollapsesTwoCycle(t *testing.T) {
+    	step := func(in []byte) ([]byte, error) {
+    		switch string(canonicalInputBytes(in)) {
+    		case "z\n":
+    			return []byte("a\n"), nil
+    		case "a\n":
+    			return []byte("z\n"), nil
+    		default:
+    			return nil, fmt.Errorf("unexpected state %q", in)
+    		}
+    	}
+    	validate := func([]byte) error { return nil }
+
+    	out, passes, err := canonicalizeWith([]byte("z\n"), step, validate)
+    	if err != nil {
+    		t.Fatal(err)
+    	}
+    	if got, want := string(out), "a\n"; got != want {
+    		t.Fatalf("got %q, want canonical cycle representative %q", got, want)
+    	}
+    	if passes != 2 {
+    		t.Fatalf("passes=%d, want 2", passes)
+    	}
+
+    	out2, _, err := canonicalizeWith(out, step, validate)
+    	if err != nil {
+    		t.Fatal(err)
+    	}
+    	if !bytes.Equal(out, out2) {
+    		t.Fatalf("cycle canonicalization is not idempotent: %q -> %q", out, out2)
+    	}
+    }
+
+    func TestCanonicalizeCollapsesThreeCycle(t *testing.T) {
+    	next := map[string]string{"c\n": "b\n", "b\n": "a\n", "a\n": "c\n"}
+    	step := func(in []byte) ([]byte, error) {
+    		v, ok := next[string(canonicalInputBytes(in))]
+    		if !ok {
+    			return nil, fmt.Errorf("unexpected state %q", in)
+    		}
+    		return []byte(v), nil
+    	}
+
+    	out, _, err := canonicalizeWith([]byte("c\n"), step, func([]byte) error { return nil })
+    	if err != nil {
+    		t.Fatal(err)
+    	}
+    	if got, want := string(out), "a\n"; got != want {
+    		t.Fatalf("got %q, want %q", got, want)
+    	}
+    }
+
+    func TestCanonicalizeRejectsUnboundedDrift(t *testing.T) {
+    	n := 0
+    	step := func([]byte) ([]byte, error) {
+    		n++
+    		return []byte(fmt.Sprintf("state-%02d\n", n)), nil
+    	}
+    	_, passes, err := canonicalizeWith([]byte("start\n"), step, func([]byte) error { return nil })
+    	if err == nil {
+    		t.Fatal("expected non-converging drift to fail")
+    	}
+    	if passes != maxPasses {
+    		t.Fatalf("passes=%d, want %d", passes, maxPasses)
+    	}
+    	msg := err.Error()
+    	for _, want := range []string{
+    		"render history",
+    		"pass  0",
+    		"pass 16",
+    		"sha256=",
+    		"first-change=byte:",
+    		"line:",
+    		"col:",
+    		"last transition detail",
+    		"before:",
+    		"after:",
+    	} {
+    		if !strings.Contains(msg, want) {
+    			t.Fatalf("diagnostic missing %q:\n%s", want, msg)
+    		}
+    	}
+    }
+
+    func TestCanonicalizeNormalizesLineEndingsAndEOF(t *testing.T) {
+    	out, _, err := Canonicalize([]byte("Title\r\n=====\r\n\r\nText.\r\n\r\n"))
+    	if err != nil {
+    		t.Fatal(err)
+    	}
+    	if bytes.Contains(out, []byte("\r")) {
+    		t.Fatalf("CR survived: %q", out)
+    	}
+    	if !bytes.HasSuffix(out, []byte("\n")) || bytes.HasSuffix(out, []byte("\n\n")) {
+    		t.Fatalf("expected exactly one final LF: %q", out)
+    	}
+    }
+  README.rst: |
+    mdrst-normalize
+    ===============
+
+    ``mdrst-normalize`` is a Go command-line formatter for ``.rst`` files that have
+    accidentally accumulated Markdown syntax.
+
+    It deliberately uses two stages:
+
+    1. a mixed Markdown/rST repair pass converts obvious Markdown constructs and a
+       few malformed mixed-syntax patterns into valid rST;
+    2. the repaired result is parsed by a real reStructuredText parser and rendered
+       back to reStructuredText. Repeated renderings are inspected only to detect a
+       fixed point or a formatter cycle; cycles are collapsed to one deterministic
+       representative so repeated invocations remain idempotent.
+
+    The final parser/writer stage uses ``github.com/go-richdoc/rst``. Its parser in
+    turn delegates to ``github.com/go-docutils/docutils/rst`` rather than maintaining
+    another partial rST grammar.
+
+    Safety and default behaviour
+    ----------------------------
+
+    For a named input file, normalization is **in place by default**::
+
+        mdrst-normalize PLAN.rst
+
+    The original file is not opened for writing until all of the following have
+    succeeded:
+
+    * the Markdown-to-rST repair pass;
+    * rST parsing;
+    * rST rendering;
+    * parser/renderer canonicalization reaching a fixed point or detecting and
+      collapsing a repeated render cycle.
+
+    The replacement itself is atomic: the complete result is written to a temporary
+    file in the same directory, flushed and then renamed over the original. The
+    original permission bits are retained.
+
+    Use ``-stdout`` to preview a named file without modifying it::
+
+        mdrst-normalize -stdout PLAN.rst
+
+    ``-w`` remains accepted for compatibility, but is redundant because a named file
+    is already in-place by default.
+
+    Non-convergence diagnostics
+    ---------------------------
+
+    If the final rST parser/writer keeps changing the document instead of reaching a
+    fixed point or a repeated cycle, the error includes a per-pass render history.
+    Each entry reports output size, a short SHA-256 fingerprint, byte-size delta and
+    the first changed byte/line/column with before/after line excerpts. The final
+    transition is repeated in expanded form. This is intended to identify the exact
+    construct that the upstream writer is continually rewriting.
+
+    Supported mixed-syntax repair
+    -----------------------------
+
+    The first stage currently handles, among other things:
+
+    * Markdown ATX headings (``#`` through ``######``) to rST headings;
+    * existing rST/setext headings to a deterministic adornment sequence;
+    * Markdown fenced code blocks to rST literal/code blocks;
+    * fenced code redundantly wrapped around an existing rST ``::`` literal block;
+    * conservative repair of stray bare backtick fences placed after title-like
+      subsection names;
+    * Markdown inline code to rST inline literals;
+    * inline Markdown links, reference links, autolinks and numeric footnotes;
+    * block Markdown images to ``.. image::`` directives;
+    * GFM pipe tables to rST grid tables;
+    * Markdown block quotes to rST indentation;
+    * Markdown bullets and ordered-list markers to rST list syntax;
+    * Markdown reference definitions to rST explicit targets;
+    * Markdown thematic breaks to rST transitions;
+    * CRLF/CR input to LF and ordinary trailing-whitespace cleanup.
+
+    After those conversions, the real rST parser/writer owns structural
+    canonicalization. This is intentionally stronger than merely applying more
+    regular-expression rewrites: headings, lists, literal blocks, tables, inline
+    markup, references and other supported constructs are parsed into a document
+    model and generated again as rST.
+
+    Usage
+    -----
+
+    Normalize and replace a file atomically (default)::
+
+        mdrst-normalize PLAN.rst
+
+    Preview the result on stdout::
+
+        mdrst-normalize -stdout PLAN.rst
+
+    Write to a separate file::
+
+        mdrst-normalize -o PLAN.clean.rst PLAN.rst
+
+    Use it as a formatter check in CI without modifying anything::
+
+        mdrst-normalize -check PLAN.rst
+
+    Read from stdin; stdin always implies stdout unless ``-o`` is used::
+
+        cat PLAN.rst | mdrst-normalize > PLAN.clean.rst
+
+    Print conversion statistics, warnings and the number of final rST round-trip
+    passes::
+
+        mdrst-normalize -v PLAN.rst
+
+    Build
+    -----
+
+    The ``.siml`` build isolates Go's normal temporary directory, Go build-work
+    directory, cache and GOPATH below hacman's work directory. This avoids Go's
+    special handling of a ``go.mod`` located directly at the system temporary root.
+
+    The build resolves ``github.com/go-richdoc/rst@latest`` before testing and
+    compiling. ``GOTOOLCHAIN=auto`` is enabled so Go can select the minimum toolchain
+    required by that dependency when the locally installed bootstrap Go supports
+    toolchain switching.
