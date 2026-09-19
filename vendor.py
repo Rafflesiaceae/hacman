@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# vendor v0.6 (2026-09-14) (bf312b6bbe0c697f)
+# vendor v0.7 (2026-09-19) (d0b7cfb220600bb5)
 #
 # Updates vendor dependencies via git subtrees
 #
@@ -418,11 +418,26 @@ def print_replacement_status():
         print(f"  {name} -> {entry['path']}{suffix}")
 
 
-def is_subtree_up_to_date(target_path, rev):
+def remote_branch_commit(repo_url, rev):
+    """Return a remote branch's full commit hash, or ``None`` for tags."""
+    # Query only heads so a tag with the same name does not get mistaken for
+    # a moving branch whose remote commit must be tracked explicitly.
+    branch_ref = rev if rev.startswith("refs/heads/") else f"refs/heads/{rev}"
+    output = run_cmd(["git", "ls-remote", repo_url, branch_ref])
+    if not output:
+        return None
+    return output.split()[0]
+
+
+def is_subtree_up_to_date(target_path, rev, remote_commit=None):
     if not os.path.exists(target_path):
         return False
     try:
         last_commit = run_cmd(["git", "log", "-1", "--pretty=%B", target_path])
+        if remote_commit is not None:
+            # Branch pins are current only when their recorded remote commit
+            # still matches the branch's current remote tip.
+            return f" at '{remote_commit}'" in last_commit
         return rev in last_commit
     except subprocess.CalledProcessError:
         return False
@@ -458,7 +473,11 @@ def manage_subtree(repo_url, name, rev):
     target_path = os.path.join("vendor", name)
     print(f"Adding/updating subtree at {target_path}...")
 
-    if is_subtree_up_to_date(target_path, rev):
+    # A branch name is mutable, so resolve it before deciding whether the
+    # local squash commit still represents the remote dependency.
+    remote_commit = remote_branch_commit(repo_url, rev)
+
+    if is_subtree_up_to_date(target_path, rev, remote_commit):
         print(
             f"Subtree at '{target_path}' is already at revision '{rev}', skipping update."
         )
@@ -503,7 +522,14 @@ def manage_subtree(repo_url, name, rev):
         )
         raise SystemExit(1) from None
 
-    commit_message = f"vendor: Upgraded {name} to '{rev}'"
+    if remote_commit is None:
+        commit_message = f"vendor: Upgraded {name} to '{rev}'"
+    else:
+        # Preserve the friendly branch name while recording the immutable
+        # commit that made this vendored snapshot reproducible.
+        commit_message = (
+            f"vendor: Upgraded {name} to '{rev}' at '{remote_commit}'"
+        )
 
     with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmpfile:
         tmpfile.write(commit_message)
