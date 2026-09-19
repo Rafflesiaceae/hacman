@@ -777,7 +777,7 @@ restricted, a streaming parser only needs:
 
 Keys are unquoted identifiers:
 
-* regex: ``[a-zA-Z_][a-zA-Z0-9_.-]*``
+* regex: ``[a-zA-Z_][a-zA-Z0-9_./-]*``
 
 Additional size limits:
 
@@ -839,7 +839,7 @@ Indentation and nesting:
 
 Keys and mapping entries:
 
-* illegal mapping key, must match: [a-zA-Z_][a-zA-Z0-9_.-]*
+* illegal mapping key, must match: [a-zA-Z_][a-zA-Z0-9_./-]*
 * mapping key too long (max 128 bytes)
 * expected single space after ':'
 * header-only mapping entry must not have inline comments

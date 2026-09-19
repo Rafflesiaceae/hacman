@@ -1,1 +1,1 @@
-illegal mapping key, must match: [a-zA-Z_][a-zA-Z0-9_.-]*
+illegal mapping key, must match: [a-zA-Z_][a-zA-Z0-9_./-]*
