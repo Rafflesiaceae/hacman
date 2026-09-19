@@ -348,7 +348,7 @@ static int siml_is_digit(char c) {
 }
 
 static int siml_is_key_char(char c) {
-    return siml_is_alpha(c) || siml_is_digit(c) || c == '_' || c == '-' || c == '.';
+    return siml_is_alpha(c) || siml_is_digit(c) || c == '_' || c == '-' || c == '.' || c == '/';
 }
 
 static int siml_is_space_only(const char *s, size_t len) {
@@ -911,7 +911,7 @@ static int siml_parse_mapping_entry(siml_parser *p,
     }
     if (!siml_is_alpha(s[indent]) && s[indent] != '_') {
         siml_set_error(p, SIML_ERR_KEY_ILLEGAL,
-                       "illegal mapping key, must match: [a-zA-Z_][a-zA-Z0-9_.-]*");
+                       "illegal mapping key, must match: [a-zA-Z_][a-zA-Z0-9_./-]*");
         return 0;
     }
     i = indent + 1;
@@ -920,7 +920,7 @@ static int siml_parse_mapping_entry(siml_parser *p,
     }
     if (i >= len || s[i] != ':') {
         siml_set_error(p, SIML_ERR_KEY_ILLEGAL,
-                       "illegal mapping key, must match: [a-zA-Z_][a-zA-Z0-9_.-]*");
+                       "illegal mapping key, must match: [a-zA-Z_][a-zA-Z0-9_./-]*");
         return 0;
     }
     *out_key_len = i - indent;
