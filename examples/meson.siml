@@ -1,0 +1,37 @@
+#!/usr/bin/env hacman
+name: meson
+url: https://pypi.org/pypi/meson/json
+check: version
+version-prefix: "version":"
+version-suffix: "
+bin-path: meson/meson.py
+install: |
+  set -eu
+  echo "installing meson $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  previous="$PWD/.meson-previous"
+  if [ ! -d "$PWD/meson" ] && [ -d "$previous" ]; then
+    mv "$previous" "$PWD/meson"
+  fi
+  rm -rf "$previous"
+
+  stage="$(mktemp -d "$PWD/.meson-update.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+
+  archive_url="https://github.com/mesonbuild/meson/archive/refs/tags/$HACMAN_VERSION.tar.gz"
+  curl -fsSL "$archive_url" -o "$stage/meson.tar.gz"
+  tar -xzf "$stage/meson.tar.gz" -C "$stage"
+  mv "$stage/meson-$HACMAN_VERSION" "$stage/meson"
+  "$stage/meson/meson.py" --version >/dev/null
+
+  if [ -d "$PWD/meson" ]; then
+    mv "$PWD/meson" "$previous"
+  fi
+  if mv "$stage/meson" "$PWD/meson"; then
+    rm -rf "$previous"
+  else
+    if [ -d "$previous" ]; then
+      mv "$previous" "$PWD/meson"
+    fi
+    exit 1
+  fi
