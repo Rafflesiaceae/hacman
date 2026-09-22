@@ -1,0 +1,27 @@
+#!/usr/bin/env hacman
+# tig ships no prebuilt Linux binaries, only a `make dist` source tarball, so
+# the install step configures and builds it instead of unpacking an archive.
+# Requires a C toolchain and ncurses development headers on the host.
+name: tig
+url: https://api.github.com/repos/jonas/tig/releases/latest
+check: version
+version-prefix: "tag_name": "
+version-suffix: "
+schedule: daily
+bin-path: tig
+install: |
+  set -eu
+  echo "installing tig $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  tarball="$HACMAN_VERSION.tar.gz"
+  url="https://github.com/jonas/tig/releases/download/$HACMAN_VERSION/$tarball"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+
+  curl -fsSL "$url" | tar -xz -C "$tmp" --strip-components=1
+  ( cd "$tmp" && ./configure --quiet && make --quiet -j"$(nproc)" src/tig )
+  "$tmp/src/tig" -v >/dev/null
+
+  # Replace the cached executable only after the new build runs successfully.
+  install -m755 "$tmp/src/tig" tig.next
+  mv tig.next tig
