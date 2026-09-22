@@ -19,6 +19,25 @@ install: |
   trap 'rm -rf "$tmp"' EXIT
 
   curl -fsSL "$url" | tar -xz -C "$tmp" --strip-components=1
+
+  # tig-2.6.1 (the latest tag as of this writing) has two functions that
+  # return `false` where their signature returns a pointer; some toolchains
+  # treat that as a hard error rather than a warning. Fixed upstream in
+  # commit c0d85bcf, not yet in a tagged release. Patch only the exact
+  # matching lines so a future release that already contains the fix is
+  # left untouched.
+  patch_return_null() {
+    file="$1"; anchor="$2"
+    for anchor_line in $(grep -nF "$anchor" "$file" | cut -d: -f1); do
+      next_line=$((anchor_line + 1))
+      if sed -n "${next_line}p" "$file" | grep -q 'return false;'; then
+        sed -i "${next_line}s/return false;/return NULL;/" "$file"
+      fi
+    done
+  }
+  patch_return_null "$tmp/src/stage.c" 'if (!add_line_text_at(view, after_lineno++, text, line->type, 1))'
+  patch_return_null "$tmp/src/ui.c" 'file_finder_done(&finder);'
+
   ( cd "$tmp" && ./configure --quiet && make --quiet -j"$(nproc)" src/tig )
   "$tmp/src/tig" -v >/dev/null
 
