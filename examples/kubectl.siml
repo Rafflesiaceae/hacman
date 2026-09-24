@@ -1,0 +1,31 @@
+#!/usr/bin/env hacman
+# dl.k8s.io/release/stable.txt is the officially documented way to resolve
+# the latest stable kubectl release: a single line with no surrounding
+# markup, so `version-prefix: v` alone anchors the extraction (there is
+# nothing else on the line to match against). This avoids the GitHub API's
+# unauthenticated rate limit that a kubernetes/kubernetes releases/latest
+# lookup would share with every other project on this machine that polls it.
+name: kubectl
+url: https://dl.k8s.io/release/stable.txt
+check: version
+version-prefix: v
+schedule: daily
+bin-path: kubectl
+install: |
+  set -eu
+  echo "installing kubectl $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=amd64 ;;
+    aarch64|arm64) release_arch=arm64 ;;
+    *)
+      echo "kubectl: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  # stable.txt has no leading v, but the release path requires one.
+  url="https://dl.k8s.io/release/v$HACMAN_VERSION/bin/linux/$release_arch/kubectl"
+  curl -fsSL "$url" -o kubectl.next
+  chmod 755 kubectl.next
+  mv kubectl.next kubectl
