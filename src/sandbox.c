@@ -2,7 +2,11 @@
  *
  * Landlock composes with the caller's normal permissions and follows the
  * process across exec. We grant read/execute access from the filesystem root
- * and add the mutation rights only for one cache-owned work directory. */
+ * and add the mutation rights only for one cache-owned work directory, plus
+ * the cache directory as a whole so a setup script that shells out to
+ * another hacman-managed tool (hacman is meant to be self-hosted this way -
+ * see examples/meson.siml, tig.siml, bazelisk.siml) can still let that
+ * nested hacman invocation write its own cache record. */
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -108,7 +112,7 @@ static int add_path_rule(int ruleset_fd, const char *path, unsigned long long ac
     return rc;
 }
 
-int hm_sandbox_enter(const char *workdir)
+int hm_sandbox_enter(const char *workdir, const char *cache_dir)
 {
     struct landlock_ruleset_attr ruleset;
     unsigned long long           access;
@@ -141,6 +145,13 @@ int hm_sandbox_enter(const char *workdir)
 
     if (add_path_rule(ruleset_fd, "/", readonly_access(abi), 1) != 0) goto cleanup;
     if (add_path_rule(ruleset_fd, workdir, access, 1) != 0) goto cleanup;
+    /* `cache_dir` already contains `workdir`, so this rule alone would be
+     * enough; the workdir rule above stays so a caller passing a workdir
+     * outside cache_dir still gets it. Nested hacman tools (meson, tig, ...
+     * found on PATH) need this to lock and rewrite their own cache record,
+     * which lives directly in cache_dir rather than under this project's
+     * workdir. */
+    if (add_path_rule(ruleset_fd, cache_dir, access, 1) != 0) goto cleanup;
     /* Discarding output is ubiquitous shell behavior; grant only the write
      * right on this device node, not on its /dev parent hierarchy. */
     if (add_path_rule(ruleset_fd, "/dev/null", LANDLOCK_ACCESS_FS_WRITE_FILE, 0) != 0) {
@@ -166,9 +177,10 @@ cleanup:
 
 #else
 
-int hm_sandbox_enter(const char *workdir)
+int hm_sandbox_enter(const char *workdir, const char *cache_dir)
 {
     (void)workdir;
+    (void)cache_dir;
     fprintf(stderr,
             "hacman: sandbox: Landlock requires Linux; use 'sandboxed: false' to opt out\n");
     return -1;

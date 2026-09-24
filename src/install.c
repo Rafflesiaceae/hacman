@@ -352,7 +352,8 @@ static int write_response(const hm_check_result *res, char *path_out, size_t cap
 }
 
 int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
-               const hm_check_result *res, const char *sandbox_workdir, int trace)
+               const hm_check_result *res, const char *sandbox_workdir, const char *cache_dir,
+               int trace)
 {
     char  script_path[512];
     char  response_path[512];
@@ -437,7 +438,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
                 _exit(126);
             }
             setenv("TMPDIR", sandbox_workdir, 1);
-            if (hm_sandbox_enter(sandbox_workdir) != 0) _exit(126);
+            if (hm_sandbox_enter(sandbox_workdir, cache_dir) != 0) _exit(126);
         }
 
         execv(HM_SHELL, trace ? trace_argv : plain_argv);
@@ -495,7 +496,8 @@ cleanup:
  * No temporary file and no script: a single command is already the simplest
  * thing a shell can be handed. The caller records the run only if this
  * returns 0, so a failing command is retried on the next run. */
-int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir, int trace)
+int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir,
+                    const char *cache_dir, int trace)
 {
     char  command[HM_COMMAND_MAX + 1];
     char  name[HM_NAME_MAX + 1];
@@ -545,7 +547,7 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
             /* Keep generic temporary-file users inside the only writable
              * hierarchy even when the configured cwd is read-only. */
             setenv("TMPDIR", sandbox_workdir, 1);
-            if (hm_sandbox_enter(sandbox_workdir) != 0) _exit(126);
+            if (hm_sandbox_enter(sandbox_workdir, cache_dir) != 0) _exit(126);
         }
 
         if (trace) {

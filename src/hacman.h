@@ -204,14 +204,18 @@ int hm_check(const hm_project *p, int timeout_secs, hm_check_result *res);
 /* --- install.c ---------------------------------------------------------- */
 
 /* Slow path: runs the project's install script. Clarity beats speed here.
+ * `cache_dir` is passed through to the sandbox so a script that invokes
+ * another hacman-managed tool can still update that tool's own cache record.
  * Returns 0 on success, -1 if the script failed or could not be run. */
 int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
-               const hm_check_result *res, const char *sandbox_workdir, int trace);
+               const hm_check_result *res, const char *sandbox_workdir, const char *cache_dir,
+               int trace);
 
 /* Slow path for HM_KIND_COMMAND: runs `command` with the shell, in `workdir`.
+ * `cache_dir` is passed through to the sandbox; see hm_install() above.
  * Returns 0 on success, -1 if the command failed or could not be run. */
 int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir,
-                   int trace);
+                   const char *cache_dir, int trace);
 
 /* Creates a cache work directory without changing or clearing its contents. */
 int hm_workdir_ensure(const char *workdir);
@@ -225,9 +229,13 @@ int hm_workdir_reset(const char *workdir);
 int hm_materialize_files(const hm_project *p, const char *workdir);
 
 /* Restricts this process and its descendants to read/execute globally and
- * full filesystem access below `workdir`. Returns -1 without weakening the
- * process when Landlock is unavailable or policy setup fails. */
-int hm_sandbox_enter(const char *workdir);
+ * full filesystem access below `workdir` and below `cache_dir`. The latter
+ * lets a project's setup code run another hacman-managed tool (found on
+ * PATH) and have that nested, self-hosted hacman invocation update its own
+ * cache record and lock file, which live in `cache_dir` rather than under
+ * this project's own `workdir`. Returns -1 without weakening the process when
+ * Landlock is unavailable or policy setup fails. */
+int hm_sandbox_enter(const char *workdir, const char *cache_dir);
 
 /* Replaces this process with the project's bin-path, passing `argv` (whose
  * first slot this fills in). Only ever returns on failure, with the exit code

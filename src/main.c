@@ -388,7 +388,7 @@ static int resolve_cached_bin(hm_project *p, const hm_cache *c, const char *file
 }
 
 /* A command project: run it, and remember that only if it succeeded. */
-static int run_command_project(const hm_project *p, hm_opts *o, long now)
+static int run_command_project(const hm_project *p, hm_opts *o, long now, const char *cache_dir)
 {
     const char *workdir = (p->file_count > 0) ? cache.workdir : p->workdir_path;
 
@@ -407,7 +407,7 @@ static int run_command_project(const hm_project *p, hm_opts *o, long now)
             if (!cache.known && hm_workdir_reset(workdir) != 0) return HM_EXIT_FAILED;
             if (hm_materialize_files(p, workdir) != 0) return HM_EXIT_FAILED;
         }
-        if (hm_command_run(p, workdir, cache.workdir, o->trace) != 0) {
+        if (hm_command_run(p, workdir, cache.workdir, cache_dir, o->trace) != 0) {
             /* Nothing is written: the last run stays whatever it was, so the
              * next invocation tries again. */
             return HM_EXIT_FAILED;
@@ -525,7 +525,7 @@ int main(int argc, char **argv)
     }
 
     if (p->kind == HM_KIND_COMMAND) {
-        return finish_locked(p, &o, lock_fd, run_command_project(p, &o, now));
+        return finish_locked(p, &o, lock_fd, run_command_project(p, &o, now, cache_dir));
     }
 
     if (hm_check(p, o.timeout, &res) != 0) {
@@ -560,7 +560,7 @@ int main(int argc, char **argv)
     if (!o.adopt) {
         /* --- slow path ----------------------------------------------- */
         hm_out_flush(); /* Preserve status ordering before setup starts. */
-        if (hm_install(p, old_mark, res.mark, &res, cache.workdir, o.trace) != 0) {
+        if (hm_install(p, old_mark, res.mark, &res, cache.workdir, cache_dir, o.trace) != 0) {
             /* Nothing is written, so the next run repeats check and install. */
             return finish_locked(p, &o, lock_fd, HM_EXIT_FAILED);
         }
