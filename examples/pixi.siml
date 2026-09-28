@@ -1,10 +1,15 @@
 #!/usr/bin/env hacman
-# pixi publishes a bare per-architecture binary alongside the tarball, so
-# the install block downloads it directly instead of unpacking an archive.
+# Read the version off the public releases Atom feed rather than the GitHub
+# API: the API's unauthenticated rate limit (60 requests/hour, shared by
+# every project on this machine that polls it) is easy to exhaust, while the
+# feed is served without that limit. The feed lists releases newest first,
+# so the first tag link is the current version. pixi also publishes a bare
+# per-architecture binary alongside the tarball, so the install block
+# downloads it directly instead of unpacking an archive.
 name: pixi
-url: https://api.github.com/repos/prefix-dev/pixi/releases/latest
+url: https://github.com/prefix-dev/pixi/releases.atom
 check: version
-version-prefix: "tag_name": "
+version-prefix: https://github.com/prefix-dev/pixi/releases/tag/
 version-suffix: "
 schedule: daily
 bin-path: pixi
