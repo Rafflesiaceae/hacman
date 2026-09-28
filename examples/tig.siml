@@ -1,11 +1,16 @@
 #!/usr/bin/env hacman
-# tig ships no prebuilt Linux binaries, only a `make dist` source tarball, so
-# the install step configures and builds it instead of unpacking an archive.
-# Requires a C toolchain and ncurses development headers on the host.
+# Read the version off the public releases Atom feed rather than the GitHub
+# API: the API's unauthenticated rate limit (60 requests/hour, shared by
+# every project on this machine that polls it) is easy to exhaust, while the
+# feed is served without that limit. The feed lists releases newest first,
+# so the first tag link is the current version. tig ships no prebuilt Linux
+# binaries, only a `make dist` source tarball, so the install step
+# configures and builds it instead of unpacking an archive. Requires a C
+# toolchain and ncurses development headers on the host.
 name: tig
-url: https://api.github.com/repos/jonas/tig/releases/latest
+url: https://github.com/jonas/tig/releases.atom
 check: version
-version-prefix: "tag_name": "
+version-prefix: https://github.com/jonas/tig/releases/tag/
 version-suffix: "
 schedule: daily
 bin-path: tig
