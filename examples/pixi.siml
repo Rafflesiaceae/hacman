@@ -1,0 +1,31 @@
+#!/usr/bin/env hacman
+# pixi publishes a bare per-architecture binary alongside the tarball, so
+# the install block downloads it directly instead of unpacking an archive.
+name: pixi
+url: https://api.github.com/repos/prefix-dev/pixi/releases/latest
+check: version
+version-prefix: "tag_name": "
+version-suffix: "
+schedule: daily
+bin-path: pixi
+install: |
+  set -eu
+  echo "installing pixi $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=x86_64 ;;
+    aarch64|arm64) release_arch=aarch64 ;;
+    *)
+      echo "pixi: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  asset="pixi-${release_arch}-unknown-linux-musl"
+  url="https://github.com/prefix-dev/pixi/releases/download/$HACMAN_VERSION/$asset"
+  curl -fsSL "$url" -o pixi.next
+  chmod 755 pixi.next
+  ./pixi.next --version >/dev/null
+
+  # Replace the cached executable only after the new release runs successfully.
+  mv pixi.next pixi
