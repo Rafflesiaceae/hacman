@@ -172,7 +172,7 @@ actually due.
 ## Usage
 
 ```
-usage: hacman [OPTIONS] FILE
+usage: hacman [OPTIONS] FILE [ARGS...]
 
   -c, --check-only    check only, never install or run (exit 10 if due)
   -n, --dry-run       report what would happen, change nothing
@@ -185,6 +185,26 @@ usage: hacman [OPTIONS] FILE
   -x, --trace         show and trace command and install shells
   -h, --help          show this help
   -V, --version       show the version
+
+environment read by hacman:
+  HACMAN              options prepended before command-line options
+  HACMAN_CACHE        cache directory overridden by --cache
+  HACMAN_DEBUG=0|1    report decisions and stream shell-traced setup live
+  HACMAN_KEEP_TEMP=1  keep generated install and response files
+
+environment exported to setup code:
+  HACMAN_NAME         project name (commands and install scripts)
+  HACMAN_WORKDIR      command working directory
+  HACMAN_URL          checked URL
+  HACMAN_CHECK        etag, hash or version
+  HACMAN_VERSION      newly observed marker
+  HACMAN_PREVIOUS     previous marker, empty on first sight
+  HACMAN_RESPONSE     downloaded response path when available
+
+build.sh environment:
+  HACMAN_CC           compiler to use
+  HACMAN_STATIC=0|1   disable or enable static linking
+  HACMAN_GLIBC=0|1    disallow or allow fallback from musl to glibc
 ```
 
 `FILE` is required; pass `-` to read the project from standard input:
@@ -206,6 +226,11 @@ single quotes, double quotes, and backslashes may group or escape whitespace.
 Real command-line options are applied afterwards and override scalar settings
 such as `--cache` and `--timeout`. Arguments following the `.siml` path remain
 arguments to `bin-path`, as usual.
+
+`HACMAN_DEBUG=1` reports unchanged and skipped projects and sends setup output
+to the terminal as it happens while tracing each shell command. It is
+equivalent to enabling both `--verbose` and `--trace`. `HACMAN_DEBUG=0` is the
+default behavior.
 
 ### Options before FILE, arguments after it
 

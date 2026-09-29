@@ -80,6 +80,26 @@ static const char usage_text[] =
     "  -h, --help          show this help\n"
     "  -V, --version       show the version\n"
     "\n"
+    "environment read by hacman:\n"
+    "  HACMAN              options prepended before command-line options\n"
+    "  HACMAN_CACHE        cache directory overridden by --cache\n"
+    "  HACMAN_DEBUG=0|1    report decisions and stream shell-traced setup live\n"
+    "  HACMAN_KEEP_TEMP=1  keep generated install and response files\n"
+    "\n"
+    "environment exported to setup code:\n"
+    "  HACMAN_NAME         project name (commands and install scripts)\n"
+    "  HACMAN_WORKDIR      command working directory\n"
+    "  HACMAN_URL          checked URL\n"
+    "  HACMAN_CHECK        etag, hash or version\n"
+    "  HACMAN_VERSION      newly observed marker\n"
+    "  HACMAN_PREVIOUS     previous marker, empty on first sight\n"
+    "  HACMAN_RESPONSE     downloaded response path when available\n"
+    "\n"
+    "build.sh environment:\n"
+    "  HACMAN_CC           compiler to use\n"
+    "  HACMAN_STATIC=0|1   disable or enable static linking\n"
+    "  HACMAN_GLIBC=0|1    disallow or allow fallback from musl to glibc\n"
+    "\n"
     "exit codes: 0 ok, 1 usage/config error, 2 a check, install or command failed,\n"
     "            10 work is pending with --check-only/--dry-run\n";
 
@@ -274,6 +294,19 @@ static int parse_args(int argc, char **argv, hm_opts *o)
 
     memset(o, 0, sizeof(*o));
     o->timeout = 15;
+
+    env = getenv("HACMAN_DEBUG");
+    if (env != NULL && env[0] != '\0') {
+        if (strcmp(env, "1") == 0) {
+            /* Debug mode combines decision reporting with the live shell
+             * tracing path used by -x, avoiding buffered setup output. */
+            o->verbose = 1;
+            o->trace   = 1;
+        } else if (strcmp(env, "0") != 0) {
+            hm_err("hacman: HACMAN_DEBUG must be 0 or 1\n");
+            return -1;
+        }
+    }
 
     env = getenv("HACMAN");
     if (env != NULL && env[0] != '\0') {

@@ -7,6 +7,7 @@ import difflib
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,7 @@ class Suite:
         self.debug = bool(os.environ.get("DEBUG"))
         self.base_env = os.environ.copy()
         self.base_env.pop("HACMAN", None)
+        self.base_env.pop("HACMAN_DEBUG", None)
         self.failures = 0
         self.assertions = 0
         self.output = ""
@@ -280,6 +282,22 @@ class Suite:
             env=env,
         )
         self.contains("HACMAN help prints usage", "usage: hacman [OPTIONS] FILE")
+        for variable in (
+            "HACMAN_CACHE",
+            "HACMAN_DEBUG",
+            "HACMAN_KEEP_TEMP",
+            "HACMAN_NAME",
+            "HACMAN_WORKDIR",
+            "HACMAN_URL",
+            "HACMAN_CHECK",
+            "HACMAN_VERSION",
+            "HACMAN_PREVIOUS",
+            "HACMAN_RESPONSE",
+            "HACMAN_CC",
+            "HACMAN_STATIC",
+            "HACMAN_GLIBC",
+        ):
+            self.contains(f"help lists {variable}", variable)
 
         env = self.command_env({"HACMAN": '--plan --cache "/tmp/hacman env cache"'})
         self.expect_hacman(
@@ -390,6 +408,95 @@ schedule: always
         self.contains("command trace is live", "+ printf command-out")
         self.contains("traced command stdout is live", "command-out")
         self.contains("traced command stderr is prefixed", "hacman: command-err")
+
+        debug_env = self.command_env({"HACMAN_DEBUG": "1"})
+        self.expect_hacman(
+            "HACMAN_DEBUG=1 traces a command",
+            0,
+            "--cache",
+            self.temp / "cache-debug-env",
+            command,
+            env=debug_env,
+        )
+        self.contains(
+            "debug mode reports the command decision", "run      trace-command"
+        )
+        self.contains("debug mode shell-traces the command", "+ printf command-out")
+        self.contains("debug mode streams command stdout", "command-out")
+        self.contains(
+            "debug mode streams prefixed command stderr", "hacman: command-err"
+        )
+
+        invalid_debug_env = self.command_env({"HACMAN_DEBUG": "yes"})
+        self.expect_hacman(
+            "an invalid HACMAN_DEBUG value is rejected",
+            1,
+            "--help",
+            env=invalid_debug_env,
+        )
+        self.contains(
+            "the HACMAN_DEBUG value error is explained",
+            "HACMAN_DEBUG must be 0 or 1",
+        )
+
+        stream_dir = self.temp / "debug-stream"
+        stream_dir.mkdir()
+        stream_project = stream_dir / "stream.siml"
+        self.write(
+            stream_project,
+            """name: debug-stream
+command: printf 'debug-start\\n'; : > "$DEBUG_STREAM_DIR/started"; while [ ! -e "$DEBUG_STREAM_DIR/release" ]; do sleep 0.01; done; printf 'debug-end\\n'
+sandbox-write-dirs: [{{DEBUG_STREAM_DIR}}]
+schedule: always
+""",
+        )
+        stream_env = self.command_env(
+            {"HACMAN_DEBUG": "1", "DEBUG_STREAM_DIR": str(stream_dir)}
+        )
+        process = subprocess.Popen(
+            [
+                str(self.binary),
+                "--cache",
+                str(self.temp / "cache-debug-stream"),
+                str(stream_project),
+            ],
+            cwd=self.root,
+            env=stream_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        live_output = b""
+        try:
+            started = stream_dir / "started"
+            deadline = time.monotonic() + 5
+            while (
+                not started.exists()
+                and process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+
+            while b"debug-start\n" not in live_output and time.monotonic() < deadline:
+                if process.stdout is None:
+                    break
+                ready, _, _ = select.select([process.stdout], [], [], 0.1)
+                if ready:
+                    live_output += os.read(process.stdout.fileno(), 4096)
+
+            self.check(
+                "HACMAN_DEBUG streams setup output before completion",
+                b"debug-start\n" in live_output and process.poll() is None,
+                live_output.decode(errors="replace"),
+            )
+        finally:
+            (stream_dir / "release").touch()
+            remaining = process.communicate(timeout=10)[0]
+        self.check("the streamed debug command succeeds", process.returncode == 0)
+        self.check(
+            "debug output continues through command completion",
+            b"debug-end\n" in live_output + remaining,
+            (live_output + remaining).decode(errors="replace"),
+        )
 
         payload = self.temp / "trace-payload"
         payload.write_text("payload\n", encoding="utf-8")
