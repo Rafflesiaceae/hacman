@@ -1,0 +1,14 @@
+name: sandbox-write-dirs
+sandboxed: true
+sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-1e3ad953228e22c3.work
+sandbox-write-dirs:
+  - /home/hacman-test/go
+  - /home/hacman-test/.cache/go-build
+command: go test ./...
+workdir: /home/hacman-test
+run: /bin/sh -c <command>, in workdir
+record-when: the command exits 0
+schedule: never
+check-when: only with --force
+cache-identity: cmd /home/hacman-test $ go test ./...
+cache-file: /home/hacman-test/.cache/hacman/cmd-1e3ad953228e22c3

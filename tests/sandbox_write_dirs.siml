@@ -1,0 +1,6 @@
+name: sandbox-write-dirs
+command: go test ./...
+sandbox-write-dirs:
+  - {{HOME}}/go
+  - {{HOME}}/.cache/go-build
+schedule: never

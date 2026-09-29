@@ -112,13 +112,14 @@ static int add_path_rule(int ruleset_fd, const char *path, unsigned long long ac
     return rc;
 }
 
-int hm_sandbox_enter(const char *workdir, const char *cache_dir)
+int hm_sandbox_enter(const hm_project *p, const char *workdir, const char *cache_dir)
 {
     struct landlock_ruleset_attr ruleset;
     unsigned long long           access;
     int                          abi;
     int                          ruleset_fd;
     int                          rc = -1;
+    size_t                       i;
 
     abi = (int)syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
     if (abi < HM_LANDLOCK_MIN_ABI) {
@@ -152,6 +153,12 @@ int hm_sandbox_enter(const char *workdir, const char *cache_dir)
      * which lives directly in cache_dir rather than under this project's
      * workdir. */
     if (add_path_rule(ruleset_fd, cache_dir, access, 1) != 0) goto cleanup;
+    /* Extra host write access is opt-in and path-specific. Requiring every
+     * directory to exist lets O_NOFOLLOW reject a symlink in the final path
+     * component instead of silently broadening the policy. */
+    for (i = 0; i < p->sandbox_write_dir_count; ++i) {
+        if (add_path_rule(ruleset_fd, p->sandbox_write_dirs[i].path, access, 1) != 0) goto cleanup;
+    }
     /* Discarding output is ubiquitous shell behavior; grant only the write
      * right on this device node, not on its /dev parent hierarchy. */
     if (add_path_rule(ruleset_fd, "/dev/null", LANDLOCK_ACCESS_FS_WRITE_FILE, 0) != 0) {
@@ -177,8 +184,9 @@ cleanup:
 
 #else
 
-int hm_sandbox_enter(const char *workdir, const char *cache_dir)
+int hm_sandbox_enter(const hm_project *p, const char *workdir, const char *cache_dir)
 {
+    (void)p;
     (void)workdir;
     (void)cache_dir;
     fprintf(stderr,

@@ -103,7 +103,8 @@ static void print_files(const hm_project *p, const hm_cache *c)
 
 void hm_plan_print(const hm_project *p, const hm_cache *c)
 {
-    char sched[32];
+    char   sched[32];
+    size_t i;
 
     hm_sched_describe(p, sched, sizeof(sched));
 
@@ -111,6 +112,12 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
     hm_out("sandboxed: %s\n", p->sandboxed ? "true" : "false");
     if (p->sandboxed) {
         hm_out("sandbox-write-dir: %s\n", c->workdir);
+        if (p->sandbox_write_dir_count > 0) {
+            hm_out("sandbox-write-dirs:\n");
+            for (i = 0; i < p->sandbox_write_dir_count; ++i) {
+                hm_out("  - %s\n", p->sandbox_write_dirs[i].path);
+            }
+        }
     }
     if (p->kind == HM_KIND_COMMAND) {
         hm_out("command: %S\n", p->command);

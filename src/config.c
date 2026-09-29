@@ -73,9 +73,12 @@ typedef struct {
     int               seen_install;
     int               seen_workdir;
     int               seen_files;
+    int               seen_sandbox_write_dirs;
     int               pending_files; /* saw the header-only `files:` entry     */
-    int               in_files;      /* inside the nested embedded-file map    */
-    int               block_kind;    /* 1 = install, 2 = embedded file         */
+    int               pending_sandbox_write_dirs;
+    int               in_files; /* inside the nested embedded-file map    */
+    int               in_sandbox_write_dirs;
+    int               block_kind; /* 1 = install, 2 = embedded file         */
     hm_embedded_file *block_file;
     const char       *block_start; /* first raw byte of the current block    */
     const char       *block_end;   /* one past its last raw byte             */
@@ -351,6 +354,25 @@ static hm_embedded_file *add_file(hm_cfg *c, hm_str path, long line)
     return &p->files[p->file_count++];
 }
 
+static int add_sandbox_write_dir(hm_cfg *c, hm_str source, long line)
+{
+    hm_project *p = c->cur;
+
+    if (source.len == 0 || source.len > HM_PATH_MAX) {
+        cfg_err(c, line, "sandbox write directory is empty or too long");
+        return -1;
+    }
+    if (p->sandbox_write_dir_count == HM_SANDBOX_WRITE_DIRS_MAX) {
+        cfg_err(c, line, "too many sandbox write directories");
+        return -1;
+    }
+
+    p->sandbox_write_dirs[p->sandbox_write_dir_count].source = source;
+    p->sandbox_write_dirs[p->sandbox_write_dir_count].line   = line;
+    p->sandbox_write_dir_count += 1;
+    return 0;
+}
+
 static int begin_project(hm_cfg *c, long line)
 {
     hm_project *p = c->out;
@@ -383,6 +405,7 @@ static int expand_template(hm_cfg *c, hm_str tpl, const char *what, char *out, s
                            long line, int require_absolute)
 {
     size_t i = 0, o = 0;
+    int    too_long = 0;
 
     while (i < tpl.len) {
         if (i + 1 < tpl.len && tpl.ptr[i] == '{' && tpl.ptr[i + 1] == '{') {
@@ -408,13 +431,24 @@ static int expand_template(hm_cfg *c, hm_str tpl, const char *what, char *out, s
                        c->origin, line, what, name);
                 return -1;
             }
-            while (*value != '\0' && o + 1 < cap) out[o++] = *value++;
+            while (*value != '\0') {
+                if (o + 1 < cap) out[o++] = *value;
+                else too_long = 1;
+                ++value;
+            }
             continue;
         }
         if (o + 1 < cap) out[o++] = tpl.ptr[i];
+        else too_long = 1;
         ++i;
     }
     out[o] = '\0';
+
+    if (too_long) {
+        hm_err("hacman: %s:%d: %s is too long after environment expansion\n", c->origin, line,
+               what);
+        return -1;
+    }
 
     /* Ordinary paths must not change meaning with the caller's cwd. An
      * embedded bin-path is the exception: it is resolved later against the
@@ -437,6 +471,7 @@ static hm_str default_name(hm_str from)
 static int finish_project(hm_cfg *c)
 {
     hm_project *p = c->cur;
+    size_t      i;
 
     if (p->url.len == 0 && p->command.len == 0) {
         cfg_err(c, p->line, "project needs either 'url' or 'command'");
@@ -490,6 +525,18 @@ static int finish_project(hm_cfg *c)
         if (p->name.len == 0) p->name = default_name(p->url);
         if (p->check == HM_CHECK_VERSION && p->version_prefix.len == 0) {
             cfg_err(c, p->line, "check: version requires 'version-prefix'");
+            return -1;
+        }
+    }
+
+    if (p->sandbox_write_dir_count > 0 && !p->sandboxed) {
+        cfg_err(c, p->line, "'sandbox-write-dirs' requires 'sandboxed: true'");
+        return -1;
+    }
+    for (i = 0; i < p->sandbox_write_dir_count; ++i) {
+        hm_sandbox_write_dir *dir = &p->sandbox_write_dirs[i];
+        if (expand_template(c, dir->source, "sandbox-write-dirs entry", dir->path,
+                            sizeof(dir->path), dir->line, 1) != 0) {
             return -1;
         }
     }
@@ -565,13 +612,20 @@ int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project 
             break;
 
         case SIML_EVENT_MAPPING_ENTRY_HEADER:
-            if (c.in_files) {
+            if (c.in_files || c.in_sandbox_write_dirs) {
                 cfg_err(&c, ev.line, "an embedded file must be a literal block scalar");
                 return -1;
             }
             if (c.cur != NULL && hm_str_eq(slice(ev.key), "files")) {
                 c.seen_files    = 1;
                 c.pending_files = 1;
+            } else if (c.cur != NULL && hm_str_eq(slice(ev.key), "sandbox-write-dirs")) {
+                if (c.seen_sandbox_write_dirs) {
+                    cfg_err(&c, ev.line, "duplicate 'sandbox-write-dirs'");
+                    return -1;
+                }
+                c.seen_sandbox_write_dirs    = 1;
+                c.pending_sandbox_write_dirs = 1;
             }
             break;
 
@@ -584,16 +638,29 @@ int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project 
             break;
 
         case SIML_EVENT_SEQUENCE_START:
-            if (c.cur != NULL) {
-                cfg_err(&c, ev.line, "sequences are not supported inside a project");
+            if (c.cur != NULL &&
+                (c.pending_sandbox_write_dirs || hm_str_eq(slice(ev.key), "sandbox-write-dirs"))) {
+                if (!c.pending_sandbox_write_dirs && c.seen_sandbox_write_dirs) {
+                    cfg_err(&c, ev.line, "duplicate 'sandbox-write-dirs'");
+                    return -1;
+                }
+                c.seen_sandbox_write_dirs    = 1;
+                c.pending_sandbox_write_dirs = 0;
+                c.in_sandbox_write_dirs      = 1;
+            } else if (c.cur != NULL) {
+                cfg_err(&c, ev.line,
+                        "only 'sandbox-write-dirs' may be a sequence inside a project");
+                return -1;
             } else {
                 cfg_err(&c, ev.line,
                         "input must describe exactly one project, written as a "
                         "plain mapping (no leading '- ')");
+                return -1;
             }
-            return -1;
+            break;
 
         case SIML_EVENT_SEQUENCE_END:
+            c.in_sandbox_write_dirs = 0;
             break;
 
         case SIML_EVENT_MAPPING_START:
@@ -601,6 +668,10 @@ int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project 
                 c.pending_files = 0;
                 c.in_files      = 1;
                 break;
+            }
+            if (c.cur != NULL && c.pending_sandbox_write_dirs) {
+                cfg_err(&c, ev.line, "'sandbox-write-dirs' must be a sequence");
+                return -1;
             }
             if (c.cur != NULL) {
                 cfg_err(&c, ev.line, "nested mappings are not supported");
@@ -623,6 +694,10 @@ int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project 
                 return -1;
             }
             if (ev.key.len == 0) {
+                if (c.in_sandbox_write_dirs) {
+                    if (add_sandbox_write_dir(&c, slice(ev.value), ev.line) != 0) return -1;
+                    break;
+                }
                 cfg_err(&c, ev.line, "bare sequence items are not supported");
                 return -1;
             }

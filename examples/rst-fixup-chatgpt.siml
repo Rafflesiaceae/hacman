@@ -2,8 +2,11 @@
 # A complete Go project carried by one .siml file. Run it directly with hacman.
 # Repairs mixed Markdown/rST, then canonicalizes it through Pandoc.
 name: rst-fixup-chatgpt
-command: mkdir -p build .go-tmp/sys .go-tmp/work .go-cache .go-path && export TMPDIR="$PWD/.go-tmp/sys" GOTMPDIR="$PWD/.go-tmp/work" GOCACHE="$PWD/.go-cache" GOPATH="$PWD/.go-path" GOWORK=off GOENV=off GOTOOLCHAIN=auto && unset GOFLAGS && command -v pandoc >/dev/null && go test ./... && go build -trimpath -ldflags='-s -w' -o build/rst-fixup-chatgpt ./cmd/rst-fixup-chatgpt
+command: mkdir -p build .go-tmp/sys .go-tmp/work && export TMPDIR="$PWD/.go-tmp/sys" GOTMPDIR="$PWD/.go-tmp/work" GOWORK=off GOTOOLCHAIN=auto && unset GOFLAGS && command -v pandoc >/dev/null && go test ./... && go build -trimpath -ldflags='-s -w' -o build/rst-fixup-chatgpt ./cmd/rst-fixup-chatgpt
 bin-path: build/rst-fixup-chatgpt
+sandbox-write-dirs:
+  - {{HOME}}/go
+  - {{HOME}}/.cache/go-build
 files:
   go.mod: |
     module example.com/rst-fixup-chatgpt
@@ -1295,9 +1298,9 @@ files:
     Build
     -----
 
-    The ``.siml`` build isolates Go's normal temporary directory, Go build-work
-    directory, cache and GOPATH below hacman's work directory. This avoids Go's
-    special handling of a ``go.mod`` located directly at the system temporary root.
+    The ``.siml`` build grants sandboxed writes to Go's normal GOPATH and build
+    cache. Temporary build files remain below hacman's project work directory
+    to avoid Go's special handling of a ``go.mod`` at its temporary root.
 
     The build verifies that ``pandoc`` is available, runs the Go tests and then
     builds the binary. ``GOTOOLCHAIN=auto`` remains enabled for toolchain selection.

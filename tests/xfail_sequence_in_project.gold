@@ -1,1 +1,1 @@
-hacman: tests/xfail_sequence_in_project.siml:2: sequences are not supported inside a project
+hacman: tests/xfail_sequence_in_project.siml:2: only 'sandbox-write-dirs' may be a sequence inside a project

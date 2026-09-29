@@ -9,18 +9,19 @@
  * check path never calls malloc(), so there is no allocator to warm up and no
  * failure mode to handle. BSS pages are faulted in lazily by the kernel, so
  * generous limits cost nothing at startup. */
-#define HM_CONFIG_MAX    (1024u * 1024u)      /* .siml input                  */
-#define HM_BODY_MAX      (4u * 1024u * 1024u) /* HTTP response body           */
-#define HM_RECORD_MAX    4096                 /* one cache record             */
-#define HM_MARK_MAX      255                  /* etag / hash / version string */
-#define HM_NAME_MAX      127                  /* display name only           */
-#define HM_URL_MAX       1023
-#define HM_COMMAND_MAX   2047
-#define HM_PATH_MAX      1023 /* working directory, cache dir */
-#define HM_KEY_MAX       31   /* cache file name             */
-#define HM_IDENTITY_MAX  4095 /* what a cache key stands for  */
-#define HM_FILES_MAX     64   /* files embedded in one project */
-#define HM_FILE_PATH_MAX 128  /* SIML mapping-key limit       */
+#define HM_CONFIG_MAX             (1024u * 1024u)      /* .siml input                  */
+#define HM_BODY_MAX               (4u * 1024u * 1024u) /* HTTP response body           */
+#define HM_RECORD_MAX             4096                 /* one cache record             */
+#define HM_MARK_MAX               255                  /* etag / hash / version string */
+#define HM_NAME_MAX               127                  /* display name only           */
+#define HM_URL_MAX                1023
+#define HM_COMMAND_MAX            2047
+#define HM_PATH_MAX               1023 /* working directory, cache dir */
+#define HM_KEY_MAX                31   /* cache file name             */
+#define HM_IDENTITY_MAX           4095 /* what a cache key stands for  */
+#define HM_FILES_MAX              64   /* files embedded in one project */
+#define HM_FILE_PATH_MAX          128  /* SIML mapping-key limit       */
+#define HM_SANDBOX_WRITE_DIRS_MAX 16   /* extra writable host directories */
 
 /* A borrowed, non-NUL-terminated string. Config values are slices into the
  * single buffer the .siml input was read into; nothing is ever copied. */
@@ -61,6 +62,14 @@ typedef struct {
     long   line;
 } hm_embedded_file;
 
+/* One explicitly configured writable host directory. The template borrows
+ * the input buffer while path holds its environment-expanded absolute form. */
+typedef struct {
+    hm_str source;
+    char   path[HM_PATH_MAX + 1];
+    long   line;
+} hm_sandbox_write_dir;
+
 /* One project - and an input file describes exactly one of them. */
 typedef struct {
     hm_project_kind kind;
@@ -81,13 +90,15 @@ typedef struct {
     hm_str        bin;               /* raw {{VAR}} or cache-relative path    */
     /* The program this project sets up. When set, hacman execs it once the
      * setup is done, forwarding everything that followed FILE. */
-    char             bin_path[HM_PATH_MAX + 1];
-    int              bin_cached;     /* resolved below the cache workdir */
-    hm_str           install;        /* raw block-scalar region, still indented */
-    size_t           install_indent; /* columns to strip from install lines  */
-    hm_embedded_file files[HM_FILES_MAX];
-    size_t           file_count;
-    long             line; /* line the project started on          */
+    char                 bin_path[HM_PATH_MAX + 1];
+    int                  bin_cached;     /* resolved below the cache workdir */
+    hm_str               install;        /* raw block-scalar region, still indented */
+    size_t               install_indent; /* columns to strip from install lines  */
+    hm_embedded_file     files[HM_FILES_MAX];
+    size_t               file_count;
+    hm_sandbox_write_dir sandbox_write_dirs[HM_SANDBOX_WRITE_DIRS_MAX];
+    size_t               sandbox_write_dir_count;
+    long                 line; /* line the project started on          */
 } hm_project;
 
 /* --- util.c ------------------------------------------------------------- */
@@ -229,13 +240,12 @@ int hm_workdir_reset(const char *workdir);
 int hm_materialize_files(const hm_project *p, const char *workdir);
 
 /* Restricts this process and its descendants to read/execute globally and
- * full filesystem access below `workdir` and below `cache_dir`. The latter
- * lets a project's setup code run another hacman-managed tool (found on
- * PATH) and have that nested, self-hosted hacman invocation update its own
- * cache record and lock file, which live in `cache_dir` rather than under
- * this project's own `workdir`. Returns -1 without weakening the process when
- * Landlock is unavailable or policy setup fails. */
-int hm_sandbox_enter(const char *workdir, const char *cache_dir);
+ * full filesystem access below `workdir`, `cache_dir`, and the project's
+ * explicitly configured sandbox write directories. The cache exception lets
+ * setup code run another hacman-managed tool and update its cache record.
+ * Returns -1 without weakening the process when Landlock is unavailable or
+ * policy setup fails. */
+int hm_sandbox_enter(const hm_project *p, const char *workdir, const char *cache_dir);
 
 /* Replaces this process with the project's bin-path, passing `argv` (whose
  * first slot this fills in). Only ever returns on failure, with the exit code

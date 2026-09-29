@@ -1,0 +1,1 @@
+hacman: tests/xfail_sandbox_write_dir_relative.siml:2: sandbox-write-dirs entry must expand to an absolute path

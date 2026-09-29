@@ -288,6 +288,7 @@ See [`examples/`](examples/) for one file per check scheme.
 | `install` | no | — | shell script to run when the URL changed |
 | `bin-path` | no | — | program to exec afterwards (see [above](#options-before-file-arguments-after-it)) |
 | `sandboxed` | no | `true` | confine install-script writes to the project's cache `.work` directory |
+| `sandbox-write-dirs` | no | `[]` | additional absolute directory templates that a sandboxed install script may write below |
 
 For a sandboxed URL project, a safe relative `bin-path` resolves inside its
 cache work directory. This lets an install script atomically replace a cached
@@ -313,6 +314,7 @@ schedule: 12h
 | `schedule` | no | `daily` | when the command may run (below) |
 | `bin-path` | no | — | program to exec afterwards; a safe relative path resolves inside the sandbox work directory (see [above](#options-before-file-arguments-after-it)) |
 | `sandboxed` | no | `true` | confine command writes to the project's cache `.work` directory |
+| `sandbox-write-dirs` | no | `[]` | additional absolute directory templates that a sandboxed command may write below |
 
 `workdir` and `bin-path` support `{{VAR}}` templating against the environment:
 `{{HOME}}/workspace/nixcfg`. An unset variable is an error rather than an empty
@@ -485,6 +487,20 @@ full filesystem access only below their project-specific
 exception. Network access is unchanged. For sandboxed install scripts, that
 writable directory is also the current directory; `TMPDIR` points to it for
 both scripts and commands.
+
+Projects can grant setup code write access to a small set of additional host
+directories without disabling the rest of the sandbox. Each directory must
+already exist, expand to an absolute path, and may use the same `{{VAR}}`
+environment templates as `workdir`:
+
+```siml
+sandbox-write-dirs:
+  - {{HOME}}/go
+  - {{HOME}}/.cache/go-build
+```
+
+The configured directory and everything below it becomes writable. Other host
+paths remain read-only.
 
 The program named by `bin-path` is handed control after setup and is not
 sandboxed. This distinction lets a cached compiler, package client, or other

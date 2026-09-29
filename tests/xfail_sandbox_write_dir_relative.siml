@@ -1,0 +1,2 @@
+url: https://example.com/x
+sandbox-write-dirs: [relative/path]

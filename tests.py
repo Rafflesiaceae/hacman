@@ -716,8 +716,11 @@ files:
         readable.write_text("host input\n", encoding="utf-8")
         protected = self.temp / "sandbox-protected"
         protected.write_text("unchanged\n", encoding="utf-8")
+        allowed = self.temp / "sandbox-allowed"
+        allowed.mkdir()
         env = self.command_env(
             {
+                "SANDBOX_ALLOWED": str(allowed),
                 "SANDBOX_OUTSIDE": str(outside),
                 "SANDBOX_PROTECTED": str(protected),
                 "SANDBOX_READABLE": str(readable),
@@ -729,7 +732,8 @@ files:
         self.write(
             project,
             """name: sandbox-command
-command: cat "$SANDBOX_READABLE" > "$TMPDIR/read-copy" && printf changed > "$SANDBOX_PROTECTED"; printf blocked > "$SANDBOX_OUTSIDE"
+command: cat "$SANDBOX_READABLE" > "$TMPDIR/read-copy" && printf allowed > "$SANDBOX_ALLOWED/output" && printf changed > "$SANDBOX_PROTECTED"; printf blocked > "$SANDBOX_OUTSIDE"
+sandbox-write-dirs: [{{SANDBOX_ALLOWED}}]
 schedule: always
 """,
         )
@@ -747,6 +751,10 @@ schedule: always
             (workdir / "read-copy").read_text(encoding="utf-8") == "host input\n",
         )
         self.check("sandboxed command cannot write to the host", not outside.exists())
+        self.check(
+            "sandboxed command can write to an explicitly allowed directory",
+            (allowed / "output").read_text(encoding="utf-8") == "allowed",
+        )
         self.check(
             "sandboxed command cannot replace host contents",
             protected.read_text(encoding="utf-8") == "unchanged\n",
@@ -769,9 +777,11 @@ schedule: always
         )
 
         project.write_text(
-            project.read_text(encoding="utf-8").replace(
+            project.read_text(encoding="utf-8")
+            .replace(
                 "name: sandbox-command\n", "name: sandbox-command\nsandboxed: false\n"
-            ),
+            )
+            .replace("sandbox-write-dirs: [{{SANDBOX_ALLOWED}}]\n", ""),
             encoding="utf-8",
         )
         self.expect_hacman(
