@@ -154,6 +154,33 @@ Formatting maintained C and Python sources requires `clang-format` and Black:
 ./autoformat.sh
 ```
 
+### Regression benchmark
+
+```sh
+./regression-benchmark.sh
+BENCHMARK_MIN_RATIO=1 BENCHMARK_MAX_RATIO=2.5 ./regression-benchmark.sh
+```
+
+This builds a fresh release, static musl hacman and runs the small embedded C
+project in [`examples/regression-benchmark.siml`](examples/regression-benchmark.siml).
+It checks output, argument forwarding, static linking and cached execution,
+then uses hyperfine with no shell to compare direct program launches against
+cached launches through hacman. Compilation stays outside the timed runs.
+
+The script exits nonzero unless the ratio of mean hacman launch time to mean
+direct launch time is within the inclusive range, defaulting to `[1, 3]`.
+Set `BENCHMARK_MIN_RATIO` and `BENCHMARK_MAX_RATIO` for your machine's budget;
+measure on an otherwise idle machine to reduce scheduling noise. The defaults
+are 20 warmup runs and 1000 measured runs per command, configurable through
+`BENCHMARK_WARMUP` and `BENCHMARK_RUNS`.
+
+Dependencies are Bash, Python 3, hyperfine, Meson, Ninja, readelf and musl-gcc.
+`HACMAN_CC` can select another musl compiler executable. Temporary build and
+cache directories are removed on exit; measurements remain in
+`build-regression-benchmark/results.json`, or the path in `BENCHMARK_JSON`,
+including when the performance assertion fails. Run
+`./regression-benchmark.sh --help` to list the settings.
+
 ### Dependencies
 
 - Build: a C99 compiler, Meson ≥ 0.60, Ninja.

@@ -1,0 +1,17 @@
+# Tiny static musl program used by regression-benchmark.sh. No network needed.
+name: regression-benchmark
+command: "$HACMAN_BENCHMARK_CC" -std=c99 -O2 -static main.c -o hello
+bin-path: hello
+files:
+  main.c: |
+    #include <features.h>
+    #include <stdio.h>
+    /* Fail explicitly when the selected toolchain uses glibc headers. */
+    #ifdef __GLIBC__
+    #error This benchmark requires a musl compiler
+    #endif
+    int main(int argc, char **argv)
+    {
+        /* An optional marker lets the harness verify argument forwarding. */
+        return puts(argc > 1 ? argv[1] : "hello from static musl") < 0;
+    }
