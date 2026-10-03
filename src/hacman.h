@@ -90,15 +90,17 @@ typedef struct {
     hm_str        bin;               /* raw {{VAR}} or cache-relative path    */
     /* The program this project sets up. When set, hacman execs it once the
      * setup is done, forwarding everything that followed FILE. */
-    char                 bin_path[HM_PATH_MAX + 1];
-    int                  bin_cached;     /* resolved below the cache workdir */
-    hm_str               install;        /* raw block-scalar region, still indented */
-    size_t               install_indent; /* columns to strip from install lines  */
+    char   bin_path[HM_PATH_MAX + 1];
+    int    bin_cached;     /* resolved below the cache workdir */
+    hm_str install;        /* raw block-scalar region, still indented */
+    size_t install_indent; /* columns to strip from install lines  */
+    size_t file_count;
+    size_t sandbox_write_dir_count;
+    long   line; /* line the project started on          */
+    /* Keep optional storage last so resetting a project touches only metadata
+     * and leaves pages for unused files and writable directories unfaulted. */
     hm_embedded_file     files[HM_FILES_MAX];
-    size_t               file_count;
     hm_sandbox_write_dir sandbox_write_dirs[HM_SANDBOX_WRITE_DIRS_MAX];
-    size_t               sandbox_write_dir_count;
-    long                 line; /* line the project started on          */
 } hm_project;
 
 /* --- util.c ------------------------------------------------------------- */
@@ -125,8 +127,10 @@ int    hm_parse_ulong(hm_str s, unsigned long *out);
 void hm_hash_hex(const char *data, size_t len, char *out17);
 
 /* Reads a whole file (or standard input when path is "-") into `buf`.
+ * On success, *source_fd is the named file's still-open descriptor, or -1 for
+ * stdin. The caller closes it after resolving any source-path identity.
  * Returns the byte count, or -1 on error (message already printed). */
-long hm_read_all(const char *path, char *buf, size_t cap);
+long hm_read_all(const char *path, char *buf, size_t cap, int *source_fd);
 
 /* --- config.c ----------------------------------------------------------- */
 
@@ -246,10 +250,5 @@ int hm_materialize_files(const hm_project *p, const char *workdir);
  * Returns -1 without weakening the process when Landlock is unavailable or
  * policy setup fails. */
 int hm_sandbox_enter(const hm_project *p, const char *workdir, const char *cache_dir);
-
-/* Replaces this process with the project's bin-path, passing `argv` (whose
- * first slot this fills in). Only ever returns on failure, with the exit code
- * hacman should use. */
-int hm_exec_bin(const hm_project *p, char **argv);
 
 #endif /* HACMAN_H_INCLUDED */

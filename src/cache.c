@@ -250,6 +250,13 @@ int hm_cache_load(hm_cache *c)
         if (n == 0) break;
         total += (size_t)n;
         if (total + 1 >= sizeof(record_buf)) break;
+        /* Atomic cache writes contain two LF-terminated lines. Once both are
+         * present, an EOF read cannot contribute anything the parser uses.
+         * Incomplete/short reads still continue until the record or EOF. */
+        nl = (const char *)memchr(record_buf, '\n', total);
+        if (nl != NULL && memchr(nl + 1, '\n', total - (size_t)(nl + 1 - record_buf)) != NULL) {
+            break;
+        }
     }
     close(fd);
 

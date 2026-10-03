@@ -19,6 +19,7 @@
 
 #include "hacman.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -35,7 +36,7 @@
 #define HM_ENV_ARG_MAX     64
 
 static char       config_buf[HM_CONFIG_MAX];
-static char       resolved_bin_path[HM_PATH_MAX + 1];
+static char       canonical_source_path[HM_PATH_MAX + 1];
 static char       env_options_buf[HM_ENV_OPTIONS_MAX + 1];
 static char      *env_options_argv[HM_ENV_ARG_MAX];
 static hm_project project;
@@ -386,7 +387,16 @@ static int finish(const hm_project *p, const hm_opts *o, int rc)
     if (rc != HM_EXIT_OK || p->bin_path[0] == '\0') return rc;
     if (o->plan || o->check_only || o->dry_run || o->adopt) return rc;
 
-    return hm_exec_bin(p, o->prog_argv); /* only returns if exec failed */
+    /* FILE's argv slot becomes argv[0] for the program; the remaining arguments
+     * are already NUL-terminated and need no copying. Keep this handoff on the
+     * fast path: hacman's stdout uses hm_out, already flushed above, rather
+     * than stdio. Setup stdout belongs to child processes, not this process. */
+    o->prog_argv[0] = (char *)p->bin_path;
+    hm_err_stream_end();
+    execv(p->bin_path, o->prog_argv);
+
+    hm_err("hacman: cannot execute %s: %s\n", p->bin_path, strerror(errno));
+    return 127;
 }
 
 /* Release slow-path serialization before handing control to the configured
@@ -413,11 +423,58 @@ static int resolve_cached_bin(hm_project *p, const hm_cache *c, const char *file
         return -1;
     }
 
-    memcpy(resolved_bin_path, c->workdir, base_len);
-    resolved_bin_path[base_len] = '/';
-    memcpy(resolved_bin_path + base_len + 1, p->bin_path, bin_len + 1);
-    memcpy(p->bin_path, resolved_bin_path, base_len + 1 + bin_len + 1);
+    /* Shift the short relative path in place, avoiding a temporary buffer and
+     * a second copy of the entire resolved path on every cached launch. */
+    memmove(p->bin_path + base_len + 1, p->bin_path, bin_len + 1);
+    memcpy(p->bin_path, c->workdir, base_len);
+    p->bin_path[base_len] = '/';
     return 0;
+}
+
+/* Linux exposes the already-resolved path of an open file in procfs. This
+ * replaces realpath's per-component symlink probes and allocation with one
+ * readlink. Keep realpath as the fallback when procfs is unavailable or the
+ * descriptor names something other than a live filesystem path. */
+static char *resolve_source_path(int fd, const char *file)
+{
+#ifdef __linux__
+    static const char prefix[]  = "/proc/self/fd/";
+    static const char deleted[] = " (deleted)";
+    char              link_path[64], digits[24];
+    size_t            pos = sizeof(prefix) - 1, count = 0;
+    unsigned int      value = (unsigned int)fd;
+    ssize_t           len;
+
+    memcpy(link_path, prefix, pos);
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+    while (count > 0) link_path[pos++] = digits[--count];
+    link_path[pos] = '\0';
+
+    len = readlink(link_path, canonical_source_path, sizeof(canonical_source_path));
+    if (len > 0 && (size_t)len < sizeof(canonical_source_path) && canonical_source_path[0] == '/') {
+        canonical_source_path[len] = '\0';
+        /* procfs appends a synthetic suffix for an unlinked file. Resolving
+         * the original name preserves the previous failure behavior and also
+         * handles real filenames that happen to end in this suffix. */
+        if ((size_t)len < sizeof(deleted) - 1 ||
+            memcmp(canonical_source_path + len - (sizeof(deleted) - 1), deleted,
+                   sizeof(deleted) - 1) != 0) {
+            return canonical_source_path;
+        }
+    }
+#else
+    (void)fd;
+#endif
+    return realpath(file, NULL);
+}
+
+/* Only the portable/procfs fallback owns allocated storage. */
+static void release_source_path(char *path)
+{
+    if (path != NULL && path != canonical_source_path) free(path);
 }
 
 /* A command project: run it, and remember that only if it succeeded. */
@@ -461,7 +518,7 @@ int main(int argc, char **argv)
     hm_check_result   res;
     char              old_mark[HM_MARK_MAX + 1];
     long              len, now, wait = 0;
-    int               rc, changed, missing_bin, lock_fd = -1;
+    int               rc, changed, missing_bin, source_fd, lock_fd = -1;
 
     rc = parse_args(argc, argv, &o);
     if (rc != 0) return (rc > 0) ? HM_EXIT_OK : HM_EXIT_USAGE;
@@ -471,11 +528,12 @@ int main(int argc, char **argv)
         return HM_EXIT_USAGE;
     }
 
-    len = hm_read_all(o.file, config_buf, sizeof(config_buf));
+    len = hm_read_all(o.file, config_buf, sizeof(config_buf), &source_fd);
     if (len < 0) return HM_EXIT_USAGE;
 
     if (hm_config_parse(config_buf, (size_t)len, (strcmp(o.file, "-") != 0) ? o.file : "<stdin>",
                         &project) != 0) {
+        if (source_fd >= 0) close(source_fd);
         return HM_EXIT_USAGE;
     }
 
@@ -483,6 +541,7 @@ int main(int argc, char **argv)
         /* As a shim, hacman must leave stdout to the program it execs. */
         hm_out_target(2);
     } else if (o.prog_argv[1] != NULL) {
+        if (source_fd >= 0) close(source_fd);
         hm_err("hacman: %s: arguments after FILE need a 'bin-path' to forward "
                "them to\n",
                o.file);
@@ -490,30 +549,33 @@ int main(int argc, char **argv)
     }
 
     /* A canonical input path gives an embedded project one workspace across
-     * content changes. realpath() also makes relative and symlinked spellings
-     * of the same input agree. Standard input has no path and retains the
-     * content-addressed fallback. */
+     * content changes. The open descriptor makes relative and symlinked
+     * spellings of the same input agree without walking the path again.
+     * Standard input has no path and retains the content-addressed fallback. */
     if (project.file_count > 0 && strcmp(o.file, "-") != 0) {
-        source_path = realpath(o.file, NULL);
+        source_path = resolve_source_path(source_fd, o.file);
+        close(source_fd);
+        source_fd = -1;
         if (source_path == NULL) {
             hm_err("hacman: %s: cannot resolve input path\n", o.file);
             return HM_EXIT_USAGE;
         }
         if (strlen(source_path) > HM_PATH_MAX) {
             hm_err("hacman: %s: canonical input path is too long\n", o.file);
-            free(source_path);
+            release_source_path(source_path);
             return HM_EXIT_USAGE;
         }
     }
+    if (source_fd >= 0) close(source_fd);
 
     cache_dir = hm_cache_dir(o.cache_dir);
     if (cache_dir == NULL) {
-        free(source_path);
+        release_source_path(source_path);
         hm_err("hacman: HOME is not set; use --cache or HACMAN_CACHE\n");
         return HM_EXIT_USAGE;
     }
     hm_cache_init(&cache, p, cache_dir, source_path);
-    free(source_path);
+    release_source_path(source_path);
     if (resolve_cached_bin(&project, &cache, o.file) != 0) {
         return HM_EXIT_USAGE;
     }

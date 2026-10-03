@@ -642,6 +642,32 @@ files:
         )
         self.contains("embedded cache hit is explained", "embedded inputs unchanged")
         self.contains("cached embedded executable runs", "cached-v1")
+        # Canonical identity must survive different spellings of the source;
+        # aliases must reuse the existing workspace rather than compile again.
+        file_alias = self.temp / "embedded-file-alias.siml"
+        file_alias.symlink_to(embedded_cached)
+        directory_alias = self.temp / "embedded-directory-alias"
+        directory_alias.symlink_to(self.temp, target_is_directory=True)
+        dot_parent = self.temp / "embedded-dot-parent"
+        dot_parent.mkdir()
+        aliases = {
+            "relative": Path(os.path.relpath(embedded_cached, self.root)),
+            "file symlink": file_alias,
+            "directory symlink": directory_alias / embedded_cached.name,
+            "parent component": dot_parent / ".." / embedded_cached.name,
+        }
+        for label, alias in aliases.items():
+            self.expect_hacman(
+                f"embedded {label} source reuses cache",
+                0,
+                "-v",
+                "--cache",
+                cached_dir,
+                alias,
+            )
+            self.contains(
+                f"embedded {label} source is unchanged", "embedded inputs unchanged"
+            )
         workdir = next(cached_dir.glob("*.work"))
         readonly_tree = workdir / "readonly-tree"
         readonly_nested = readonly_tree / "nested"
@@ -658,6 +684,43 @@ files:
             "unchanged embedded command ran only once",
             len(build_logs) == 1 and self.line_count(build_logs[0]) == 1,
         )
+
+        # Reusing a source identity must still repair a missing handoff binary.
+        (workdir / "runner").unlink()
+        self.expect_hacman(
+            "missing embedded executable triggers setup",
+            0,
+            "--cache",
+            cached_dir,
+            embedded_cached,
+        )
+        self.contains("missing embedded executable was restored", "cached-v1")
+        self.check(
+            "missing embedded executable rebuilt once",
+            self.line_count(workdir / "build.log") == 2,
+        )
+
+        # The complete-record shortcut must still accept an EOF-terminated
+        # final line, which requires continuing after the first short read.
+        record = next(
+            path
+            for path in cached_dir.glob("cmd-*")
+            if path.is_file() and not path.name.endswith(".lock")
+        )
+        saved_record = record.read_bytes()
+        record.write_bytes(saved_record[:-1])
+        self.expect_hacman(
+            "embedded cache record without final LF is reused",
+            0,
+            "-v",
+            "--cache",
+            cached_dir,
+            embedded_cached,
+        )
+        self.contains(
+            "EOF-terminated cache record is unchanged", "embedded inputs unchanged"
+        )
+        record.write_bytes(saved_record)
 
         embedded_scheduled = self.temp / "embedded-scheduled.siml"
         self.write(

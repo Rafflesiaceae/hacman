@@ -267,11 +267,13 @@ int hm_parse_ulong(hm_str s, unsigned long *out)
  * parser is then fed slices of this single buffer.
  *
  * `path` is a file name, or "-" for standard input. */
-long hm_read_all(const char *path, char *buf, size_t cap)
+long hm_read_all(const char *path, char *buf, size_t cap, int *source_fd)
 {
     int    fd       = 0;
     int    close_fd = 0;
     size_t total    = 0;
+
+    *source_fd = -1;
 
     if (strcmp(path, "-") != 0) {
         fd = open(path, O_RDONLY);
@@ -299,6 +301,8 @@ long hm_read_all(const char *path, char *buf, size_t cap)
         }
     }
 
-    if (close_fd) close(fd);
+    /* The open file already has its symlinks resolved by the kernel. Retain
+     * it long enough for the caller to obtain that path without another walk. */
+    if (close_fd) *source_fd = fd;
     return (long)total;
 }

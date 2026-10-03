@@ -66,14 +66,17 @@ Rules the fast path follows, and that changes to it must keep:
 - **Static musl by default.** A static binary has no dynamic loader to run
   before `main()`. This is the single largest startup win and the reason
   `build.sh` looks for a musl toolchain first.
-- **No dynamic allocation.** Every buffer is in BSS or on the stack (see the
-  `HM_*` limits in `src/hacman.h`). There is no allocator to warm up, and no
-  out-of-memory path to get wrong. BSS pages are faulted in lazily, so
-  generous limits are free.
-- **One read per file.** The SIML input is slurped with a single
-  `open`/`read`/`close` and parsed straight out of that buffer; the parser's
-  line callback hands out slices of it. The cache record is one small file, so
-  reading it is one more `open`/`read`/`close` — never a table to scan.
+- **No allocator on normal cached launches.** Buffers are in BSS or on the
+  stack (see the `HM_*` limits in `src/hacman.h`). Optional embedded-file and
+  sandbox-directory storage is initialized only for entries actually used,
+  leaving unused BSS pages unfaulted. On Linux, an embedded source's canonical
+  path comes from its already-open `/proc/self/fd` link; `realpath` remains a
+  fallback when procfs is unavailable.
+- **One buffered pass per file.** The SIML input is read into one buffer and
+  parsed straight out of it; the parser's line callback hands out slices.
+  The cache record is one small file, never a table to scan. A complete record
+  needs one `read`: its two terminated lines avoid an extra EOF probe, while
+  incomplete reads still continue.
 - **Almost no copies.** Config values — including install scripts and embedded
   file contents — point back into the input buffer. Only embedded-file names
   are copied, because parser key slices are transient. Block contents are not

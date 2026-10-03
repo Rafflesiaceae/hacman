@@ -329,8 +329,9 @@ static int valid_file_path(hm_str path)
 
 static hm_embedded_file *add_file(hm_cfg *c, hm_str path, long line)
 {
-    hm_project *p = c->cur;
-    size_t      i;
+    hm_project       *p = c->cur;
+    hm_embedded_file *file;
+    size_t            i;
 
     if (!valid_file_path(path)) {
         cfg_err(c, line, "embedded file path must be a safe relative path");
@@ -347,11 +348,15 @@ static hm_embedded_file *add_file(hm_cfg *c, hm_str path, long line)
         return NULL;
     }
 
-    hm_str_copy(p->files[p->file_count].path_buf, sizeof(p->files[p->file_count].path_buf), path);
-    p->files[p->file_count].path.ptr = p->files[p->file_count].path_buf;
-    p->files[p->file_count].path.len = path.len;
-    p->files[p->file_count].line     = line;
-    return &p->files[p->file_count++];
+    /* Only active entries need initialization. Reset their borrowed slices and
+     * block state when parser storage is reused for another project. */
+    file = &p->files[p->file_count++];
+    memset(file, 0, sizeof(*file));
+    hm_str_copy(file->path_buf, sizeof(file->path_buf), path);
+    file->path.ptr = file->path_buf;
+    file->path.len = path.len;
+    file->line     = line;
+    return file;
 }
 
 static int add_sandbox_write_dir(hm_cfg *c, hm_str source, long line)
@@ -382,7 +387,10 @@ static int begin_project(hm_cfg *c, long line)
         return -1;
     }
     c->started = 1;
-    memset(p, 0, sizeof(*p));
+    /* Array capacity is a limit, not work to perform on every launch. Entries
+     * become visible only after their count is incremented and are initialized
+     * as they are added; keep inactive BSS pages untouched. */
+    memset(p, 0, offsetof(hm_project, files));
     p->check      = HM_CHECK_ETAG;
     p->sched_kind = HM_SCHED_EVERY;
     /* Project-controlled setup code is confined unless the file explicitly
