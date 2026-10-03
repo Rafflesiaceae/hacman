@@ -157,8 +157,8 @@ Formatting maintained C and Python sources requires `clang-format` and Black:
 ### Regression benchmark
 
 ```sh
-./regression-benchmark.sh
-BENCHMARK_MIN_RATIO=1 BENCHMARK_MAX_RATIO=2.5 ./regression-benchmark.sh
+./regression-benchmark.py
+BENCHMARK_MIN_RATIO=1 BENCHMARK_MAX_RATIO=2.5 ./regression-benchmark.py
 ```
 
 This builds a fresh release, static musl hacman and runs the small embedded C
@@ -179,7 +179,7 @@ Dependencies are Bash, Python 3, hyperfine, Meson, Ninja, readelf and musl-gcc.
 cache directories are removed on exit; measurements remain in
 `build-regression-benchmark/results.json`, or the path in `BENCHMARK_JSON`,
 including when the performance assertion fails. Run
-`./regression-benchmark.sh --help` to list the settings.
+`./regression-benchmark.py --help` to list the settings.
 
 ### Dependencies
 

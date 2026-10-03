@@ -1,4 +1,4 @@
-# Tiny static musl program used by regression-benchmark.sh. No network needed.
+# Tiny static musl program used by regression-benchmark.py. No network needed.
 name: regression-benchmark
 command: "$HACMAN_BENCHMARK_CC" -std=c99 -O2 -static main.c -o hello
 bin-path: hello
