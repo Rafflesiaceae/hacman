@@ -167,6 +167,10 @@ It checks output, argument forwarding, static linking and cached execution,
 then uses hyperfine with no shell to compare direct program launches against
 cached launches through hacman. Compilation stays outside the timed runs.
 
+Mean launch times must be strictly below **600 microseconds for direct** and
+**1000 microseconds for hacman**, in addition to the ratio check. Reaching or
+exceeding either limit fails the benchmark and retains the JSON report.
+
 The script exits nonzero unless the ratio of mean hacman launch time to mean
 direct launch time is within the inclusive range, defaulting to `[1, 3]`.
 Set `BENCHMARK_MIN_RATIO` and `BENCHMARK_MAX_RATIO` for your machine's budget;

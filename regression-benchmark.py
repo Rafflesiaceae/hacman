@@ -16,6 +16,9 @@ import tempfile
 
 ROOT_DIR = Path(__file__).resolve().parent
 
+# Hyperfine exports seconds; these fixed budgets apply strictly to mean time.
+MAX_MEAN_SECONDS = {"direct": 600e-6, "hacman": 1000e-6}
+
 
 def settings(env: dict[str, str]) -> tuple[int, int, float, float]:
     """Validate budgets before spending time compiling or measuring anything."""
@@ -60,7 +63,7 @@ def check_output(argv: list[str | Path], env: dict[str, str], expected: str) -> 
 
 
 def check_report(report: Path, lower: float, upper: float) -> None:
-    """Assert the inclusive budget using hyperfine's timings in seconds."""
+    """Assert strict mean-time limits and the inclusive launch-time ratio."""
     with report.open(encoding="utf-8") as stream:
         results = json.load(stream)["results"]
     if len(results) != 2 or {result["command"] for result in results} != {
@@ -80,9 +83,18 @@ def check_report(report: Path, lower: float, upper: float) -> None:
         f"hacman: {means['hacman'] * 1e6:.1f} us"
     )
     print(f"hacman/direct: {ratio:.3f}; allowed: [{lower:g}, {upper:g}]")
+    print("Mean limits: direct < 600 us; hacman < 1000 us")
     print(f"Report: {report}")
+    # Report every exceeded limit so a slow run identifies both launch paths.
+    failures = [
+        f"{name} mean {means[name] * 1e6:.1f} us must be < {limit * 1e6:g} us"
+        for name, limit in MAX_MEAN_SECONDS.items()
+        if means[name] >= limit
+    ]
     if not lower <= ratio <= upper:
-        raise ValueError("FAIL: launch-time ratio outside allowed range")
+        failures.append("launch-time ratio outside allowed range")
+    if failures:
+        raise ValueError("FAIL: " + "; ".join(failures))
     print("regression-benchmark.py: PASS")
 
 
@@ -167,11 +179,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Build hacman and a small embedded static musl C project, check its "
-            "behavior, then assert the ratio of mean cached-launch time to mean "
-            "direct-launch time."
+            "behavior, then assert mean launch times and the ratio of mean "
+            "cached-launch time to mean direct-launch time."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Environment:
+        epilog="""Mean launch times must be strictly below 600 us for direct and 1000 us
+for hacman, in addition to the inclusive ratio budget.
+
+Environment:
   HACMAN_CC           musl C compiler executable (default: musl-gcc)
   BENCHMARK_WARMUP    warmup runs per command (default: 20)
   BENCHMARK_RUNS      measured runs per command (default: 1000)
