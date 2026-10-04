@@ -17,17 +17,17 @@ import tempfile
 ROOT_DIR = Path(__file__).resolve().parent
 
 # Hyperfine exports seconds; these fixed budgets apply strictly to mean time.
-MAX_MEAN_SECONDS = {"direct": 600e-6, "hacman": 1000e-6}
+MAX_MEAN_SECONDS = {"direct": 600e-6, "hacman": 950e-6}
 
 
 def settings(env: dict[str, str]) -> tuple[int, int, float, float]:
     """Validate budgets before spending time compiling or measuring anything."""
     defaults = {
         "HACMAN_CC": "musl-gcc",
-        "BENCHMARK_WARMUP": "20",
-        "BENCHMARK_RUNS": "1000",
+        "BENCHMARK_WARMUP": "2000",
+        "BENCHMARK_RUNS": "8000",
         "BENCHMARK_MIN_RATIO": "1",
-        "BENCHMARK_MAX_RATIO": "3",
+        "BENCHMARK_MAX_RATIO": "1.71",
         "BENCHMARK_JSON": str(ROOT_DIR / "build-regression-benchmark/results.json"),
     }
     for name, default in defaults.items():
@@ -83,7 +83,9 @@ def check_report(report: Path, lower: float, upper: float) -> None:
         f"hacman: {means['hacman'] * 1e6:.1f} us"
     )
     print(f"hacman/direct: {ratio:.3f}; allowed: [{lower:g}, {upper:g}]")
-    print("Mean limits: direct < 600 us; hacman < 1000 us")
+    print(
+        f"Mean limits: direct < {MAX_MEAN_SECONDS["direct"]} s; hacman < {MAX_MEAN_SECONDS["hacman"]} s"
+    )
     print(f"Report: {report}")
     # Report every exceeded limit so a slow run identifies both launch paths.
     failures = [
@@ -155,6 +157,8 @@ def benchmark() -> None:
         run(
             [
                 "hyperfine",
+                "--style",
+                "basic",
                 "--shell=none",
                 "--warmup",
                 str(warmup),
@@ -191,7 +195,7 @@ Environment:
   BENCHMARK_WARMUP    warmup runs per command (default: 20)
   BENCHMARK_RUNS      measured runs per command (default: 1000)
   BENCHMARK_MIN_RATIO inclusive minimum hacman/direct ratio (default: 1)
-  BENCHMARK_MAX_RATIO inclusive maximum hacman/direct ratio (default: 3)
+  BENCHMARK_MAX_RATIO inclusive maximum hacman/direct ratio (default: 2)
   BENCHMARK_JSON      report path (default: build-regression-benchmark/results.json)
 
 Requires Python 3, hyperfine, Meson, Ninja, readelf, a musl compiler and
