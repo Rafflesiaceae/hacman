@@ -362,6 +362,83 @@ class Suite:
         )
         self.missing("XDG cache path is ignored", "/tmp/xdg-cache")
 
+        # Empty settings retain their defaults, and similarly prefixed names
+        # must never be mistaken for the four cached startup variables.
+        env = self.command_env(
+            {
+                "HACMAN": "",
+                "HACMAN_DEBUG": "",
+                "HACMAN_CACHE": "",
+                "HOME": "/home/environment-scan",
+                "HACMAN_OPTIONS": "--no-such-option",
+                "HACMAN_DEBUGGER": "invalid",
+                "HACMAN_CACHE_BACKUP": "/tmp/wrong-cache",
+                "HOME_BACKUP": "/home/wrong-home",
+            }
+        )
+        self.expect_hacman(
+            "environment scan distinguishes empty settings and name prefixes",
+            0,
+            "--plan",
+            "tests/command_default_workdir.siml",
+            env=env,
+        )
+        self.contains(
+            "empty cache setting falls back to HOME",
+            "cache-file: /home/environment-scan/.cache/hacman/",
+        )
+        self.contains(
+            "default workdir reuses the exact HOME value",
+            "workdir: /home/environment-scan",
+        )
+
+        env = self.command_env(
+            {"HACMAN_CACHE": "/tmp/selected-cache"}, remove=("HOME",)
+        )
+        self.expect_hacman(
+            "environment cache override does not need HOME",
+            0,
+            "--plan",
+            "tests/minimal.siml",
+            env=env,
+        )
+        self.contains(
+            "environment cache override is selected", "cache-file: /tmp/selected-cache/"
+        )
+
+        # A subprocess environment dict cannot represent duplicate names.
+        # execve a raw vector to verify getenv's first-match behavior, including
+        # empty first values that must not be replaced by later duplicates.
+        raw_environment = """
+import ctypes, os, sys
+values = [b'HACMAN=--plan', b'HACMAN=--no-such-option',
+          b'HACMAN_DEBUG=', b'HACMAN_DEBUG=invalid',
+          b'HACMAN_CACHE=', b'HACMAN_CACHE=/tmp/wrong-cache',
+          b'HOME=/home/first-match', b'HOME=/home/wrong-home']
+values += [os.fsencode(k + '=' + v) for k, v in os.environ.items()
+           if k not in ('HACMAN', 'HACMAN_DEBUG', 'HACMAN_CACHE', 'HOME')]
+vector = lambda items: (ctypes.c_char_p * (len(items) + 1))(*items, None)
+args = vector([os.fsencode(arg) for arg in sys.argv[1:]])
+ctypes.CDLL(None, use_errno=True).execve(args[0], args, vector(values))
+raise OSError(ctypes.get_errno(), 'execve failed')
+"""
+        self.expect(
+            "duplicate startup variables retain their first value",
+            0,
+            [
+                sys.executable,
+                "-c",
+                raw_environment,
+                self.binary,
+                "tests/command_default_workdir.siml",
+            ],
+        )
+        self.contains(
+            "first empty cache value still uses the first HOME",
+            "cache-file: /home/first-match/.cache/hacman/",
+        )
+        self.contains("first HOME is used for expansion", "workdir: /home/first-match")
+
         env = self.command_env(remove=("HOME", "HACMAN_CACHE"))
         self.expect_hacman(
             "missing HOME without a cache override is an error",

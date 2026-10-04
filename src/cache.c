@@ -91,18 +91,20 @@ static size_t append_long(char *dst, size_t o, size_t cap, long v)
 
 const char *hm_cache_dir(const char *override)
 {
-    const char *env;
-    size_t      o = 0;
+    const hm_env *startup;
+    const char   *env;
+    size_t        o = 0;
 
     if (override != NULL && override[0] != '\0') return override;
 
-    env = getenv("HACMAN_CACHE");
+    startup = hm_env_get();
+    env = startup->cache;
     if (env != NULL && env[0] != '\0') return env;
 
     /* Keep every default cache artifact under one predictable user-owned
      * tree. Falling back to the caller's cwd would leak cache directories
      * into arbitrary projects. */
-    env = getenv("HOME");
+    env = startup->home;
     if (env == NULL || env[0] == '\0') return NULL;
     o                = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), env);
     o                = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), "/.cache/hacman");

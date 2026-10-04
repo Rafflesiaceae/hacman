@@ -78,6 +78,7 @@ configure_file(output: 'config.h', configuration: conf)
 
 hacman_sources = files(
   'src/main.c',
+  'src/env.c',
   'src/util.c',
   'src/config.c',
   'src/plan.c',

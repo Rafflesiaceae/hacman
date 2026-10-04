@@ -86,6 +86,10 @@ Rules the fast path follows, and that changes to it must keep:
   even de-indented until work is actually due.
 - **No stdio on the fast path.** Output goes through a small `write(2)`-based
   formatter in `src/util.c`.
+- **One environment scan.** `src/env.c` collects `HACMAN`, `HACMAN_DEBUG`,
+  `HACMAN_CACHE`, and `HOME` together. Argument parsing, cache defaults, and
+  `{{HOME}}` expansion reuse those borrowed values; other template variables
+  still use ordinary environment lookup.
 - **Nothing eager.** Nothing happens at all unless the schedule says the
   project is due: no request, no command, no fork. Nothing is written unless
   the work that followed actually succeeded. A quiet cached handoff uses
@@ -661,6 +665,7 @@ tests.py                  test suite (also `meson test`)
 tests/*.siml, *.gold      golden-file fixtures for `hacman --plan`
 examples/*.siml           one annotated project per file
 src/main.c                fast path: args, schedule decision, orchestration
+src/env.c                 one scan for borrowed startup environment settings
 src/config.c              SIML -> one hm_project, zero-copy
 src/plan.c                --plan serialisation
 src/cache.c               cache records: identity, load, atomic save

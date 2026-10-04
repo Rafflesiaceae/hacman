@@ -289,14 +289,15 @@ static int parse_arg_list(int argc, char **argv, int first, int env_only, hm_opt
 
 static int parse_args(int argc, char **argv, hm_opts *o)
 {
-    const char *env;
-    int         env_argc;
-    int         rc;
+    const hm_env *startup = hm_env_get();
+    const char   *env;
+    int           env_argc;
+    int           rc;
 
     memset(o, 0, sizeof(*o));
     o->timeout = 15;
 
-    env = getenv("HACMAN_DEBUG");
+    env = startup->debug;
     if (env != NULL && env[0] != '\0') {
         if (strcmp(env, "1") == 0) {
             /* Debug mode combines decision reporting with the live shell
@@ -309,7 +310,7 @@ static int parse_args(int argc, char **argv, hm_opts *o)
         }
     }
 
-    env = getenv("HACMAN");
+    env = startup->options;
     if (env != NULL && env[0] != '\0') {
         if (parse_env_words(env, &env_argc) != 0) return -1;
         rc = parse_arg_list(env_argc, env_options_argv, 0, 1, o);

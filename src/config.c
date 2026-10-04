@@ -432,7 +432,9 @@ static int expand_template(hm_cfg *c, hm_str tpl, const char *what, char *out, s
             }
             i += 2;
 
-            value = getenv(name);
+            /* The usual default workdir reuses the startup HOME lookup. Other
+             * template variables keep the general environment lookup path. */
+            value = strcmp(name, "HOME") == 0 ? hm_env_get()->home : getenv(name);
             if (value == NULL || value[0] == '\0') {
                 hm_err("hacman: %s:%d: %s refers to {{%s}}, which is not set "
                        "in the environment\n",

@@ -103,6 +103,20 @@ typedef struct {
     hm_sandbox_write_dir sandbox_write_dirs[HM_SANDBOX_WRITE_DIRS_MAX];
 } hm_project;
 
+/* --- env.c -------------------------------------------------------------- */
+
+typedef struct {
+    const char *options; /* HACMAN */
+    const char *debug;   /* HACMAN_DEBUG */
+    const char *cache;   /* HACMAN_CACHE */
+    const char *home;    /* HOME, for default paths and {{HOME}} */
+} hm_env;
+
+/* Lazily snapshots these startup values in one allocation-free environment
+ * scan. Values are borrowed, NULL when absent, and retained for the process.
+ * Arbitrary {{VAR}} expansion continues to use getenv for other variables. */
+const hm_env *hm_env_get(void);
+
 /* --- util.c ------------------------------------------------------------- */
 
 /* Minimal formatter used instead of <stdio.h> on the fast path.
