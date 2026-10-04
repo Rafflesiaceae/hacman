@@ -4,6 +4,7 @@
  * <stdio.h>: the fast path then touches no stdio buffers, no locale and no
  * allocator. The slow (install) path is free to use stdio. */
 
+#define _GNU_SOURCE
 #include "hacman.h"
 
 #include <errno.h>
@@ -11,6 +12,10 @@
 #include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
+
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 
 #include "xxhash.h"
 
@@ -262,21 +267,59 @@ int hm_parse_ulong(hm_str s, unsigned long *out)
     return 0;
 }
 
+/* A lexically canonical absolute path needs no rewriting when the kernel can
+ * also prove that none of its components is a symlink. Otherwise retain the
+ * descriptor-based resolver, including for relative paths and dot components.
+ * Define the stable openat2 ABI here so musl builds need no kernel headers. */
+static int open_source(const char *path, int *canonical)
+{
+#if defined(__linux__) && defined(SYS_openat2)
+    struct {
+        uint64_t flags, mode, resolve;
+    } how        = {O_RDONLY, 0, 0x04}; /* RESOLVE_NO_SYMLINKS */
+    size_t start = 1, i;
+
+    if (path[0] == '/') {
+        for (i = 1; i <= HM_PATH_MAX; ++i) {
+            if (path[i] != '/' && path[i] != '\0') continue;
+            if (i == start || (i - start == 1 && path[start] == '.') ||
+                (i - start == 2 && path[start] == '.' && path[start + 1] == '.')) {
+                break;
+            }
+            if (path[i] == '\0') {
+                int fd = (int)syscall(SYS_openat2, AT_FDCWD, path, &how, sizeof(how));
+                if (fd >= 0) {
+                    *canonical = 1;
+                    return fd;
+                }
+                break;
+            }
+            start = i + 1;
+        }
+    }
+#else
+    (void)canonical;
+#endif
+    /* Symlinks, older kernels and syscall filters keep their existing behavior. */
+    return open(path, O_RDONLY);
+}
+
 /* Slurps a whole file in as few syscalls as the kernel allows: one open(),
  * read() until EOF, one close(). No stdio, no per-line allocation - the SIML
  * parser is then fed slices of this single buffer.
  *
  * `path` is a file name, or "-" for standard input. */
-long hm_read_all(const char *path, char *buf, size_t cap, int *source_fd)
+long hm_read_all(const char *path, char *buf, size_t cap, int *source_fd, int *canonical)
 {
     int    fd       = 0;
     int    close_fd = 0;
     size_t total    = 0;
 
     *source_fd = -1;
+    *canonical = 0;
 
     if (strcmp(path, "-") != 0) {
-        fd = open(path, O_RDONLY);
+        fd = open_source(path, canonical);
         if (fd < 0) {
             hm_err("hacman: %s: cannot open file\n", path);
             return -1;

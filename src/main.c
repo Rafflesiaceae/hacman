@@ -323,7 +323,7 @@ static int parse_args(int argc, char **argv, hm_opts *o)
 /* The scheduling decision - the whole point of the fast path. Returns 1 when
  * the project must be acted on now, 0 when its schedule says "not yet". */
 static int is_due(const hm_project *p, const hm_cache *c, long now, const hm_opts *o,
-                  long *wait_out)
+                  long *wait_out, int check_bin)
 {
     long elapsed;
 
@@ -331,7 +331,7 @@ static int is_due(const hm_project *p, const hm_cache *c, long now, const hm_opt
 
     /* A missing handoff program is never a useful cache hit. This especially
      * matters for relative bin paths stored in cache-owned sandbox workdirs. */
-    if (p->bin_cached && access(p->bin_path, X_OK) != 0) return 1;
+    if (check_bin && p->bin_cached && access(p->bin_path, X_OK) != 0) return 1;
 
     /* An embedded project's record has a stable path but an identity that
      * changes with the command, file paths, or file contents. Changed inputs
@@ -374,19 +374,9 @@ static void report_skip(const hm_project *p, const hm_opts *o, long wait)
     }
 }
 
-/* Last step of every path: flush what hacman had to say and, if the project
- * names a program, become it.
- *
- * Only a run that got as far as "the program is set up" execs: a failure would
- * hand over a program that may be missing or half-updated, and the inspection
- * modes are meant to report rather than to act. */
-static int finish(const hm_project *p, const hm_opts *o, int rc)
+/* Share the handoff between completed setup and the speculative cache hit. */
+static void exec_program(const hm_project *p, const hm_opts *o)
 {
-    hm_out_flush();
-
-    if (rc != HM_EXIT_OK || p->bin_path[0] == '\0') return rc;
-    if (o->plan || o->check_only || o->dry_run || o->adopt) return rc;
-
     /* FILE's argv slot becomes argv[0] for the program; the remaining arguments
      * are already NUL-terminated and need no copying. Keep this handoff on the
      * fast path: hacman's stdout uses hm_out, already flushed above, rather
@@ -394,6 +384,21 @@ static int finish(const hm_project *p, const hm_opts *o, int rc)
     o->prog_argv[0] = (char *)p->bin_path;
     hm_err_stream_end();
     execv(p->bin_path, o->prog_argv);
+    /* A failed cached handoff can fall back to setup. Keep the original FILE
+     * argument intact for that path and for a later handoff attempt. */
+    o->prog_argv[0] = (char *)o->file;
+}
+
+/* Only a completed setup can hand over the program, and inspection modes
+ * report instead of executing. Flush hacman's output before either outcome. */
+static int finish(const hm_project *p, const hm_opts *o, int rc)
+{
+    hm_out_flush();
+
+    if (rc != HM_EXIT_OK || p->bin_path[0] == '\0') return rc;
+    if (o->plan || o->check_only || o->dry_run || o->adopt) return rc;
+
+    exec_program(p, o);
 
     hm_err("hacman: cannot execute %s: %s\n", p->bin_path, strerror(errno));
     return 127;
@@ -518,7 +523,8 @@ int main(int argc, char **argv)
     hm_check_result   res;
     char              old_mark[HM_MARK_MAX + 1];
     long              len, now, wait = 0;
-    int               rc, changed, missing_bin, source_fd, lock_fd = -1;
+    int               rc, changed, missing_bin, source_fd, source_canonical, exec_check;
+    int               lock_fd = -1;
 
     rc = parse_args(argc, argv, &o);
     if (rc != 0) return (rc > 0) ? HM_EXIT_OK : HM_EXIT_USAGE;
@@ -528,7 +534,7 @@ int main(int argc, char **argv)
         return HM_EXIT_USAGE;
     }
 
-    len = hm_read_all(o.file, config_buf, sizeof(config_buf), &source_fd);
+    len = hm_read_all(o.file, config_buf, sizeof(config_buf), &source_fd, &source_canonical);
     if (len < 0) return HM_EXIT_USAGE;
 
     if (hm_config_parse(config_buf, (size_t)len, (strcmp(o.file, "-") != 0) ? o.file : "<stdin>",
@@ -553,7 +559,14 @@ int main(int argc, char **argv)
      * spellings of the same input agree without walking the path again.
      * Standard input has no path and retains the content-addressed fallback. */
     if (project.file_count > 0 && strcmp(o.file, "-") != 0) {
-        source_path = resolve_source_path(source_fd, o.file);
+        if (source_canonical) {
+            /* openat2 already checked every component of this absolute path.
+             * Its bounded spelling can be used directly as the cache key. */
+            strcpy(canonical_source_path, o.file);
+            source_path = canonical_source_path;
+        } else {
+            source_path = resolve_source_path(source_fd, o.file);
+        }
         close(source_fd);
         source_fd = -1;
         if (source_path == NULL) {
@@ -593,11 +606,29 @@ int main(int argc, char **argv)
 
     now = (long)time(NULL);
 
-    if (!is_due(p, &cache, now, &o, &wait)) {
-        report_skip(p, &o, wait);
-        /* Nothing done, nothing written - and straight on to the program,
-         * which is the common case for a shim. */
-        return finish(p, &o, HM_EXIT_OK);
+    /* On quiet real handoffs, exec itself proves the cached program exists
+     * and is executable. Avoid a separate access syscall on successful runs.
+     * Inspection and verbose modes still check first so their reports remain
+     * accurate, and the locked slow path always rechecks before doing work. */
+    exec_check = p->bin_cached && !o.verbose && !o.check_only && !o.dry_run && !o.adopt;
+    if (!is_due(p, &cache, now, &o, &wait, !exec_check)) {
+        if (exec_check) {
+            int exec_error;
+
+            hm_out_flush();
+            exec_program(p, &o);
+            exec_error = errno;
+            /* Repair precisely the cases that the previous access probe would
+             * have treated as missing. A bad format or missing interpreter
+             * must still report the exec error without rerunning setup. */
+            if (access(p->bin_path, X_OK) == 0) {
+                hm_err("hacman: cannot execute %s: %s\n", p->bin_path, strerror(exec_error));
+                return 127;
+            }
+        } else {
+            report_skip(p, &o, wait);
+            return finish(p, &o, HM_EXIT_OK);
+        }
     }
 
     /* Serialize only real slow-path work, leaving the overwhelmingly common
@@ -613,7 +644,7 @@ int main(int argc, char **argv)
         }
         now  = (long)time(NULL);
         wait = 0;
-        if (!is_due(p, &cache, now, &o, &wait)) {
+        if (!is_due(p, &cache, now, &o, &wait, 1)) {
             report_skip(p, &o, wait);
             return finish_locked(p, &o, lock_fd, HM_EXIT_OK);
         }

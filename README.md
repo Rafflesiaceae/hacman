@@ -69,9 +69,12 @@ Rules the fast path follows, and that changes to it must keep:
 - **No allocator on normal cached launches.** Buffers are in BSS or on the
   stack (see the `HM_*` limits in `src/hacman.h`). Optional embedded-file and
   sandbox-directory storage is initialized only for entries actually used,
-  leaving unused BSS pages unfaulted. On Linux, an embedded source's canonical
-  path comes from its already-open `/proc/self/fd` link; `realpath` remains a
-  fallback when procfs is unavailable.
+  leaving unused BSS pages unfaulted. On Linux, `openat2` can prove an absolute
+  source path is canonical during the initial open. Relative paths and symlink
+  aliases use the already-open `/proc/self/fd` link; `realpath` remains a
+  fallback when procfs is unavailable. Static builds combine code and constants
+  into one read/execute load segment, reducing mappings while keeping writable
+  data and the stack non-executable.
 - **One buffered pass per file.** The SIML input is read into one buffer and
   parsed straight out of it; the parser's line callback hands out slices.
   The cache record is one small file, never a table to scan. A complete record
@@ -85,7 +88,11 @@ Rules the fast path follows, and that changes to it must keep:
   formatter in `src/util.c`.
 - **Nothing eager.** Nothing happens at all unless the schedule says the
   project is due: no request, no command, no fork. Nothing is written unless
-  the work that followed actually succeeded.
+  the work that followed actually succeeded. A quiet cached handoff uses
+  `exec` itself to check the program, avoiding a separate `access` syscall.
+  Failed handoffs still repair a missing or nonexecutable cached binary under
+  the update lock; other execution errors do not rerun setup. Inspection and
+  verbose modes retain their explicit executable check.
 - **Sandboxed setup.** Commands and install scripts can read the host but may
   only create, modify, or remove files inside their cache-owned `.work`
   directory. Host-maintenance projects must explicitly opt out.

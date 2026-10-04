@@ -610,6 +610,17 @@ files:
             "embedded program receives option-looking arguments", "arg:--help"
         )
         self.contains("embedded program preserves argument boundaries", "arg:two words")
+        self.expect_hacman(
+            "cached embedded handoff forwards arguments",
+            0,
+            "--cache",
+            self.temp / "cache-embedded-bin",
+            embedded_bin,
+            "--help",
+            "two words",
+        )
+        self.contains("cached handoff preserves option-looking arguments", "arg:--help")
+        self.contains("cached handoff preserves argument boundaries", "arg:two words")
 
         embedded_cached = self.temp / "embedded-cached.siml"
         self.write(
@@ -655,6 +666,8 @@ files:
             "file symlink": file_alias,
             "directory symlink": directory_alias / embedded_cached.name,
             "parent component": dot_parent / ".." / embedded_cached.name,
+            "dot component": f"{self.temp}/./{embedded_cached.name}",
+            "repeated separator": f"{self.temp}//{embedded_cached.name}",
         }
         for label, alias in aliases.items():
             self.expect_hacman(
@@ -699,6 +712,42 @@ files:
             "missing embedded executable rebuilt once",
             self.line_count(workdir / "build.log") == 2,
         )
+
+        # A failed speculative exec must repair missing execute permission,
+        # but bad program formats and absent interpreters must stay exec errors.
+        runner = workdir / "runner"
+        runner.chmod(0o644)
+        self.expect_hacman(
+            "nonexecutable cached program triggers setup",
+            0,
+            "--cache",
+            cached_dir,
+            embedded_cached,
+        )
+        self.contains("nonexecutable cached program was repaired", "cached-v1")
+        self.check(
+            "nonexecutable cached program rebuilt once",
+            self.line_count(workdir / "build.log") == 3,
+        )
+        saved_runner = runner.read_bytes()
+        for label, content in (
+            ("invalid format", b"this is not an executable\n"),
+            ("missing interpreter", b"#!/no-such-hacman-interpreter\n"),
+        ):
+            runner.write_bytes(content)
+            self.expect_hacman(
+                f"cached program with {label} reports exec failure",
+                127,
+                "--cache",
+                cached_dir,
+                embedded_cached,
+            )
+            self.contains(f"cached {label} diagnostic", "cannot execute")
+            self.check(
+                f"cached {label} does not rerun setup",
+                self.line_count(workdir / "build.log") == 3,
+            )
+        runner.write_bytes(saved_runner)
 
         # The complete-record shortcut must still accept an EOF-terminated
         # final line, which requires continuing after the first short read.

@@ -42,6 +42,10 @@ if get_option('static')
   # the single largest startup win. build.sh selects a musl toolchain for this.
   if cc.has_link_argument('-static')
     link_args += '-static'
+    # Fewer ELF load segments reduce mapping and fault work on each exec.
+    # Constants share the read/execute segment; writable data and the stack
+    # remain non-executable. Dynamic builds retain their usual segment layout.
+    link_args += cc.get_supported_link_arguments('-Wl,-z,noseparate-code')
   else
     warning('compiler does not support -static; building a dynamic binary')
   endif

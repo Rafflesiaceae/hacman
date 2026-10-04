@@ -129,8 +129,9 @@ void hm_hash_hex(const char *data, size_t len, char *out17);
 /* Reads a whole file (or standard input when path is "-") into `buf`.
  * On success, *source_fd is the named file's still-open descriptor, or -1 for
  * stdin. The caller closes it after resolving any source-path identity.
+ * *canonical is set when opening also proved that path is already canonical.
  * Returns the byte count, or -1 on error (message already printed). */
-long hm_read_all(const char *path, char *buf, size_t cap, int *source_fd);
+long hm_read_all(const char *path, char *buf, size_t cap, int *source_fd, int *canonical);
 
 /* --- config.c ----------------------------------------------------------- */
 
