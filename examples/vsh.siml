@@ -1,0 +1,1657 @@
+#!/usr/bin/env hacman
+# Interactive Varlink shell.
+# Run:
+#   ./vsh.siml /run/path/to/varlink.sock
+#   ./vsh.siml raf@server.example.com:/run/path/to/varlink.sock
+name: vsh
+command: meson setup build && meson compile -C build
+bin-path: build/vsh
+files:
+  main.c: |
+    #define _POSIX_C_SOURCE 200809L
+
+    #include <ctype.h>
+    #include <errno.h>
+    #include <signal.h>
+    #include <stdbool.h>
+    #include <stddef.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <sys/socket.h>
+    #include <sys/stat.h>
+    #include <sys/types.h>
+    #include <sys/un.h>
+    #include <sys/wait.h>
+    #include <time.h>
+    #include <unistd.h>
+
+    #include <yyjson.h>
+
+    typedef struct {
+        const char *path;
+        int fd;
+        char *rx;
+        size_t rx_len;
+        size_t rx_cap;
+        bool color;
+        bool interactive;
+
+        bool remote;
+        char *connect_path;
+        char *ssh_target;
+        char *ssh_port;
+        char *remote_path;
+        char *forward_dir;
+        char *forward_path;
+        pid_t ssh_pid;
+    } Shell;
+
+    #define RST "\x1b[0m"
+    #define BOLD "\x1b[1m"
+    #define DIM "\x1b[2m"
+    #define RED "\x1b[31m"
+    #define GREEN "\x1b[32m"
+    #define YELLOW "\x1b[33m"
+    #define BLUE "\x1b[34m"
+    #define MAGENTA "\x1b[35m"
+    #define CYAN "\x1b[36m"
+    #define BRIGHT_BLACK "\x1b[90m"
+    #define BRIGHT_RED "\x1b[91m"
+    #define BRIGHT_GREEN "\x1b[92m"
+    #define BRIGHT_YELLOW "\x1b[93m"
+    #define BRIGHT_BLUE "\x1b[94m"
+    #define BRIGHT_MAGENTA "\x1b[95m"
+    #define BRIGHT_CYAN "\x1b[96m"
+    #define BRIGHT_WHITE "\x1b[97m"
+
+    #define C(sh, s) ((sh)->color ? (s) : "")
+
+    static char *dup_range(const char *a, const char *b)
+    {
+        size_t n = (size_t)(b - a);
+        char *s = malloc(n + 1);
+        if (!s)
+            return NULL;
+        memcpy(s, a, n);
+        s[n] = '\0';
+        return s;
+    }
+
+    static bool valid_port(const char *s)
+    {
+        if (!s || !*s)
+            return false;
+        unsigned long n = 0;
+        for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+            if (!isdigit(*p))
+                return false;
+            n = n * 10 + (*p - '0');
+            if (n > 65535)
+                return false;
+        }
+        return n > 0;
+    }
+
+    static const char *socket_path_body(const char *path)
+    {
+        return strncmp(path, "unix:", 5) == 0 ? path + 5 : path;
+    }
+
+    static int parse_remote_url(Shell *sh, const char *body)
+    {
+        const char *slash = strchr(body, '/');
+        if (!slash || slash == body || slash[0] != '/')
+            return -1;
+
+        char *authority = dup_range(body, slash);
+        if (!authority)
+            return -1;
+
+        const char *host = strrchr(authority, '@');
+        host = host ? host + 1 : authority;
+        const char *port_sep = NULL;
+
+        if (*host == '[') {
+            const char *rb = strchr(host, ']');
+            if (!rb) {
+                free(authority);
+                return -1;
+            }
+            if (rb[1] == ':')
+                port_sep = rb + 1;
+            else if (rb[1] != '\0') {
+                free(authority);
+                return -1;
+            }
+        } else {
+            const char *first = strchr(host, ':');
+            const char *last = strrchr(host, ':');
+            if (first && first == last)
+                port_sep = last;
+        }
+
+        if (port_sep) {
+            if (!valid_port(port_sep + 1)) {
+                free(authority);
+                return -1;
+            }
+            sh->ssh_port = strdup(port_sep + 1);
+            sh->ssh_target = dup_range(authority, port_sep);
+        } else {
+            sh->ssh_target = strdup(authority);
+        }
+
+        sh->remote_path = strdup(slash);
+        free(authority);
+
+        if (!sh->ssh_target || !sh->remote_path ||
+            (port_sep && !sh->ssh_port))
+            return -1;
+
+        return 0;
+    }
+
+    static int parse_endpoint(Shell *sh, const char *spec)
+    {
+        static const char *schemes[] = {
+            "ssh://",
+            "scp://",
+            "sftp://",
+        };
+
+        for (size_t i = 0; i < sizeof(schemes) / sizeof(schemes[0]); i++) {
+            size_t n = strlen(schemes[i]);
+            if (!strncmp(spec, schemes[i], n)) {
+                sh->remote = true;
+                if (parse_remote_url(sh, spec + n) < 0)
+                    return -1;
+                return 0;
+            }
+        }
+
+        if (strncmp(spec, "unix:", 5) != 0) {
+            const char *sep = strstr(spec, ":/");
+            if (sep && sep != spec && !memchr(spec, '/', (size_t)(sep - spec))) {
+                sh->remote = true;
+                sh->ssh_target = dup_range(spec, sep);
+                sh->remote_path = strdup(sep + 1);
+                if (!sh->ssh_target || !sh->remote_path)
+                    return -1;
+                return 0;
+            }
+        }
+
+        sh->connect_path = strdup(socket_path_body(spec));
+        return sh->connect_path ? 0 : -1;
+    }
+
+    static void disconnect_shell(Shell *sh)
+    {
+        if (sh->fd >= 0)
+            close(sh->fd);
+        sh->fd = -1;
+        sh->rx_len = 0;
+    }
+
+    static bool ssh_tunnel_alive(Shell *sh)
+    {
+        if (sh->ssh_pid <= 0)
+            return false;
+
+        int status = 0;
+        pid_t r = waitpid(sh->ssh_pid, &status, WNOHANG);
+        if (r == 0)
+            return true;
+
+        if (r == sh->ssh_pid || (r < 0 && errno == ECHILD))
+            sh->ssh_pid = -1;
+
+        return false;
+    }
+
+    static void stop_ssh_tunnel(Shell *sh)
+    {
+        if (sh->ssh_pid > 0) {
+            if (ssh_tunnel_alive(sh))
+                kill(sh->ssh_pid, SIGTERM);
+
+            while (sh->ssh_pid > 0) {
+                int status;
+                pid_t r = waitpid(sh->ssh_pid, &status, 0);
+                if (r == sh->ssh_pid || (r < 0 && errno == ECHILD)) {
+                    sh->ssh_pid = -1;
+                    break;
+                }
+                if (r < 0 && errno != EINTR)
+                    break;
+            }
+        }
+
+        if (sh->forward_path)
+            unlink(sh->forward_path);
+        if (sh->forward_dir)
+            rmdir(sh->forward_dir);
+    }
+
+    static void free_endpoint(Shell *sh)
+    {
+        stop_ssh_tunnel(sh);
+        free(sh->connect_path);
+        free(sh->ssh_target);
+        free(sh->ssh_port);
+        free(sh->remote_path);
+        free(sh->forward_path);
+        free(sh->forward_dir);
+    }
+
+    static int make_forward_path(Shell *sh)
+    {
+        if (sh->forward_path)
+            return 0;
+
+        char tmpl[] = "/tmp/vsh-XXXXXX";
+        char *dir = mkdtemp(tmpl);
+        if (!dir) {
+            fprintf(stderr, "%serror:%s mkdtemp: %s\n",
+                    C(sh, BRIGHT_RED), C(sh, RST), strerror(errno));
+            return -1;
+        }
+
+        sh->forward_dir = strdup(dir);
+        if (!sh->forward_dir) {
+            rmdir(dir);
+            return -1;
+        }
+
+        size_t n = strlen(dir) + sizeof("/socket");
+        sh->forward_path = malloc(n);
+        if (!sh->forward_path) {
+            rmdir(dir);
+            free(sh->forward_dir);
+            sh->forward_dir = NULL;
+            return -1;
+        }
+
+        snprintf(sh->forward_path, n, "%s/socket", dir);
+        return 0;
+    }
+
+    static int start_ssh_tunnel(Shell *sh)
+    {
+        if (!sh->remote)
+            return 0;
+
+        if (ssh_tunnel_alive(sh))
+            return 0;
+
+        if (make_forward_path(sh) < 0)
+            return -1;
+
+        unlink(sh->forward_path);
+
+        size_t n = strlen(sh->forward_path) + 1 + strlen(sh->remote_path) + 1;
+        char *forward = malloc(n);
+        if (!forward)
+            return -1;
+        snprintf(forward, n, "%s:%s", sh->forward_path, sh->remote_path);
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            fprintf(stderr, "%serror:%s fork ssh: %s\n",
+                    C(sh, BRIGHT_RED), C(sh, RST), strerror(errno));
+            free(forward);
+            return -1;
+        }
+
+        if (pid == 0) {
+            signal(SIGPIPE, SIG_DFL);
+            if (sh->ssh_port) {
+                execlp("ssh", "ssh",
+                       "-N", "-T",
+                       "-o", "ExitOnForwardFailure=yes",
+                       "-o", "StreamLocalBindUnlink=yes",
+                       "-p", sh->ssh_port,
+                       "-L", forward,
+                       sh->ssh_target,
+                       (char *)NULL);
+            } else {
+                execlp("ssh", "ssh",
+                       "-N", "-T",
+                       "-o", "ExitOnForwardFailure=yes",
+                       "-o", "StreamLocalBindUnlink=yes",
+                       "-L", forward,
+                       sh->ssh_target,
+                       (char *)NULL);
+            }
+
+            fprintf(stderr, "vsh: exec ssh: %s\n", strerror(errno));
+            _exit(127);
+        }
+
+        free(forward);
+        sh->ssh_pid = pid;
+
+        struct timespec delay = {
+            .tv_sec = 0,
+            .tv_nsec = 20 * 1000 * 1000,
+        };
+
+        for (;;) {
+            struct stat st;
+            if (lstat(sh->forward_path, &st) == 0 && S_ISSOCK(st.st_mode))
+                return 0;
+
+            if (!ssh_tunnel_alive(sh)) {
+                fprintf(stderr,
+                        "%serror:%s ssh tunnel to %s exited before forwarding became ready\n",
+                        C(sh, BRIGHT_RED), C(sh, RST), sh->ssh_target);
+                return -1;
+            }
+
+            nanosleep(&delay, NULL);
+        }
+    }
+
+    static int connect_unix(Shell *sh, const char *path)
+    {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) {
+            fprintf(stderr, "%serror:%s socket: %s\n",
+                    C(sh, BRIGHT_RED), C(sh, RST), strerror(errno));
+            return -1;
+        }
+
+        socklen_t len;
+
+        if (path[0] == '@') {
+    #ifdef __linux__
+            size_t n = strlen(path + 1);
+            if (n + 1 > sizeof(addr.sun_path)) {
+                fprintf(stderr, "%serror:%s abstract socket name is too long\n",
+                        C(sh, BRIGHT_RED), C(sh, RST));
+                close(fd);
+                return -1;
+            }
+            addr.sun_path[0] = '\0';
+            memcpy(addr.sun_path + 1, path + 1, n);
+            len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+    #else
+            fprintf(stderr, "%serror:%s @abstract sockets are Linux-only\n",
+                    C(sh, BRIGHT_RED), C(sh, RST));
+            close(fd);
+            return -1;
+    #endif
+        } else {
+            size_t n = strlen(path);
+            if (n >= sizeof(addr.sun_path)) {
+                fprintf(stderr, "%serror:%s socket path is too long\n",
+                        C(sh, BRIGHT_RED), C(sh, RST));
+                close(fd);
+                return -1;
+            }
+            memcpy(addr.sun_path, path, n + 1);
+            len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n + 1);
+        }
+
+        if (connect(fd, (struct sockaddr *)&addr, len) < 0) {
+            fprintf(stderr, "%serror:%s connect %s: %s\n",
+                    C(sh, BRIGHT_RED), C(sh, RST), sh->path, strerror(errno));
+            close(fd);
+            return -1;
+        }
+
+        sh->fd = fd;
+        sh->rx_len = 0;
+        return 0;
+    }
+
+    static int connect_shell(Shell *sh)
+    {
+        if (sh->fd >= 0)
+            return 0;
+
+        if (sh->remote) {
+            if (start_ssh_tunnel(sh) < 0)
+                return -1;
+            return connect_unix(sh, sh->forward_path);
+        }
+
+        return connect_unix(sh, sh->connect_path);
+    }
+
+    static int write_all(Shell *sh, const void *buf, size_t len)
+    {
+        const unsigned char *p = buf;
+
+        while (len) {
+            ssize_t n = send(sh->fd, p, len, 0);
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                fprintf(stderr, "%serror:%s send: %s\n",
+                        C(sh, BRIGHT_RED), C(sh, RST), strerror(errno));
+                disconnect_shell(sh);
+                return -1;
+            }
+            p += (size_t)n;
+            len -= (size_t)n;
+        }
+
+        return 0;
+    }
+
+    static int rx_reserve(Shell *sh, size_t need)
+    {
+        if (need <= sh->rx_cap)
+            return 0;
+
+        size_t cap = sh->rx_cap ? sh->rx_cap : 4096;
+        while (cap < need)
+            cap *= 2;
+
+        char *p = realloc(sh->rx, cap);
+        if (!p) {
+            fprintf(stderr, "%serror:%s out of memory\n",
+                    C(sh, BRIGHT_RED), C(sh, RST));
+            return -1;
+        }
+
+        sh->rx = p;
+        sh->rx_cap = cap;
+        return 0;
+    }
+
+    static int recv_message(Shell *sh, char **out, size_t *out_len)
+    {
+        for (;;) {
+            void *zero = memchr(sh->rx, '\0', sh->rx_len);
+            if (zero) {
+                size_t n = (size_t)((char *)zero - sh->rx);
+                char *msg = malloc(n + 1);
+                if (!msg) {
+                    fprintf(stderr, "%serror:%s out of memory\n",
+                            C(sh, BRIGHT_RED), C(sh, RST));
+                    return -1;
+                }
+
+                memcpy(msg, sh->rx, n);
+                msg[n] = '\0';
+
+                size_t consumed = n + 1;
+                size_t remain = sh->rx_len - consumed;
+                memmove(sh->rx, sh->rx + consumed, remain);
+                sh->rx_len = remain;
+
+                *out = msg;
+                *out_len = n;
+                return 1;
+            }
+
+            if (rx_reserve(sh, sh->rx_len + 4096) < 0)
+                return -1;
+
+            ssize_t n = recv(sh->fd, sh->rx + sh->rx_len,
+                             sh->rx_cap - sh->rx_len, 0);
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                fprintf(stderr, "%serror:%s recv: %s\n",
+                        C(sh, BRIGHT_RED), C(sh, RST), strerror(errno));
+                disconnect_shell(sh);
+                return -1;
+            }
+
+            if (n == 0) {
+                fprintf(stderr, "%serror:%s server closed the connection\n",
+                        C(sh, BRIGHT_RED), C(sh, RST));
+                disconnect_shell(sh);
+                return 0;
+            }
+
+            sh->rx_len += (size_t)n;
+        }
+    }
+
+    static yyjson_doc *recv_reply(Shell *sh)
+    {
+        char *msg = NULL;
+        size_t len = 0;
+
+        if (recv_message(sh, &msg, &len) <= 0)
+            return NULL;
+
+        yyjson_doc *doc = yyjson_read(msg, len, 0);
+        if (!doc) {
+            fprintf(stderr, "%serror:%s server returned invalid JSON:\n%s\n",
+                    C(sh, BRIGHT_RED), C(sh, RST), msg);
+            free(msg);
+            return NULL;
+        }
+
+        free(msg);
+        return doc;
+    }
+
+    static yyjson_doc *parse_params(Shell *sh, const char *json)
+    {
+        if (!json || !*json)
+            json = "{}";
+
+        yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+        if (!doc) {
+            fprintf(stderr, "%serror:%s invalid JSON parameters\n",
+                    C(sh, BRIGHT_RED), C(sh, RST));
+            return NULL;
+        }
+
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        if (!yyjson_is_obj(root)) {
+            fprintf(stderr, "%serror:%s parameters must be a JSON object\n",
+                    C(sh, BRIGHT_RED), C(sh, RST));
+            yyjson_doc_free(doc);
+            return NULL;
+        }
+
+        return doc;
+    }
+
+    static int send_call(Shell *sh, const char *method, const char *params_json,
+                         bool more, bool oneway)
+    {
+        yyjson_doc *params_doc = parse_params(sh, params_json);
+        if (!params_doc)
+            return -1;
+
+        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+        if (!doc) {
+            yyjson_doc_free(params_doc);
+            return -1;
+        }
+
+        yyjson_mut_val *root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+
+        yyjson_mut_obj_add_strcpy(doc, root, "method", method);
+
+        yyjson_mut_val *params =
+            yyjson_val_mut_copy(doc, yyjson_doc_get_root(params_doc));
+        yyjson_mut_obj_add_val(doc, root, "parameters", params);
+
+        if (more)
+            yyjson_mut_obj_add_bool(doc, root, "more", true);
+        if (oneway)
+            yyjson_mut_obj_add_bool(doc, root, "oneway", true);
+
+        char *wire = yyjson_mut_write(doc, 0, NULL);
+
+        yyjson_doc_free(params_doc);
+        yyjson_mut_doc_free(doc);
+
+        if (!wire) {
+            fprintf(stderr, "%serror:%s failed to encode JSON request\n",
+                    C(sh, BRIGHT_RED), C(sh, RST));
+            return -1;
+        }
+
+        if (connect_shell(sh) < 0) {
+            free(wire);
+            return -1;
+        }
+
+        size_t len = strlen(wire);
+        int rc = write_all(sh, wire, len);
+        free(wire);
+
+        if (rc == 0) {
+            const char nul = '\0';
+            rc = write_all(sh, &nul, 1);
+        }
+
+        return rc;
+    }
+
+    static bool reply_continues(yyjson_doc *doc)
+    {
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        yyjson_val *v = yyjson_is_obj(root) ? yyjson_obj_get(root, "continues") : NULL;
+        return v && yyjson_is_bool(v) && yyjson_get_bool(v);
+    }
+
+    static void print_colored_json_text(Shell *sh, const char *s)
+    {
+        if (!sh->color) {
+            fputs(s, stdout);
+            return;
+        }
+
+        const char *p = s;
+        while (*p) {
+            if (*p == '"') {
+                const char *start = p++;
+                bool esc = false;
+
+                while (*p) {
+                    if (!esc && *p == '"') {
+                        p++;
+                        break;
+                    }
+                    if (!esc && *p == '\\')
+                        esc = true;
+                    else
+                        esc = false;
+                    p++;
+                }
+
+                const char *q = p;
+                while (*q && isspace((unsigned char)*q))
+                    q++;
+
+                fputs(*q == ':' ? CYAN : GREEN, stdout);
+                fwrite(start, 1, (size_t)(p - start), stdout);
+                fputs(RST, stdout);
+                continue;
+            }
+
+            if (*p == '-' || isdigit((unsigned char)*p)) {
+                const char *start = p++;
+                while (*p && (isdigit((unsigned char)*p) || *p == '.' ||
+                              *p == 'e' || *p == 'E' || *p == '+' || *p == '-'))
+                    p++;
+                fputs(YELLOW, stdout);
+                fwrite(start, 1, (size_t)(p - start), stdout);
+                fputs(RST, stdout);
+                continue;
+            }
+
+            if (!strncmp(p, "true", 4) || !strncmp(p, "false", 5)) {
+                size_t n = *p == 't' ? 4 : 5;
+                fputs(MAGENTA, stdout);
+                fwrite(p, 1, n, stdout);
+                fputs(RST, stdout);
+                p += n;
+                continue;
+            }
+
+            if (!strncmp(p, "null", 4)) {
+                fputs(BRIGHT_BLACK, stdout);
+                fwrite(p, 1, 4, stdout);
+                fputs(RST, stdout);
+                p += 4;
+                continue;
+            }
+
+            fputc(*p++, stdout);
+        }
+    }
+
+    static void print_json_value(Shell *sh, yyjson_val *val)
+    {
+        char *s = yyjson_val_write(val, YYJSON_WRITE_PRETTY, NULL);
+        if (!s) {
+            puts("<json encoding failed>");
+            return;
+        }
+
+        print_colored_json_text(sh, s);
+        fputc('\n', stdout);
+        free(s);
+    }
+
+    static bool reply_is_error(Shell *sh, yyjson_doc *doc, bool print)
+    {
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        if (!yyjson_is_obj(root)) {
+            if (print)
+                fprintf(stderr, "%serror:%s reply root is not an object\n",
+                        C(sh, BRIGHT_RED), C(sh, RST));
+            return true;
+        }
+
+        yyjson_val *err = yyjson_obj_get(root, "error");
+        if (!err || !yyjson_is_str(err))
+            return false;
+
+        if (print) {
+            printf("%s%s%s", C(sh, BRIGHT_RED), yyjson_get_str(err), C(sh, RST));
+            yyjson_val *params = yyjson_obj_get(root, "parameters");
+            if (params) {
+                printf("%s\n", C(sh, RST));
+                print_json_value(sh, params);
+            } else {
+                putchar('\n');
+            }
+        }
+
+        return true;
+    }
+
+    static void print_reply(Shell *sh, yyjson_doc *doc)
+    {
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        if (!yyjson_is_obj(root)) {
+            print_json_value(sh, root);
+            return;
+        }
+
+        if (reply_is_error(sh, doc, true))
+            return;
+
+        yyjson_val *params = yyjson_obj_get(root, "parameters");
+        if (params)
+            print_json_value(sh, params);
+        else
+            printf("%s(ok)%s\n", C(sh, BRIGHT_BLACK), C(sh, RST));
+    }
+
+    static int run_call(Shell *sh, const char *method, const char *params,
+                        bool more, bool oneway)
+    {
+        if (send_call(sh, method, params, more, oneway) < 0)
+            return -1;
+
+        if (oneway) {
+            printf("%s(sent; no reply requested)%s\n",
+                   C(sh, BRIGHT_BLACK), C(sh, RST));
+            return 0;
+        }
+
+        unsigned reply_no = 0;
+
+        for (;;) {
+            yyjson_doc *doc = recv_reply(sh);
+            if (!doc)
+                return -1;
+
+            reply_no++;
+            bool cont = reply_continues(doc);
+
+            if (reply_no > 1 || cont)
+                printf("%sreply %u%s%s\n",
+                       C(sh, BRIGHT_BLACK), reply_no, cont ? " +" : "",
+                       C(sh, RST));
+
+            print_reply(sh, doc);
+            yyjson_doc_free(doc);
+
+            if (!cont)
+                break;
+        }
+
+        return 0;
+    }
+
+    static yyjson_doc *capture_call(Shell *sh, const char *method,
+                                    const char *params)
+    {
+        if (send_call(sh, method, params, false, false) < 0)
+            return NULL;
+
+        yyjson_doc *doc = recv_reply(sh);
+        if (!doc)
+            return NULL;
+
+        if (reply_is_error(sh, doc, true)) {
+            yyjson_doc_free(doc);
+            return NULL;
+        }
+
+        if (reply_continues(doc)) {
+            fprintf(stderr, "%serror:%s introspection call unexpectedly continued\n",
+                    C(sh, BRIGHT_RED), C(sh, RST));
+            yyjson_doc_free(doc);
+            disconnect_shell(sh);
+            return NULL;
+        }
+
+        return doc;
+    }
+
+    static char *json_interface_param(const char *interface)
+    {
+        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val *root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+        yyjson_mut_obj_add_strcpy(doc, root, "interface", interface);
+        char *s = yyjson_mut_write(doc, 0, NULL);
+        yyjson_mut_doc_free(doc);
+        return s;
+    }
+
+    static yyjson_doc *get_info(Shell *sh)
+    {
+        return capture_call(sh, "org.varlink.service.GetInfo", "{}");
+    }
+
+    static yyjson_doc *get_interface_description(Shell *sh, const char *interface)
+    {
+        char *params = json_interface_param(interface);
+        if (!params)
+            return NULL;
+
+        yyjson_doc *doc = capture_call(
+            sh, "org.varlink.service.GetInterfaceDescription", params);
+        free(params);
+        return doc;
+    }
+
+    static yyjson_val *reply_parameters(yyjson_doc *doc)
+    {
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        return yyjson_is_obj(root) ? yyjson_obj_get(root, "parameters") : NULL;
+    }
+
+    static const char *description_from_reply(yyjson_doc *doc)
+    {
+        yyjson_val *params = reply_parameters(doc);
+        yyjson_val *desc =
+            yyjson_is_obj(params) ? yyjson_obj_get(params, "description") : NULL;
+        return yyjson_is_str(desc) ? yyjson_get_str(desc) : NULL;
+    }
+
+    static void print_service_info(Shell *sh, bool compact)
+    {
+        yyjson_doc *doc = get_info(sh);
+        if (!doc)
+            return;
+
+        yyjson_val *p = reply_parameters(doc);
+        if (!yyjson_is_obj(p)) {
+            yyjson_doc_free(doc);
+            return;
+        }
+
+        yyjson_val *vendor = yyjson_obj_get(p, "vendor");
+        yyjson_val *product = yyjson_obj_get(p, "product");
+        yyjson_val *version = yyjson_obj_get(p, "version");
+        yyjson_val *url = yyjson_obj_get(p, "url");
+        yyjson_val *interfaces = yyjson_obj_get(p, "interfaces");
+
+        const char *v_vendor = yyjson_is_str(vendor) ? yyjson_get_str(vendor) : "?";
+        const char *v_product = yyjson_is_str(product) ? yyjson_get_str(product) : "?";
+        const char *v_version = yyjson_is_str(version) ? yyjson_get_str(version) : "?";
+        const char *v_url = yyjson_is_str(url) ? yyjson_get_str(url) : "";
+        size_t count = yyjson_is_arr(interfaces) ? yyjson_arr_size(interfaces) : 0;
+
+        if (compact) {
+            printf("%s%s%s %s%s%s  %s%zu interfaces%s\n",
+                   C(sh, BRIGHT_CYAN), v_product, C(sh, RST),
+                   C(sh, BRIGHT_BLACK), v_version, C(sh, RST),
+                   C(sh, BRIGHT_BLACK), count, C(sh, RST));
+        } else {
+            printf("%sservice%s\n", C(sh, BOLD), C(sh, RST));
+            printf("  %-11s %s\n", "vendor", v_vendor);
+            printf("  %-11s %s\n", "product", v_product);
+            printf("  %-11s %s\n", "version", v_version);
+            if (*v_url)
+                printf("  %-11s %s\n", "url", v_url);
+            printf("  %-11s %zu\n", "interfaces", count);
+        }
+
+        yyjson_doc_free(doc);
+    }
+
+    static void list_interfaces(Shell *sh)
+    {
+        yyjson_doc *doc = get_info(sh);
+        if (!doc)
+            return;
+
+        yyjson_val *p = reply_parameters(doc);
+        yyjson_val *arr =
+            yyjson_is_obj(p) ? yyjson_obj_get(p, "interfaces") : NULL;
+
+        if (!yyjson_is_arr(arr)) {
+            fprintf(stderr, "%serror:%s GetInfo returned no interfaces array\n",
+                    C(sh, BRIGHT_RED), C(sh, RST));
+            yyjson_doc_free(doc);
+            return;
+        }
+
+        size_t idx, max;
+        yyjson_val *val;
+
+        yyjson_arr_foreach(arr, idx, max, val) {
+            if (yyjson_is_str(val))
+                printf("  %s%s%s\n",
+                       C(sh, BRIGHT_CYAN), yyjson_get_str(val), C(sh, RST));
+        }
+
+        yyjson_doc_free(doc);
+    }
+
+    static const char *skip_hspace(const char *p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\r')
+            p++;
+        return p;
+    }
+
+    static const char *line_end(const char *p)
+    {
+        const char *e = strchr(p, '\n');
+        return e ? e : p + strlen(p);
+    }
+
+    static bool line_has_keyword(const char *line, const char *kw,
+                                 const char **after)
+    {
+        line = skip_hspace(line);
+        size_t n = strlen(kw);
+
+        if (strncmp(line, kw, n) != 0)
+            return false;
+
+        if (line[n] && !isspace((unsigned char)line[n]))
+            return false;
+
+        if (after)
+            *after = skip_hspace(line + n);
+        return true;
+    }
+
+    static const char *match_paren(const char *open)
+    {
+        if (!open || *open != '(')
+            return NULL;
+
+        int depth = 0;
+
+        for (const char *p = open; *p; p++) {
+            if (*p == '(')
+                depth++;
+            else if (*p == ')') {
+                depth--;
+                if (depth == 0)
+                    return p;
+            }
+        }
+
+        return NULL;
+    }
+
+
+    static char *compact_range(const char *a, const char *b)
+    {
+        while (a < b && isspace((unsigned char)*a))
+            a++;
+        while (b > a && isspace((unsigned char)b[-1]))
+            b--;
+
+        size_t cap = (size_t)(b - a) + 1;
+        char *out = malloc(cap);
+        if (!out)
+            return NULL;
+
+        size_t j = 0;
+        bool pending_space = false;
+
+        for (const char *p = a; p < b; p++) {
+            if (isspace((unsigned char)*p)) {
+                pending_space = true;
+                continue;
+            }
+
+            if (pending_space && j)
+                out[j++] = ' ';
+            pending_space = false;
+            out[j++] = *p;
+        }
+
+        out[j] = '\0';
+        return out;
+    }
+
+    static void print_field(Shell *sh, const char *a, const char *b)
+    {
+        char *field = compact_range(a, b);
+        if (!field || !*field) {
+            free(field);
+            return;
+        }
+
+        int par = 0;
+        int square = 0;
+        char *colon = NULL;
+
+        for (char *p = field; *p; p++) {
+            if (*p == '(')
+                par++;
+            else if (*p == ')')
+                par--;
+            else if (*p == '[')
+                square++;
+            else if (*p == ']')
+                square--;
+            else if (*p == ':' && par == 0 && square == 0) {
+                colon = p;
+                break;
+            }
+        }
+
+        if (!colon) {
+            printf("      %s%s%s\n",
+                   C(sh, BRIGHT_MAGENTA), field, C(sh, RST));
+            free(field);
+            return;
+        }
+
+        *colon = '\0';
+        char *name = field;
+        char *type = colon + 1;
+
+        while (*type && isspace((unsigned char)*type))
+            type++;
+
+        size_t name_len = strlen(name);
+        while (name_len && isspace((unsigned char)name[name_len - 1]))
+            name[--name_len] = '\0';
+
+        printf("      %s%-18s%s %s%s%s\n",
+               C(sh, CYAN), name, C(sh, RST),
+               C(sh, YELLOW), type, C(sh, RST));
+        free(field);
+    }
+
+    static void print_fields(Shell *sh, const char *a, const char *b)
+    {
+        const char *p = a;
+        while (p < b && isspace((unsigned char)*p))
+            p++;
+
+        if (p == b) {
+            printf("      %s(none)%s\n", C(sh, BRIGHT_BLACK), C(sh, RST));
+            return;
+        }
+
+        int par = 0;
+        int square = 0;
+        const char *start = a;
+
+        for (p = a; p <= b; p++) {
+            bool at_end = p == b;
+            char ch = at_end ? ',' : *p;
+
+            if (!at_end) {
+                if (ch == '(')
+                    par++;
+                else if (ch == ')')
+                    par--;
+                else if (ch == '[')
+                    square++;
+                else if (ch == ']')
+                    square--;
+            }
+
+            if ((at_end || ch == ',') && par == 0 && square == 0) {
+                print_field(sh, start, p);
+                start = p + 1;
+            }
+        }
+    }
+
+    static const char *find_arrow(const char *p)
+    {
+        for (; *p; p++) {
+            if (p[0] == '-' && p[1] == '>')
+                return p;
+            if (*p == '\n') {
+                const char *q = skip_hspace(p + 1);
+                if (!strncmp(q, "method ", 7) ||
+                    !strncmp(q, "type ", 5) ||
+                    !strncmp(q, "error ", 6) ||
+                    !strncmp(q, "interface ", 10))
+                    return NULL;
+            }
+        }
+        return NULL;
+    }
+
+    static const char *print_method_decl(Shell *sh, const char *start)
+    {
+        const char *after = NULL;
+        if (!line_has_keyword(start, "method", &after))
+            return NULL;
+
+        const char *in_open = strchr(after, '(');
+        if (!in_open)
+            return NULL;
+
+        const char *in_close = match_paren(in_open);
+        if (!in_close)
+            return NULL;
+
+        const char *arrow = find_arrow(in_close + 1);
+        if (!arrow)
+            return NULL;
+
+        const char *out_open = strchr(arrow + 2, '(');
+        if (!out_open)
+            return NULL;
+
+        const char *out_close = match_paren(out_open);
+        if (!out_close)
+            return NULL;
+
+        char *name = compact_range(after, in_open);
+        if (!name)
+            return NULL;
+
+        printf("  %s%s%s\n", C(sh, BRIGHT_CYAN), name, C(sh, RST));
+        printf("    %saccepts%s\n", C(sh, BRIGHT_BLACK), C(sh, RST));
+        print_fields(sh, in_open + 1, in_close);
+        printf("    %sreturns%s\n", C(sh, BRIGHT_BLACK), C(sh, RST));
+        print_fields(sh, out_open + 1, out_close);
+        putchar('\n');
+
+        free(name);
+        return out_close + 1;
+    }
+
+    static const char *print_named_decl(Shell *sh, const char *start,
+                                        const char *kind)
+    {
+        const char *after = NULL;
+        if (!line_has_keyword(start, kind, &after))
+            return NULL;
+
+        const char *open = strchr(after, '(');
+        if (!open)
+            return NULL;
+
+        const char *close = match_paren(open);
+        if (!close)
+            return NULL;
+
+        char *name = compact_range(after, open);
+        if (!name)
+            return NULL;
+
+        const char *kind_color =
+            !strcmp(kind, "error") ? BRIGHT_RED : BRIGHT_YELLOW;
+
+        printf("  %s%s%s %s%s%s\n",
+               C(sh, kind_color), kind, C(sh, RST),
+               C(sh, BRIGHT_WHITE), name, C(sh, RST));
+        print_fields(sh, open + 1, close);
+        putchar('\n');
+
+        free(name);
+        return close + 1;
+    }
+
+    static size_t print_methods_section(Shell *sh, const char *desc)
+    {
+        size_t count = 0;
+        const char *p = desc;
+
+        while (*p) {
+            const char *after = NULL;
+            if (line_has_keyword(p, "method", &after)) {
+                const char *next = print_method_decl(sh, p);
+                if (next) {
+                    count++;
+                    p = next;
+                    while (*p && *p != '\n')
+                        p++;
+                    if (*p == '\n')
+                        p++;
+                    continue;
+                }
+            }
+
+            const char *e = line_end(p);
+            p = *e == '\n' ? e + 1 : e;
+        }
+
+        return count;
+    }
+
+    static size_t print_defs_section(Shell *sh, const char *desc)
+    {
+        size_t count = 0;
+        const char *p = desc;
+
+        while (*p) {
+            const char *next = NULL;
+
+            if (line_has_keyword(p, "type", NULL))
+                next = print_named_decl(sh, p, "type");
+            else if (line_has_keyword(p, "error", NULL))
+                next = print_named_decl(sh, p, "error");
+
+            if (next) {
+                count++;
+                p = next;
+                while (*p && *p != '\n')
+                    p++;
+                if (*p == '\n')
+                    p++;
+                continue;
+            }
+
+            const char *e = line_end(p);
+            p = *e == '\n' ? e + 1 : e;
+        }
+
+        return count;
+    }
+
+    static void print_interface_summary(Shell *sh, const char *name,
+                                        const char *desc)
+    {
+        printf("\n%s%s%s\n", C(sh, BOLD BRIGHT_MAGENTA), name, C(sh, RST));
+        printf("%s", C(sh, BRIGHT_BLACK));
+        for (size_t i = 0; i < strlen(name); i++)
+            putchar('-');
+        printf("%s\n\n", C(sh, RST));
+
+        printf("%sMETHODS%s\n\n", C(sh, BOLD), C(sh, RST));
+        size_t methods = print_methods_section(sh, desc);
+
+        if (!methods)
+            printf("  %s(none)%s\n\n", C(sh, BRIGHT_BLACK), C(sh, RST));
+
+        /*
+         * Types and errors matter because method parameters may reference named
+         * types; rendering them here keeps "show" sufficient for constructing a
+         * valid call without having to inspect the raw IDL.
+         */
+        bool has_type = false;
+        bool has_error = false;
+        for (const char *p = desc; *p;) {
+            if (line_has_keyword(p, "type", NULL))
+                has_type = true;
+            if (line_has_keyword(p, "error", NULL))
+                has_error = true;
+            const char *e = line_end(p);
+            p = *e == '\n' ? e + 1 : e;
+        }
+
+        if (has_type || has_error) {
+            printf("%sTYPES / ERRORS%s\n\n", C(sh, BOLD), C(sh, RST));
+            print_defs_section(sh, desc);
+        }
+    }
+
+    static void print_raw_idl(Shell *sh, const char *desc)
+    {
+        const char *p = desc;
+
+        while (*p) {
+            const char *e = line_end(p);
+            const char *q = skip_hspace(p);
+            const char *color = "";
+
+            if (*q == '#')
+                color = BRIGHT_BLACK;
+            else if (!strncmp(q, "interface ", 10))
+                color = BRIGHT_MAGENTA;
+            else if (!strncmp(q, "method ", 7))
+                color = BRIGHT_CYAN;
+            else if (!strncmp(q, "type ", 5))
+                color = BRIGHT_YELLOW;
+            else if (!strncmp(q, "error ", 6))
+                color = BRIGHT_RED;
+
+            fputs(C(sh, color), stdout);
+            fwrite(p, 1, (size_t)(e - p), stdout);
+            fputs(C(sh, RST), stdout);
+            putchar('\n');
+
+            p = *e == '\n' ? e + 1 : e;
+        }
+    }
+
+    static void show_interface(Shell *sh, const char *name, bool raw)
+    {
+        yyjson_doc *doc = get_interface_description(sh, name);
+        if (!doc)
+            return;
+
+        const char *desc = description_from_reply(doc);
+        if (!desc) {
+            fprintf(stderr, "%serror:%s interface description missing\n",
+                    C(sh, BRIGHT_RED), C(sh, RST));
+            yyjson_doc_free(doc);
+            return;
+        }
+
+        if (raw) {
+            printf("\n");
+            print_raw_idl(sh, desc);
+        } else {
+            print_interface_summary(sh, name, desc);
+        }
+
+        yyjson_doc_free(doc);
+    }
+
+    static void show_all_interfaces(Shell *sh, bool raw)
+    {
+        yyjson_doc *doc = get_info(sh);
+        if (!doc)
+            return;
+
+        yyjson_val *p = reply_parameters(doc);
+        yyjson_val *arr =
+            yyjson_is_obj(p) ? yyjson_obj_get(p, "interfaces") : NULL;
+
+        if (!yyjson_is_arr(arr)) {
+            yyjson_doc_free(doc);
+            return;
+        }
+
+        size_t idx, max;
+        yyjson_val *val;
+
+        yyjson_arr_foreach(arr, idx, max, val) {
+            if (yyjson_is_str(val))
+                show_interface(sh, yyjson_get_str(val), raw);
+        }
+
+        yyjson_doc_free(doc);
+    }
+
+    static void print_help(Shell *sh)
+    {
+        printf(
+            "%sCalls%s\n"
+            "  %sINTERFACE.METHOD%s [JSON]\n"
+            "      Call a method. JSON defaults to {}.\n"
+            "\n"
+            "  %smore%s INTERFACE.METHOD [JSON]\n"
+            "      Call with Varlink more=true and print replies until complete.\n"
+            "\n"
+            "  %soneway%s INTERFACE.METHOD [JSON]\n"
+            "      Call with oneway=true; no reply is read.\n"
+            "\n"
+            "%sDiscovery%s\n"
+            "  %sinfo%s\n"
+            "      Show service metadata.\n"
+            "\n"
+            "  %sinterfaces%s\n"
+            "      List all interfaces exported by the service.\n"
+            "\n"
+            "  %sshow%s INTERFACE\n"
+            "      Human-readable methods, accepted parameters, return values,\n"
+            "      named types, and errors.\n"
+            "\n"
+            "  %sshow *%s\n"
+            "      Show every exported interface.\n"
+            "\n"
+            "  %sraw%s INTERFACE\n"
+            "      Print the original Varlink IDL with light syntax coloring.\n"
+            "\n"
+            "%sSession%s\n"
+            "  %sreconnect%s    Re-open the Unix socket.\n"
+            "  %shelp%s         Show this help.\n"
+            "  %sexit%s, %squit%s   Leave vsh.\n"
+            "\n"
+            "%sExamples%s\n"
+            "  org.example.math.Add {\"a\": 2, \"b\": 40}\n"
+            "  org.example.health.Ping\n"
+            "  show org.example.math\n"
+            "  more org.example.events.Watch {\"topic\": \"jobs\"}\n",
+            C(sh, BOLD), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BOLD), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BOLD), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BOLD), C(sh, RST));
+    }
+
+    static char *trim(char *s)
+    {
+        while (*s && isspace((unsigned char)*s))
+            s++;
+
+        size_t n = strlen(s);
+        while (n && isspace((unsigned char)s[n - 1]))
+            s[--n] = '\0';
+
+        return s;
+    }
+
+    static char *next_word(char **cursor)
+    {
+        char *p = trim(*cursor);
+        if (!*p) {
+            *cursor = p;
+            return NULL;
+        }
+
+        char *word = p;
+        while (*p && !isspace((unsigned char)*p))
+            p++;
+
+        if (*p)
+            *p++ = '\0';
+
+        *cursor = p;
+        return word;
+    }
+
+    static void prompt(Shell *sh)
+    {
+        if (!sh->interactive)
+            return;
+
+        printf("%svsh%s%s>%s ",
+               C(sh, BRIGHT_MAGENTA), C(sh, BOLD), C(sh, BRIGHT_WHITE), C(sh, RST));
+        fflush(stdout);
+    }
+
+    static bool is_method_name(const char *s)
+    {
+        const char *dot = strrchr(s, '.');
+        return dot && dot != s && dot[1] != '\0';
+    }
+
+    static void repl(Shell *sh)
+    {
+        char *line = NULL;
+        size_t cap = 0;
+
+        for (;;) {
+            prompt(sh);
+
+            ssize_t n = getline(&line, &cap, stdin);
+            if (n < 0) {
+                if (sh->interactive)
+                    putchar('\n');
+                break;
+            }
+
+            char *cursor = trim(line);
+            if (!*cursor || *cursor == '#')
+                continue;
+
+            char *cmd = next_word(&cursor);
+            cursor = trim(cursor);
+
+            if (!strcmp(cmd, "exit") || !strcmp(cmd, "quit"))
+                break;
+
+            if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) {
+                print_help(sh);
+                continue;
+            }
+
+            if (!strcmp(cmd, "info")) {
+                print_service_info(sh, false);
+                continue;
+            }
+
+            if (!strcmp(cmd, "interfaces")) {
+                list_interfaces(sh);
+                continue;
+            }
+
+            if (!strcmp(cmd, "show") || !strcmp(cmd, "raw")) {
+                bool raw = !strcmp(cmd, "raw");
+                char *arg = next_word(&cursor);
+
+                if (!arg) {
+                    fprintf(stderr, "usage: %s INTERFACE|*\n", cmd);
+                    continue;
+                }
+
+                if (!strcmp(arg, "*"))
+                    show_all_interfaces(sh, raw);
+                else
+                    show_interface(sh, arg, raw);
+                continue;
+            }
+
+            if (!strcmp(cmd, "reconnect")) {
+                disconnect_shell(sh);
+                if (connect_shell(sh) == 0)
+                    printf("%sreconnected%s %s\n",
+                           C(sh, BRIGHT_GREEN), C(sh, RST), sh->path);
+                continue;
+            }
+
+            if (!strcmp(cmd, "more") || !strcmp(cmd, "oneway")) {
+                bool more = !strcmp(cmd, "more");
+                bool oneway = !strcmp(cmd, "oneway");
+                char *method = next_word(&cursor);
+                cursor = trim(cursor);
+
+                if (!method || !is_method_name(method)) {
+                    fprintf(stderr, "usage: %s INTERFACE.METHOD [JSON]\n", cmd);
+                    continue;
+                }
+
+                run_call(sh, method, cursor, more, oneway);
+                continue;
+            }
+
+            if (is_method_name(cmd)) {
+                run_call(sh, cmd, cursor, false, false);
+                continue;
+            }
+
+            fprintf(stderr,
+                    "%sunknown command:%s %s  %s(type 'help')%s\n",
+                    C(sh, BRIGHT_RED), C(sh, RST), cmd,
+                    C(sh, BRIGHT_BLACK), C(sh, RST));
+        }
+
+        free(line);
+    }
+
+    static void usage(const char *argv0)
+    {
+        fprintf(stderr,
+                "usage: %s <varlink-endpoint>\n"
+                "\n"
+                "local Unix sockets:\n"
+                "  %s /run/example/io.example.Service\n"
+                "  %s unix:/run/example/io.example.Service\n"
+                "  %s @abstract-name\n"
+                "\n"
+                "remote Unix sockets over SSH:\n"
+                "  %s raf@server.example.com:/home/raf/project/varlink.socket\n"
+                "  %s ssh://raf@server.example.com/home/raf/project/varlink.socket\n"
+                "  %s ssh://raf@server.example.com:2222/home/raf/project/varlink.socket\n"
+                "  %s scp://raf@server.example.com/home/raf/project/varlink.socket\n"
+                "  %s sftp://raf@server.example.com/home/raf/project/varlink.socket\n"
+                "\n"
+                "scp:// and sftp:// are accepted as endpoint aliases; the live Unix\n"
+                "socket is reached using OpenSSH stream-local forwarding, not copied.\n",
+                argv0,
+                argv0, argv0, argv0,
+                argv0, argv0, argv0, argv0, argv0);
+    }
+
+    int main(int argc, char **argv)
+    {
+        if (argc != 2 || !strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
+            usage(argv[0]);
+            return argc == 2 ? 0 : 2;
+        }
+
+        signal(SIGPIPE, SIG_IGN);
+
+        const char *term = getenv("TERM");
+        bool color =
+            isatty(STDOUT_FILENO) &&
+            getenv("NO_COLOR") == NULL &&
+            (!term || strcmp(term, "dumb") != 0);
+
+        Shell sh = {
+            .path = argv[1],
+            .fd = -1,
+            .rx = NULL,
+            .rx_len = 0,
+            .rx_cap = 0,
+            .color = color,
+            .interactive = isatty(STDIN_FILENO),
+            .ssh_pid = -1,
+        };
+
+        if (parse_endpoint(&sh, argv[1]) < 0) {
+            fprintf(stderr, "%serror:%s invalid Varlink endpoint: %s\n",
+                    C(&sh, BRIGHT_RED), C(&sh, RST), argv[1]);
+            usage(argv[0]);
+            free_endpoint(&sh);
+            free(sh.rx);
+            return 2;
+        }
+
+        if (connect_shell(&sh) < 0) {
+            free_endpoint(&sh);
+            free(sh.rx);
+            return 1;
+        }
+
+        printf("%sconnected%s %s",
+               C(&sh, BRIGHT_GREEN), C(&sh, RST), sh.path);
+        if (sh.remote)
+            printf(" %s(via ssh)%s", C(&sh, BRIGHT_BLACK), C(&sh, RST));
+        putchar('\n');
+        print_service_info(&sh, true);
+
+        if (sh.interactive)
+            printf("%stype 'help' for commands%s\n\n",
+                   C(&sh, BRIGHT_BLACK), C(&sh, RST));
+
+        repl(&sh);
+
+        disconnect_shell(&sh);
+        free_endpoint(&sh);
+        free(sh.rx);
+        return 0;
+    }
+  meson.build: |
+    project(
+      'vsh',
+      'c',
+      default_options: [
+        'c_std=c11',
+        'warning_level=3',
+      ],
+    )
+
+    yyjson = dependency('yyjson', required: true)
+
+    executable(
+      'vsh',
+      'main.c',
+      dependencies: yyjson,
+    )
