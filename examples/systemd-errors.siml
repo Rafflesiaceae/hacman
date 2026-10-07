@@ -1,0 +1,5627 @@
+#!/usr/bin/env hacman
+name: systemd-errors
+command: meson setup build && meson compile -C build
+bin-path: build/systemd-errors
+files:
+  main.c: |
+    #define _GNU_SOURCE
+    #define _POSIX_C_SOURCE 200809L
+
+    #include <errno.h>
+    #include <fcntl.h>
+    #include <getopt.h>
+    #include <json-c/json.h>
+    #include <inttypes.h>
+    #include <locale.h>
+    #include <poll.h>
+    #include <signal.h>
+    #include <stdarg.h>
+    #include <stdbool.h>
+    #include <stdint.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <sys/ioctl.h>
+    #include <sys/wait.h>
+    #include <systemd/sd-journal.h>
+    #include <termios.h>
+    #include <time.h>
+    #include <unistd.h>
+    #include <wchar.h>
+
+    #define INITIAL_MAP_CAP 64u
+    #define INITIAL_HEAP_CAP 64u
+    #define INITIAL_DETAIL_CAP 128u
+    #define TOMBSTONE ((Unit *)(uintptr_t)1)
+
+    /*
+     * ANSI 16-color slots.
+     *
+     * With a Base16-configured terminal these use the terminal's existing
+     * Base16 palette rather than hard-coded RGB values.
+     */
+    #define C_RESET   "\033[0m"
+    #define C_BOLD    "\033[1m"
+    #define C_REVERSE "\033[7m"
+
+    #define C_BASE03  "\033[90m"
+    #define C_BASE05  "\033[37m"
+    #define C_BASE08  "\033[31m"
+    #define C_BASE09  "\033[33m"
+    #define C_BASE0A  "\033[93m"
+    #define C_BASE0B  "\033[32m"
+    #define C_BASE0C  "\033[36m"
+    #define C_BASE0D  "\033[34m"
+    #define C_BASE0E  "\033[35m"
+
+    #define ESC_ALT_ON      "\033[?1049h"
+    #define ESC_ALT_OFF     "\033[?1049l"
+    #define ESC_CURSOR_HIDE "\033[?25l"
+    #define ESC_CURSOR_SHOW "\033[?25h"
+    #define ESC_HOME        "\033[H"
+    #define ESC_CLEAR_EOL   "\033[K"
+    #define ESC_CLEAR_DOWN  "\033[J"
+
+    typedef struct Unit {
+        uint64_t hash;
+        uint64_t count;
+        size_t len;
+        char name[];
+    } Unit;
+
+    typedef struct {
+        Unit **slots;
+        size_t cap;
+        size_t len;
+        size_t tombs;
+    } UnitMap;
+
+    typedef struct {
+        uint64_t ts_usec;
+        Unit *unit;
+    } Event;
+
+    typedef struct {
+        Event *v;
+        size_t len;
+        size_t cap;
+    } EventHeap;
+
+    typedef enum {
+        DETAIL_LOG,
+        DETAIL_GAP,
+    } DetailKind;
+
+    typedef struct {
+        DetailKind kind;
+
+        uint64_t ts_usec;
+        int priority;
+
+        bool is_error;
+
+        char *message;
+    } DetailLine;
+
+    typedef struct {
+        DetailLine *v;
+
+        size_t len;
+        size_t cap;
+
+        size_t top;
+
+        size_t error_count;
+
+        char *unit;
+    } DetailView;
+
+    typedef enum {
+        VIEW_MAIN,
+        VIEW_DETAIL,
+    } View;
+
+    typedef struct {
+        sd_journal *journal;
+
+        bool remote;
+        char *source;
+
+        pid_t remote_pid;
+        int remote_fd;
+
+        char *remote_buf;
+        size_t remote_buf_len;
+        size_t remote_buf_cap;
+
+        char *remote_error;
+
+        UnitMap units;
+        EventHeap events;
+
+        Unit **render_units;
+
+        size_t render_cap;
+        size_t selected;
+
+        char *selected_name;
+
+        DetailView detail;
+
+        View view;
+
+        bool pending_g;
+
+        uint64_t window_usec;
+
+        double minutes;
+
+        unsigned context_lines;
+
+        bool tty_in;
+        bool tty_out;
+
+        unsigned rows;
+        unsigned cols;
+    } App;
+
+    static volatile sig_atomic_t stop_requested;
+    static volatile sig_atomic_t resize_requested;
+
+    static struct termios saved_termios;
+
+    static bool terminal_modified;
+    static bool alternate_screen_active;
+
+    /*
+     * Complete frames are accumulated here and flushed only once.
+     *
+     * Combined with non-destructive redraws this prevents urxvt from
+     * displaying an intermediate blank screen when a key is pressed.
+     */
+    static char stdout_buffer[1024 * 1024];
+
+    static void
+    on_signal(int signo)
+    {
+        if (signo == SIGWINCH)
+            resize_requested = 1;
+        else
+            stop_requested = 1;
+    }
+
+    static void
+    restore_terminal(void)
+    {
+        if (terminal_modified) {
+            (void)tcsetattr(
+                STDIN_FILENO,
+                TCSANOW,
+                &saved_termios
+            );
+
+            terminal_modified = false;
+        }
+
+        if (alternate_screen_active) {
+            fputs(
+                C_RESET
+                ESC_CURSOR_SHOW
+                ESC_ALT_OFF,
+                stdout
+            );
+
+            fflush(stdout);
+
+            alternate_screen_active = false;
+        }
+    }
+
+    static void
+    die_errno(
+        const char *what,
+        int err
+    )
+    {
+        restore_terminal();
+
+        fprintf(
+            stderr,
+            "%s: %s\n",
+            what,
+            strerror(
+                err < 0
+                    ? -err
+                    : err
+            )
+        );
+
+        exit(EXIT_FAILURE);
+    }
+
+    static void *
+    xmalloc(size_t n)
+    {
+        void *p =
+            malloc(
+                n
+                    ? n
+                    : 1u
+            );
+
+        if (!p) {
+            restore_terminal();
+
+            fputs(
+                "out of memory\n",
+                stderr
+            );
+
+            exit(EXIT_FAILURE);
+        }
+
+        return p;
+    }
+
+    static void *
+    xcalloc(
+        size_t n,
+        size_t size
+    )
+    {
+        void *p =
+            calloc(
+                n
+                    ? n
+                    : 1u,
+                size
+                    ? size
+                    : 1u
+            );
+
+        if (!p) {
+            restore_terminal();
+
+            fputs(
+                "out of memory\n",
+                stderr
+            );
+
+            exit(EXIT_FAILURE);
+        }
+
+        return p;
+    }
+
+    static void *
+    xrealloc(
+        void *p,
+        size_t n
+    )
+    {
+        void *q =
+            realloc(
+                p,
+                n
+                    ? n
+                    : 1u
+            );
+
+        if (!q) {
+            restore_terminal();
+
+            fputs(
+                "out of memory\n",
+                stderr
+            );
+
+            exit(EXIT_FAILURE);
+        }
+
+        return q;
+    }
+
+    static char *
+    xstrdup(const char *s)
+    {
+        size_t n =
+            strlen(s) + 1u;
+
+        char *p =
+            xmalloc(n);
+
+        memcpy(
+            p,
+            s,
+            n
+        );
+
+        return p;
+    }
+
+    static char *
+    xstrndup_local(
+        const char *s,
+        size_t n
+    )
+    {
+        char *p =
+            xmalloc(
+                n +
+                1u
+            );
+
+        memcpy(
+            p,
+            s,
+            n
+        );
+
+        p[n] =
+            '\0';
+
+        return p;
+    }
+
+    static char *
+    xasprintf(
+        const char *fmt,
+        ...
+    )
+    {
+        va_list ap;
+        char *out =
+            NULL;
+
+        va_start(
+            ap,
+            fmt
+        );
+
+        int r =
+            vasprintf(
+                &out,
+                fmt,
+                ap
+            );
+
+        va_end(ap);
+
+        if (
+            r <
+                0 ||
+            !out
+        ) {
+            restore_terminal();
+
+            fputs(
+                "out of memory\n",
+                stderr
+            );
+
+            exit(EXIT_FAILURE);
+        }
+
+        return out;
+    }
+
+    static char *
+    sanitize_plain_string(const char *s)
+    {
+        size_t n =
+            strlen(s);
+
+        char *out =
+            xmalloc(
+                n +
+                1u
+            );
+
+        for (
+            size_t i = 0;
+            i < n;
+            ++i
+        ) {
+            unsigned char c =
+                (unsigned char)s[i];
+
+            out[i] =
+                (
+                    c <
+                        0x20 ||
+                    c ==
+                        0x7f
+                )
+                    ? ' '
+                    : (char)c;
+        }
+
+        out[n] =
+            '\0';
+
+        return out;
+    }
+
+    static char *
+    shell_quote(const char *s)
+    {
+        size_t n =
+            2u;
+
+        for (
+            const char *p = s;
+            *p;
+            ++p
+        ) {
+            n +=
+                *p == '\''
+                    ? 4u
+                    : 1u;
+        }
+
+        char *out =
+            xmalloc(
+                n +
+                1u
+            );
+
+        char *d =
+            out;
+
+        *d++ = '\'';
+
+        for (
+            const char *p = s;
+            *p;
+            ++p
+        ) {
+            if (
+                *p ==
+                '\''
+            ) {
+                memcpy(
+                    d,
+                    "'\\''",
+                    4u
+                );
+
+                d +=
+                    4u;
+            } else {
+                *d++ =
+                    *p;
+            }
+        }
+
+        *d++ = '\'';
+        *d = '\0';
+
+        return out;
+    }
+
+    static uint64_t
+    realtime_usec(void)
+    {
+        struct timespec ts;
+
+        if (
+            clock_gettime(
+                CLOCK_REALTIME,
+                &ts
+            ) < 0
+        ) {
+            die_errno(
+                "clock_gettime(CLOCK_REALTIME)",
+                errno
+            );
+        }
+
+        return
+            (uint64_t)ts.tv_sec *
+                UINT64_C(1000000) +
+            (uint64_t)ts.tv_nsec /
+                1000u;
+    }
+
+    static uint64_t
+    monotonic_usec(void)
+    {
+        struct timespec ts;
+
+        if (
+            clock_gettime(
+                CLOCK_MONOTONIC,
+                &ts
+            ) < 0
+        ) {
+            die_errno(
+                "clock_gettime(CLOCK_MONOTONIC)",
+                errno
+            );
+        }
+
+        return
+            (uint64_t)ts.tv_sec *
+                UINT64_C(1000000) +
+            (uint64_t)ts.tv_nsec /
+                1000u;
+    }
+
+    static char *
+    remote_journal_command(
+        const App *app,
+        const char *unit,
+        bool follow,
+        bool errors_only
+    )
+    {
+        uint64_t now =
+            realtime_usec();
+
+        uint64_t cutoff =
+            now >
+                app->window_usec
+                    ? now -
+                        app->window_usec
+                    : 0;
+
+        uint64_t sec =
+            cutoff /
+            UINT64_C(1000000);
+
+        uint64_t usec =
+            cutoff %
+            UINT64_C(1000000);
+
+        char *since_token =
+            xasprintf(
+                "--since=@%" PRIu64 ".%06" PRIu64,
+                sec,
+                usec
+            );
+
+        char *since_q =
+            shell_quote(
+                since_token
+            );
+
+        free(since_token);
+
+        char *unit_q =
+            NULL;
+
+        if (unit) {
+            char *unit_token =
+                xasprintf(
+                    "--unit=%s",
+                    unit
+                );
+
+            unit_q =
+                shell_quote(
+                    unit_token
+                );
+
+            free(unit_token);
+        }
+
+        char *command;
+
+        if (follow) {
+            command =
+                xasprintf(
+                    "exec journalctl --system %s "
+                    "--priority=0..3 "
+                    "--output=json "
+                    "--output-fields=__REALTIME_TIMESTAMP,_SYSTEMD_UNIT "
+                    "--follow --no-tail --no-pager --quiet",
+                    since_q
+                );
+        } else if (errors_only) {
+            command =
+                xasprintf(
+                    "exec journalctl --system %s %s "
+                    "--priority=0..3 "
+                    "--output=json "
+                    "--output-fields=__REALTIME_TIMESTAMP,PRIORITY,MESSAGE "
+                    "--no-pager --quiet",
+                    since_q,
+                    unit_q
+                        ? unit_q
+                        : ""
+                );
+        } else {
+            command =
+                xasprintf(
+                    "exec journalctl --system %s %s "
+                    "--output=json "
+                    "--output-fields=__REALTIME_TIMESTAMP,PRIORITY,MESSAGE "
+                    "--no-pager --quiet",
+                    since_q,
+                    unit_q
+                        ? unit_q
+                        : ""
+                );
+        }
+
+        free(unit_q);
+        free(since_q);
+
+        return command;
+    }
+
+    static void
+    spawn_remote_command(
+        const App *app,
+        const char *command,
+        bool nonblocking,
+        pid_t *pid_out,
+        int *fd_out
+    )
+    {
+        int fds[2];
+
+        if (
+            pipe2(
+                fds,
+                O_CLOEXEC
+            ) < 0
+        ) {
+            die_errno(
+                "pipe2",
+                errno
+            );
+        }
+
+        pid_t pid =
+            fork();
+
+        if (
+            pid <
+            0
+        ) {
+            int err =
+                errno;
+
+            close(fds[0]);
+            close(fds[1]);
+
+            die_errno(
+                "fork",
+                err
+            );
+        }
+
+        if (
+            pid ==
+            0
+        ) {
+            close(fds[0]);
+
+            if (
+                dup2(
+                    fds[1],
+                    STDOUT_FILENO
+                ) < 0 ||
+                dup2(
+                    fds[1],
+                    STDERR_FILENO
+                ) < 0
+            ) {
+                _exit(126);
+            }
+
+            if (
+                fds[1] !=
+                    STDOUT_FILENO &&
+                fds[1] !=
+                    STDERR_FILENO
+            ) {
+                close(fds[1]);
+            }
+
+            execlp(
+                "ssh",
+                "ssh",
+                "-n",
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                app->source,
+                command,
+                (char *)NULL
+            );
+
+            dprintf(
+                STDERR_FILENO,
+                "exec ssh failed: %s\n",
+                strerror(errno)
+            );
+
+            _exit(127);
+        }
+
+        close(fds[1]);
+
+        if (nonblocking) {
+            int flags =
+                fcntl(
+                    fds[0],
+                    F_GETFL,
+                    0
+                );
+
+            if (
+                flags <
+                0 ||
+                fcntl(
+                    fds[0],
+                    F_SETFL,
+                    flags |
+                        O_NONBLOCK
+                ) < 0
+            ) {
+                int err =
+                    errno;
+
+                close(fds[0]);
+                kill(pid, SIGTERM);
+                (void)waitpid(pid, NULL, 0);
+
+                die_errno(
+                    "fcntl(remote pipe)",
+                    err
+                );
+            }
+        }
+
+        *pid_out =
+            pid;
+
+        *fd_out =
+            fds[0];
+    }
+
+    static uint64_t
+    fnv1a(
+        const char *s,
+        size_t len
+    )
+    {
+        uint64_t h =
+            UINT64_C(
+                1469598103934665603
+            );
+
+        for (
+            size_t i = 0;
+            i < len;
+            ++i
+        ) {
+            h ^=
+                (unsigned char)s[i];
+
+            h *=
+                UINT64_C(
+                    1099511628211
+                );
+        }
+
+        return h;
+    }
+
+    static void
+    unitmap_init(UnitMap *m)
+    {
+        m->cap =
+            INITIAL_MAP_CAP;
+
+        m->slots =
+            xcalloc(
+                m->cap,
+                sizeof(*m->slots)
+            );
+    }
+
+    static void
+    unitmap_clear(UnitMap *m)
+    {
+        for (
+            size_t i = 0;
+            i < m->cap;
+            ++i
+        ) {
+            Unit *u =
+                m->slots[i];
+
+            if (
+                u &&
+                u != TOMBSTONE
+            ) {
+                free(u);
+            }
+        }
+
+        memset(
+            m->slots,
+            0,
+            m->cap *
+                sizeof(*m->slots)
+        );
+
+        m->len = 0;
+        m->tombs = 0;
+    }
+
+    static void
+    unitmap_destroy(UnitMap *m)
+    {
+        if (!m->slots)
+            return;
+
+        unitmap_clear(m);
+
+        free(m->slots);
+    }
+
+    static void
+    unitmap_rehash(
+        UnitMap *m,
+        size_t new_cap
+    )
+    {
+        Unit **old =
+            m->slots;
+
+        size_t old_cap =
+            m->cap;
+
+        m->slots =
+            xcalloc(
+                new_cap,
+                sizeof(*m->slots)
+            );
+
+        m->cap =
+            new_cap;
+
+        m->tombs =
+            0;
+
+        for (
+            size_t i = 0;
+            i < old_cap;
+            ++i
+        ) {
+            Unit *u =
+                old[i];
+
+            if (
+                !u ||
+                u == TOMBSTONE
+            ) {
+                continue;
+            }
+
+            size_t pos =
+                (size_t)u->hash &
+                (m->cap - 1u);
+
+            while (m->slots[pos]) {
+                pos =
+                    (pos + 1u) &
+                    (m->cap - 1u);
+            }
+
+            m->slots[pos] =
+                u;
+        }
+
+        free(old);
+    }
+
+    static Unit *
+    unitmap_get_or_add(
+        UnitMap *m,
+        const char *name,
+        size_t len
+    )
+    {
+        if (
+            (
+                m->len +
+                m->tombs +
+                1u
+            ) *
+                10u >=
+            m->cap *
+                7u
+        ) {
+            size_t new_cap =
+                m->tombs > m->len
+                    ? m->cap
+                    : m->cap * 2u;
+
+            unitmap_rehash(
+                m,
+                new_cap
+            );
+        }
+
+        uint64_t hash =
+            fnv1a(
+                name,
+                len
+            );
+
+        size_t pos =
+            (size_t)hash &
+            (m->cap - 1u);
+
+        size_t first_tomb =
+            SIZE_MAX;
+
+        for (;;) {
+            Unit *u =
+                m->slots[pos];
+
+            if (!u) {
+                size_t dst =
+                    first_tomb != SIZE_MAX
+                        ? first_tomb
+                        : pos;
+
+                Unit *nu =
+                    xmalloc(
+                        sizeof(*nu) +
+                        len +
+                        1u
+                    );
+
+                nu->hash =
+                    hash;
+
+                nu->count =
+                    0;
+
+                nu->len =
+                    len;
+
+                memcpy(
+                    nu->name,
+                    name,
+                    len
+                );
+
+                nu->name[len] =
+                    '\0';
+
+                if (
+                    first_tomb !=
+                    SIZE_MAX
+                ) {
+                    --m->tombs;
+                }
+
+                m->slots[dst] =
+                    nu;
+
+                ++m->len;
+
+                return nu;
+            }
+
+            if (
+                u ==
+                TOMBSTONE
+            ) {
+                if (
+                    first_tomb ==
+                    SIZE_MAX
+                ) {
+                    first_tomb =
+                        pos;
+                }
+            } else if (
+                u->hash ==
+                    hash &&
+                u->len ==
+                    len &&
+                memcmp(
+                    u->name,
+                    name,
+                    len
+                ) == 0
+            ) {
+                return u;
+            }
+
+            pos =
+                (pos + 1u) &
+                (m->cap - 1u);
+        }
+    }
+
+    static void
+    unitmap_remove(
+        UnitMap *m,
+        Unit *u
+    )
+    {
+        size_t pos =
+            (size_t)u->hash &
+            (m->cap - 1u);
+
+        for (;;) {
+            Unit *cur =
+                m->slots[pos];
+
+            if (!cur)
+                abort();
+
+            if (
+                cur ==
+                u
+            ) {
+                m->slots[pos] =
+                    TOMBSTONE;
+
+                --m->len;
+                ++m->tombs;
+
+                free(u);
+
+                return;
+            }
+
+            pos =
+                (pos + 1u) &
+                (m->cap - 1u);
+        }
+    }
+
+    static void
+    heap_clear(EventHeap *h)
+    {
+        h->len = 0;
+    }
+
+    static void
+    heap_destroy(EventHeap *h)
+    {
+        free(h->v);
+    }
+
+    static void
+    heap_push(
+        EventHeap *h,
+        Event ev
+    )
+    {
+        if (
+            h->len ==
+            h->cap
+        ) {
+            h->cap =
+                h->cap
+                    ? h->cap * 2u
+                    : INITIAL_HEAP_CAP;
+
+            h->v =
+                xrealloc(
+                    h->v,
+                    h->cap *
+                        sizeof(*h->v)
+                );
+        }
+
+        size_t i =
+            h->len++;
+
+        while (i > 0) {
+            size_t parent =
+                (i - 1u) /
+                2u;
+
+            if (
+                h->v[parent].ts_usec <=
+                ev.ts_usec
+            ) {
+                break;
+            }
+
+            h->v[i] =
+                h->v[parent];
+
+            i =
+                parent;
+        }
+
+        h->v[i] =
+            ev;
+    }
+
+    static Event
+    heap_pop(EventHeap *h)
+    {
+        Event out =
+            h->v[0];
+
+        Event last =
+            h->v[
+                --h->len
+            ];
+
+        if (
+            h->len ==
+            0
+        ) {
+            return out;
+        }
+
+        size_t i =
+            0;
+
+        for (;;) {
+            size_t left =
+                i * 2u +
+                1u;
+
+            if (
+                left >=
+                h->len
+            ) {
+                break;
+            }
+
+            size_t right =
+                left +
+                1u;
+
+            size_t child =
+                right < h->len &&
+                h->v[right].ts_usec <
+                    h->v[left].ts_usec
+                    ? right
+                    : left;
+
+            if (
+                h->v[child].ts_usec >=
+                last.ts_usec
+            ) {
+                break;
+            }
+
+            h->v[i] =
+                h->v[child];
+
+            i =
+                child;
+        }
+
+        h->v[i] =
+            last;
+
+        return out;
+    }
+
+    static bool
+    ends_with_service(
+        const char *s,
+        size_t len
+    )
+    {
+        static const char suffix[] =
+            ".service";
+
+        const size_t n =
+            sizeof(suffix) -
+            1u;
+
+        return
+            len >= n &&
+            memcmp(
+                s + len - n,
+                suffix,
+                n
+            ) == 0;
+    }
+
+    typedef struct {
+        uint64_t ts_usec;
+        int priority;
+        char *unit;
+        char *message;
+    } RemoteEntry;
+
+    static void
+    remote_entry_clear(RemoteEntry *entry)
+    {
+        free(entry->unit);
+        free(entry->message);
+
+        memset(
+            entry,
+            0,
+            sizeof(*entry)
+        );
+    }
+
+    static json_object *
+    json_first_value(json_object *value)
+    {
+        if (!value)
+            return NULL;
+
+        if (
+            json_object_get_type(value) ==
+            json_type_array
+        ) {
+            if (
+                json_object_array_length(value) ==
+                0
+            ) {
+                return NULL;
+            }
+
+            return
+                json_object_array_get_idx(
+                    value,
+                    0
+                );
+        }
+
+        return value;
+    }
+
+    static const char *
+    json_field_string(
+        json_object *obj,
+        const char *name
+    )
+    {
+        json_object *value =
+            NULL;
+
+        if (
+            !json_object_object_get_ex(
+                obj,
+                name,
+                &value
+            )
+        ) {
+            return NULL;
+        }
+
+        value =
+            json_first_value(value);
+
+        if (!value)
+            return NULL;
+
+        enum json_type type =
+            json_object_get_type(value);
+
+        if (
+            type !=
+                json_type_string &&
+            type !=
+                json_type_int &&
+            type !=
+                json_type_double &&
+            type !=
+                json_type_boolean
+        ) {
+            return NULL;
+        }
+
+        return
+            json_object_get_string(value);
+    }
+
+    static bool
+    parse_remote_json_line(
+        const char *line,
+        size_t len,
+        RemoteEntry *entry
+    )
+    {
+        memset(
+            entry,
+            0,
+            sizeof(*entry)
+        );
+
+        entry->priority =
+            6;
+
+        struct json_tokener *tok =
+            json_tokener_new();
+
+        if (!tok) {
+            restore_terminal();
+            fputs("out of memory\n", stderr);
+            exit(EXIT_FAILURE);
+        }
+
+        json_object *obj =
+            json_tokener_parse_ex(
+                tok,
+                line,
+                (int)len
+            );
+
+        enum json_tokener_error jerr =
+            json_tokener_get_error(tok);
+
+        json_tokener_free(tok);
+
+        if (
+            jerr !=
+                json_tokener_success ||
+            !obj ||
+            json_object_get_type(obj) !=
+                json_type_object
+        ) {
+            if (obj)
+                json_object_put(obj);
+
+            return false;
+        }
+
+        const char *ts =
+            json_field_string(
+                obj,
+                "__REALTIME_TIMESTAMP"
+            );
+
+        if (!ts) {
+            json_object_put(obj);
+            return false;
+        }
+
+        char *end =
+            NULL;
+
+        errno =
+            0;
+
+        unsigned long long parsed_ts =
+            strtoull(
+                ts,
+                &end,
+                10
+            );
+
+        if (
+            errno ||
+            end ==
+                ts ||
+            *end !=
+                '\0'
+        ) {
+            json_object_put(obj);
+            return false;
+        }
+
+        entry->ts_usec =
+            (uint64_t)parsed_ts;
+
+        const char *priority =
+            json_field_string(
+                obj,
+                "PRIORITY"
+            );
+
+        if (
+            priority &&
+            priority[0] >=
+                '0' &&
+            priority[0] <=
+                '7' &&
+            priority[1] ==
+                '\0'
+        ) {
+            entry->priority =
+                priority[0] -
+                '0';
+        }
+
+        const char *unit =
+            json_field_string(
+                obj,
+                "_SYSTEMD_UNIT"
+            );
+
+        if (unit) {
+            entry->unit =
+                sanitize_plain_string(
+                    unit
+                );
+        }
+
+        const char *message =
+            json_field_string(
+                obj,
+                "MESSAGE"
+            );
+
+        entry->message =
+            sanitize_plain_string(
+                message
+                    ? message
+                    : "(no MESSAGE field)"
+            );
+
+        json_object_put(obj);
+
+        return true;
+    }
+
+    static void
+    set_remote_error(
+        App *app,
+        const char *line,
+        size_t len
+    )
+    {
+        while (
+            len &&
+            (
+                line[len - 1u] ==
+                    '\r' ||
+                line[len - 1u] ==
+                    '\n'
+            )
+        ) {
+            --len;
+        }
+
+        while (
+            len &&
+            (
+                *line ==
+                    ' ' ||
+                *line ==
+                    '\t'
+            )
+        ) {
+            ++line;
+            --len;
+        }
+
+        if (!len)
+            return;
+
+        if (
+            len >
+            1024u
+        ) {
+            len =
+                1024u;
+        }
+
+        free(app->remote_error);
+
+        app->remote_error =
+            xstrndup_local(
+                line,
+                len
+            );
+    }
+
+    static bool
+    add_remote_main_entry(
+        App *app,
+        const RemoteEntry *entry,
+        uint64_t cutoff
+    )
+    {
+        if (
+            !entry->unit ||
+            entry->ts_usec <
+                cutoff
+        ) {
+            return false;
+        }
+
+        size_t name_len =
+            strlen(entry->unit);
+
+        if (
+            !ends_with_service(
+                entry->unit,
+                name_len
+            )
+        ) {
+            return false;
+        }
+
+        Unit *u =
+            unitmap_get_or_add(
+                &app->units,
+                entry->unit,
+                name_len
+            );
+
+        ++u->count;
+
+        heap_push(
+            &app->events,
+            (Event){
+                .ts_usec =
+                    entry->ts_usec,
+                .unit =
+                    u,
+            }
+        );
+
+        return true;
+    }
+
+    static void
+    remote_buffer_reserve(
+        App *app,
+        size_t need
+    )
+    {
+        if (
+            app->remote_buf_cap >=
+            need
+        ) {
+            return;
+        }
+
+        size_t cap =
+            app->remote_buf_cap
+                ? app->remote_buf_cap
+                : 16384u;
+
+        while (
+            cap <
+            need
+        ) {
+            cap *=
+                2u;
+        }
+
+        app->remote_buf =
+            xrealloc(
+                app->remote_buf,
+                cap
+            );
+
+        app->remote_buf_cap =
+            cap;
+    }
+
+    static bool
+    remote_process_stream_line(
+        App *app,
+        const char *line,
+        size_t len
+    )
+    {
+        while (
+            len &&
+            (
+                line[len - 1u] ==
+                    '\r' ||
+                line[len - 1u] ==
+                    '\n'
+            )
+        ) {
+            --len;
+        }
+
+        if (!len)
+            return false;
+
+        RemoteEntry entry;
+
+        if (
+            !parse_remote_json_line(
+                line,
+                len,
+                &entry
+            )
+        ) {
+            set_remote_error(
+                app,
+                line,
+                len
+            );
+
+            return false;
+        }
+
+        uint64_t now =
+            realtime_usec();
+
+        uint64_t cutoff =
+            now >
+                app->window_usec
+                    ? now -
+                        app->window_usec
+                    : 0;
+
+        bool changed =
+            add_remote_main_entry(
+                app,
+                &entry,
+                cutoff
+            );
+
+        remote_entry_clear(
+            &entry
+        );
+
+        return changed;
+    }
+
+    static bool
+    remote_drain_stream(
+        App *app,
+        bool *eof
+    )
+    {
+        *eof =
+            false;
+
+        bool changed =
+            false;
+
+        char buf[16384];
+
+        for (;;) {
+            ssize_t n =
+                read(
+                    app->remote_fd,
+                    buf,
+                    sizeof(buf)
+                );
+
+            if (
+                n >
+                0
+            ) {
+                remote_buffer_reserve(
+                    app,
+                    app->remote_buf_len +
+                        (size_t)n +
+                        1u
+                );
+
+                memcpy(
+                    app->remote_buf +
+                        app->remote_buf_len,
+                    buf,
+                    (size_t)n
+                );
+
+                app->remote_buf_len +=
+                    (size_t)n;
+
+                app->remote_buf[
+                    app->remote_buf_len
+                ] =
+                    '\0';
+
+                size_t start =
+                    0;
+
+                for (
+                    size_t i = 0;
+                    i < app->remote_buf_len;
+                    ++i
+                ) {
+                    if (
+                        app->remote_buf[i] !=
+                        '\n'
+                    ) {
+                        continue;
+                    }
+
+                    changed |=
+                        remote_process_stream_line(
+                            app,
+                            app->remote_buf +
+                                start,
+                            i -
+                                start
+                        );
+
+                    start =
+                        i +
+                        1u;
+                }
+
+                if (start) {
+                    size_t remain =
+                        app->remote_buf_len -
+                        start;
+
+                    memmove(
+                        app->remote_buf,
+                        app->remote_buf +
+                            start,
+                        remain
+                    );
+
+                    app->remote_buf_len =
+                        remain;
+
+                    app->remote_buf[remain] =
+                        '\0';
+                }
+
+                continue;
+            }
+
+            if (
+                n ==
+                0
+            ) {
+                *eof =
+                    true;
+
+                if (
+                    app->remote_buf_len
+                ) {
+                    changed |=
+                        remote_process_stream_line(
+                            app,
+                            app->remote_buf,
+                            app->remote_buf_len
+                        );
+
+                    app->remote_buf_len =
+                        0;
+                }
+
+                break;
+            }
+
+            if (
+                errno ==
+                    EINTR
+            ) {
+                continue;
+            }
+
+            if (
+                errno ==
+                    EAGAIN ||
+                errno ==
+                    EWOULDBLOCK
+            ) {
+                break;
+            }
+
+            die_errno(
+                "read(remote journal stream)",
+                errno
+            );
+        }
+
+        return changed;
+    }
+
+    static void
+    start_remote_stream(App *app)
+    {
+        char *command =
+            remote_journal_command(
+                app,
+                NULL,
+                true,
+                true
+            );
+
+        spawn_remote_command(
+            app,
+            command,
+            true,
+            &app->remote_pid,
+            &app->remote_fd
+        );
+
+        free(command);
+    }
+
+    static void
+    stop_remote_stream(App *app)
+    {
+        if (
+            app->remote_fd >=
+            0
+        ) {
+            close(app->remote_fd);
+            app->remote_fd =
+                -1;
+        }
+
+        if (
+            app->remote_pid >
+            0
+        ) {
+            pid_t pid =
+                app->remote_pid;
+
+            app->remote_pid =
+                -1;
+
+            if (
+                kill(
+                    pid,
+                    SIGTERM
+                ) < 0 &&
+                errno !=
+                    ESRCH
+            ) {
+                /* Best effort during shutdown. */
+            }
+
+            while (
+                waitpid(
+                    pid,
+                    NULL,
+                    0
+                ) < 0 &&
+                errno ==
+                    EINTR
+            ) {
+            }
+        }
+    }
+
+    static void
+    remote_stream_died(
+        App *app
+    )
+    {
+        int status =
+            0;
+
+        pid_t r =
+            waitpid(
+                app->remote_pid,
+                &status,
+                0
+            );
+
+        app->remote_pid =
+            -1;
+
+        if (
+            app->remote_fd >=
+            0
+        ) {
+            close(app->remote_fd);
+            app->remote_fd =
+                -1;
+        }
+
+        restore_terminal();
+
+        fprintf(
+            stderr,
+            "remote journal stream from %s ended",
+            app->source
+                ? app->source
+                : "(unknown)"
+        );
+
+        if (
+            r >
+            0
+        ) {
+            if (WIFEXITED(status)) {
+                fprintf(
+                    stderr,
+                    " (ssh exit %d)",
+                    WEXITSTATUS(status)
+                );
+            } else if (WIFSIGNALED(status)) {
+                fprintf(
+                    stderr,
+                    " (ssh signal %d)",
+                    WTERMSIG(status)
+                );
+            }
+        }
+
+        fputc('\n', stderr);
+
+        if (
+            app->remote_error &&
+            *app->remote_error
+        ) {
+            fprintf(
+                stderr,
+                "%s\n",
+                app->remote_error
+            );
+        }
+
+        exit(EXIT_FAILURE);
+    }
+
+    static bool
+    add_current_entry(
+        App *app,
+        uint64_t cutoff
+    )
+    {
+        uint64_t ts;
+
+        int r =
+            sd_journal_get_realtime_usec(
+                app->journal,
+                &ts
+            );
+
+        if (r < 0) {
+            die_errno(
+                "sd_journal_get_realtime_usec",
+                r
+            );
+        }
+
+        if (
+            ts <
+            cutoff
+        ) {
+            return false;
+        }
+
+        const void *data;
+        size_t len;
+
+        r =
+            sd_journal_get_data(
+                app->journal,
+                "_SYSTEMD_UNIT",
+                &data,
+                &len
+            );
+
+        if (
+            r ==
+            -ENOENT
+        ) {
+            return false;
+        }
+
+        if (r < 0) {
+            die_errno(
+                "sd_journal_get_data(_SYSTEMD_UNIT)",
+                r
+            );
+        }
+
+        static const char prefix[] =
+            "_SYSTEMD_UNIT=";
+
+        const size_t prefix_len =
+            sizeof(prefix) -
+            1u;
+
+        if (
+            len <=
+                prefix_len ||
+            memcmp(
+                data,
+                prefix,
+                prefix_len
+            ) != 0
+        ) {
+            return false;
+        }
+
+        const char *name =
+            (const char *)data +
+            prefix_len;
+
+        size_t name_len =
+            len -
+            prefix_len;
+
+        if (
+            !ends_with_service(
+                name,
+                name_len
+            )
+        ) {
+            return false;
+        }
+
+        Unit *u =
+            unitmap_get_or_add(
+                &app->units,
+                name,
+                name_len
+            );
+
+        ++u->count;
+
+        heap_push(
+            &app->events,
+            (Event){
+                .ts_usec =
+                    ts,
+                .unit =
+                    u,
+            }
+        );
+
+        return true;
+    }
+
+    static bool
+    expire_old(
+        App *app,
+        uint64_t now
+    )
+    {
+        uint64_t cutoff =
+            now >
+                app->window_usec
+                    ? now -
+                        app->window_usec
+                    : 0;
+
+        bool changed =
+            false;
+
+        while (
+            app->events.len &&
+            app->events.v[0].ts_usec <=
+                cutoff
+        ) {
+            Event ev =
+                heap_pop(
+                    &app->events
+                );
+
+            Unit *u =
+                ev.unit;
+
+            if (
+                u->count ==
+                0
+            ) {
+                abort();
+            }
+
+            --u->count;
+
+            changed =
+                true;
+
+            if (
+                u->count ==
+                0
+            ) {
+                unitmap_remove(
+                    &app->units,
+                    u
+                );
+            }
+        }
+
+        return changed;
+    }
+
+    static void
+    rebuild_window(App *app)
+    {
+        uint64_t now =
+            realtime_usec();
+
+        uint64_t cutoff =
+            now >
+                app->window_usec
+                    ? now -
+                        app->window_usec
+                    : 0;
+
+        heap_clear(
+            &app->events
+        );
+
+        unitmap_clear(
+            &app->units
+        );
+
+        int r =
+            sd_journal_seek_realtime_usec(
+                app->journal,
+                cutoff
+            );
+
+        if (r < 0) {
+            die_errno(
+                "sd_journal_seek_realtime_usec",
+                r
+            );
+        }
+
+        while (
+            (
+                r =
+                    sd_journal_next(
+                        app->journal
+                    )
+            ) > 0
+        ) {
+            (void)add_current_entry(
+                app,
+                cutoff
+            );
+        }
+
+        if (r < 0) {
+            die_errno(
+                "sd_journal_next",
+                r
+            );
+        }
+
+        (void)expire_old(
+            app,
+            realtime_usec()
+        );
+    }
+
+    static int
+    unit_cmp(
+        const void *a,
+        const void *b
+    )
+    {
+        const Unit *ua =
+            *(Unit * const *)a;
+
+        const Unit *ub =
+            *(Unit * const *)b;
+
+        if (
+            ua->count <
+            ub->count
+        ) {
+            return 1;
+        }
+
+        if (
+            ua->count >
+            ub->count
+        ) {
+            return -1;
+        }
+
+        return strcmp(
+            ua->name,
+            ub->name
+        );
+    }
+
+    static void
+    set_selected_name(
+        App *app,
+        const char *name
+    )
+    {
+        free(
+            app->selected_name
+        );
+
+        app->selected_name =
+            name
+                ? xstrdup(name)
+                : NULL;
+    }
+
+    static size_t
+    prepare_render_units(App *app)
+    {
+        if (
+            app->render_cap <
+            app->units.len
+        ) {
+            size_t cap =
+                app->render_cap
+                    ? app->render_cap
+                    : 16u;
+
+            while (
+                cap <
+                app->units.len
+            ) {
+                cap *=
+                    2u;
+            }
+
+            app->render_units =
+                xrealloc(
+                    app->render_units,
+                    cap *
+                        sizeof(
+                            *app->render_units
+                        )
+                );
+
+            app->render_cap =
+                cap;
+        }
+
+        size_t n =
+            0;
+
+        for (
+            size_t i = 0;
+            i < app->units.cap;
+            ++i
+        ) {
+            Unit *u =
+                app->units.slots[i];
+
+            if (
+                u &&
+                u != TOMBSTONE &&
+                u->count > 0
+            ) {
+                app->render_units[n++] =
+                    u;
+            }
+        }
+
+        if (
+            n >
+            1
+        ) {
+            qsort(
+                app->render_units,
+                n,
+                sizeof(
+                    *app->render_units
+                ),
+                unit_cmp
+            );
+        }
+
+        if (
+            n ==
+            0
+        ) {
+            app->selected =
+                0;
+
+            set_selected_name(
+                app,
+                NULL
+            );
+
+            return 0;
+        }
+
+        if (
+            app->selected_name
+        ) {
+            bool found =
+                false;
+
+            for (
+                size_t i = 0;
+                i < n;
+                ++i
+            ) {
+                if (
+                    strcmp(
+                        app->render_units[i]->name,
+                        app->selected_name
+                    ) == 0
+                ) {
+                    app->selected =
+                        i;
+
+                    found =
+                        true;
+
+                    break;
+                }
+            }
+
+            if (!found) {
+                if (
+                    app->selected >=
+                    n
+                ) {
+                    app->selected =
+                        n - 1u;
+                }
+
+                set_selected_name(
+                    app,
+                    app->render_units[
+                        app->selected
+                    ]->name
+                );
+            }
+        } else {
+            if (
+                app->selected >=
+                n
+            ) {
+                app->selected =
+                    n - 1u;
+            }
+
+            set_selected_name(
+                app,
+                app->render_units[
+                    app->selected
+                ]->name
+            );
+        }
+
+        return n;
+    }
+
+    static void
+    update_terminal_size(App *app)
+    {
+        struct winsize ws = {
+            0
+        };
+
+        if (
+            ioctl(
+                STDOUT_FILENO,
+                TIOCGWINSZ,
+                &ws
+            ) == 0 &&
+            ws.ws_row &&
+            ws.ws_col
+        ) {
+            app->rows =
+                ws.ws_row;
+
+            app->cols =
+                ws.ws_col;
+        } else {
+            app->rows =
+                24;
+
+            app->cols =
+                80;
+        }
+    }
+
+    static size_t
+    utf8_prefix_bytes(
+        const char *s,
+        size_t max_cols
+    )
+    {
+        mbstate_t st = {
+            0
+        };
+
+        const char *p =
+            s;
+
+        size_t bytes =
+            0;
+
+        size_t cols =
+            0;
+
+        while (*p) {
+            wchar_t wc;
+
+            size_t n =
+                mbrtowc(
+                    &wc,
+                    p,
+                    MB_CUR_MAX,
+                    &st
+                );
+
+            if (
+                n ==
+                    (size_t)-1 ||
+                n ==
+                    (size_t)-2
+            ) {
+                memset(
+                    &st,
+                    0,
+                    sizeof(st)
+                );
+
+                n =
+                    1;
+
+                wc =
+                    (unsigned char)*p;
+            } else if (
+                n ==
+                0
+            ) {
+                break;
+            }
+
+            int w =
+                wcwidth(wc);
+
+            if (
+                w <
+                0
+            ) {
+                w =
+                    1;
+            }
+
+            if (
+                cols +
+                    (size_t)w >
+                max_cols
+            ) {
+                break;
+            }
+
+            cols +=
+                (size_t)w;
+
+            bytes +=
+                n;
+
+            p +=
+                n;
+        }
+
+        return bytes;
+    }
+
+    static void
+    print_clipped(
+        const char *s,
+        size_t max_cols
+    )
+    {
+        if (
+            max_cols ==
+            0
+        ) {
+            return;
+        }
+
+        size_t n =
+            utf8_prefix_bytes(
+                s,
+                max_cols
+            );
+
+        fwrite(
+            s,
+            1,
+            n,
+            stdout
+        );
+    }
+
+    static void
+    frame_begin(void)
+    {
+        /*
+         * Do not clear before repainting.
+         *
+         * Clearing the whole screen before outputting the replacement frame
+         * causes a visible blank frame in urxvt.
+         */
+        fputs(
+            ESC_HOME,
+            stdout
+        );
+    }
+
+    static void
+    frame_end(void)
+    {
+        /*
+         * The new frame has already been generated in the stdout buffer.
+         * Clear anything left below it and flush everything in one batch.
+         */
+        fputs(
+            C_RESET
+            ESC_CLEAR_DOWN,
+            stdout
+        );
+
+        fflush(stdout);
+    }
+
+    static void
+    render_main(App *app)
+    {
+        update_terminal_size(
+            app
+        );
+
+        size_t n =
+            prepare_render_units(
+                app
+            );
+
+        frame_begin();
+
+        printf(
+            C_BASE0D
+            C_BOLD
+            "systemd-errors"
+            C_RESET
+            C_BASE03
+            "  %s  last %.3g min  priority 0..3"
+            C_RESET
+            ESC_CLEAR_EOL
+            "\n",
+            app->source
+                ? app->source
+                : "local",
+            app->minutes
+        );
+
+        fputs(
+            C_BASE03
+            "j/k: select   "
+            "Enter: journal context   "
+            "Esc/q: quit   "
+            "Ctrl-C: quit"
+            C_RESET
+            ESC_CLEAR_EOL
+            "\n"
+            ESC_CLEAR_EOL
+            "\n",
+            stdout
+        );
+
+        if (
+            n ==
+            0
+        ) {
+            fputs(
+                C_BASE0B
+                "  no service errors in the current window"
+                C_RESET
+                ESC_CLEAR_EOL
+                "\n",
+                stdout
+            );
+
+            frame_end();
+
+            return;
+        }
+
+        size_t header_rows =
+            3u;
+
+        size_t footer_rows =
+            1u;
+
+        size_t visible =
+            app->rows >
+                header_rows +
+                    footer_rows
+                ? app->rows -
+                    header_rows -
+                    footer_rows
+                : 1u;
+
+        size_t first =
+            0;
+
+        if (
+            app->selected >=
+            visible
+        ) {
+            first =
+                app->selected -
+                visible +
+                1u;
+        }
+
+        size_t end =
+            first +
+            visible;
+
+        if (
+            end >
+            n
+        ) {
+            end =
+                n;
+        }
+
+        for (
+            size_t i = first;
+            i < end;
+            ++i
+        ) {
+            Unit *u =
+                app->render_units[i];
+
+            bool selected =
+                i ==
+                app->selected;
+
+            if (selected) {
+                fputs(
+                    C_REVERSE
+                    C_BASE0D,
+                    stdout
+                );
+            } else {
+                fputs(
+                    C_BASE05,
+                    stdout
+                );
+            }
+
+            fputs(
+                selected
+                    ? " > "
+                    : "   ",
+                stdout
+            );
+
+            char prefix[64];
+
+            int pfx =
+                snprintf(
+                    prefix,
+                    sizeof(prefix),
+                    "%-6" PRIu64 " ",
+                    u->count
+                );
+
+            if (
+                pfx <
+                0
+            ) {
+                pfx =
+                    0;
+            }
+
+            if (!selected) {
+                fputs(
+                    C_BASE08,
+                    stdout
+                );
+            }
+
+            fwrite(
+                prefix,
+                1,
+                (size_t)pfx,
+                stdout
+            );
+
+            if (!selected) {
+                fputs(
+                    C_BASE05,
+                    stdout
+                );
+            }
+
+            size_t used =
+                3u +
+                (size_t)pfx;
+
+            size_t room =
+                app->cols >
+                    used
+                    ? app->cols -
+                        used
+                    : 0u;
+
+            print_clipped(
+                u->name,
+                room
+            );
+
+            fputs(
+                C_RESET
+                ESC_CLEAR_EOL
+                "\n",
+                stdout
+            );
+        }
+
+        frame_end();
+    }
+
+    static void
+    detail_line_free(
+        DetailLine *line
+    )
+    {
+        free(
+            line->message
+        );
+
+        line->message =
+            NULL;
+    }
+
+    static void
+    detail_clear(
+        DetailView *d
+    )
+    {
+        for (
+            size_t i = 0;
+            i < d->len;
+            ++i
+        ) {
+            detail_line_free(
+                &d->v[i]
+            );
+        }
+
+        d->len =
+            0;
+
+        d->top =
+            0;
+
+        d->error_count =
+            0;
+
+        free(
+            d->unit
+        );
+
+        d->unit =
+            NULL;
+    }
+
+    static void
+    detail_destroy(
+        DetailView *d
+    )
+    {
+        detail_clear(d);
+
+        free(d->v);
+    }
+
+    static void
+    detail_reserve(
+        DetailView *d,
+        size_t need
+    )
+    {
+        if (
+            d->cap >=
+            need
+        ) {
+            return;
+        }
+
+        size_t cap =
+            d->cap
+                ? d->cap
+                : INITIAL_DETAIL_CAP;
+
+        while (
+            cap <
+            need
+        ) {
+            cap *=
+                2u;
+        }
+
+        d->v =
+            xrealloc(
+                d->v,
+                cap *
+                    sizeof(*d->v)
+            );
+
+        d->cap =
+            cap;
+    }
+
+    static void
+    detail_append_gap(
+        DetailView *d
+    )
+    {
+        if (
+            d->len &&
+            d->v[
+                d->len - 1u
+            ].kind ==
+                DETAIL_GAP
+        ) {
+            return;
+        }
+
+        detail_reserve(
+            d,
+            d->len +
+                1u
+        );
+
+        d->v[d->len++] =
+            (DetailLine){
+                .kind =
+                    DETAIL_GAP,
+
+                .priority =
+                    -1,
+            };
+    }
+
+    static void
+    detail_append_log(
+        DetailView *d,
+        uint64_t ts_usec,
+        int priority,
+        bool is_error,
+        const char *message
+    )
+    {
+        detail_reserve(
+            d,
+            d->len +
+                1u
+        );
+
+        d->v[d->len++] =
+            (DetailLine){
+                .kind =
+                    DETAIL_LOG,
+
+                .ts_usec =
+                    ts_usec,
+
+                .priority =
+                    priority,
+
+                .is_error =
+                    is_error,
+
+                .message =
+                    xstrdup(message),
+            };
+
+        if (is_error) {
+            ++d->error_count;
+        }
+    }
+
+    static char *
+    sanitize_field_string(
+        const void *data,
+        size_t len,
+        const char *prefix
+    )
+    {
+        size_t prefix_len =
+            strlen(prefix);
+
+        if (
+            len <
+                prefix_len ||
+            memcmp(
+                data,
+                prefix,
+                prefix_len
+            ) != 0
+        ) {
+            return xstrdup(
+                "(invalid field)"
+            );
+        }
+
+        const unsigned char *src =
+            (const unsigned char *)data +
+            prefix_len;
+
+        size_t n =
+            len -
+            prefix_len;
+
+        char *out =
+            xmalloc(
+                n +
+                1u
+            );
+
+        for (
+            size_t i = 0;
+            i < n;
+            ++i
+        ) {
+            unsigned char c =
+                src[i];
+
+            out[i] =
+                (
+                    c <
+                        0x20 ||
+                    c ==
+                        0x7f
+                )
+                    ? ' '
+                    : (char)c;
+        }
+
+        out[n] =
+            '\0';
+
+        return out;
+    }
+
+    static int
+    journal_current_priority(
+        sd_journal *j
+    )
+    {
+        const void *data;
+        size_t len;
+
+        int r =
+            sd_journal_get_data(
+                j,
+                "PRIORITY",
+                &data,
+                &len
+            );
+
+        if (
+            r ==
+            -ENOENT
+        ) {
+            return 6;
+        }
+
+        if (r < 0) {
+            die_errno(
+                "sd_journal_get_data(PRIORITY)",
+                r
+            );
+        }
+
+        static const char prefix[] =
+            "PRIORITY=";
+
+        const size_t pfx =
+            sizeof(prefix) -
+            1u;
+
+        if (
+            len <=
+                pfx ||
+            memcmp(
+                data,
+                prefix,
+                pfx
+            ) != 0
+        ) {
+            return 6;
+        }
+
+        const char *s =
+            (const char *)data +
+            pfx;
+
+        if (
+            *s <
+                '0' ||
+            *s >
+                '7'
+        ) {
+            return 6;
+        }
+
+        return
+            *s -
+            '0';
+    }
+
+    static char *
+    journal_current_message(
+        sd_journal *j
+    )
+    {
+        const void *data;
+        size_t len;
+
+        int r =
+            sd_journal_get_data(
+                j,
+                "MESSAGE",
+                &data,
+                &len
+            );
+
+        if (
+            r ==
+            -ENOENT
+        ) {
+            return xstrdup(
+                "(no MESSAGE field)"
+            );
+        }
+
+        if (r < 0) {
+            die_errno(
+                "sd_journal_get_data(MESSAGE)",
+                r
+            );
+        }
+
+        return
+            sanitize_field_string(
+                data,
+                len,
+                "MESSAGE="
+            );
+    }
+
+    typedef struct {
+        uint64_t ts_usec;
+        int priority;
+        bool is_error;
+        char *message;
+    } ContextItem;
+
+    typedef struct {
+        ContextItem *v;
+        size_t len;
+        size_t cap;
+    } ContextVec;
+
+    static void
+    context_item_clear(ContextItem *x)
+    {
+        free(x->message);
+        x->message =
+            NULL;
+    }
+
+    static void
+    context_vec_destroy(ContextVec *v)
+    {
+        for (
+            size_t i = 0;
+            i < v->len;
+            ++i
+        ) {
+            context_item_clear(
+                &v->v[i]
+            );
+        }
+
+        free(v->v);
+
+        memset(
+            v,
+            0,
+            sizeof(*v)
+        );
+    }
+
+    static void
+    context_vec_append(
+        ContextVec *v,
+        uint64_t ts_usec,
+        int priority,
+        const char *message
+    )
+    {
+        if (
+            v->len ==
+            v->cap
+        ) {
+            v->cap =
+                v->cap
+                    ? v->cap * 2u
+                    : 128u;
+
+            v->v =
+                xrealloc(
+                    v->v,
+                    v->cap *
+                        sizeof(*v->v)
+                );
+        }
+
+        bool is_error =
+            priority >= 0 &&
+            priority <= 3;
+
+        v->v[v->len++] =
+            (ContextItem){
+                .ts_usec =
+                    ts_usec,
+                .priority =
+                    priority,
+                .is_error =
+                    is_error,
+                .message =
+                    xstrdup(message),
+            };
+    }
+
+    static void
+    build_detail_from_context(
+        App *app,
+        const ContextVec *items
+    )
+    {
+        bool have_region =
+            false;
+
+        size_t emitted_end =
+            0;
+
+        for (
+            size_t i = 0;
+            i < items->len;
+            ++i
+        ) {
+            if (
+                !items->v[i].is_error
+            ) {
+                continue;
+            }
+
+            size_t before =
+                app->context_lines;
+
+            size_t start =
+                i >
+                    before
+                        ? i -
+                            before
+                        : 0u;
+
+            size_t after =
+                app->context_lines;
+
+            size_t end =
+                i +
+                1u;
+
+            if (
+                after >
+                items->len -
+                    end
+            ) {
+                end =
+                    items->len;
+            } else {
+                end +=
+                    after;
+            }
+
+            if (!have_region) {
+                if (
+                    start >
+                    0
+                ) {
+                    detail_append_gap(
+                        &app->detail
+                    );
+                }
+
+                for (
+                    size_t k = start;
+                    k < end;
+                    ++k
+                ) {
+                    const ContextItem *x =
+                        &items->v[k];
+
+                    detail_append_log(
+                        &app->detail,
+                        x->ts_usec,
+                        x->priority,
+                        x->is_error,
+                        x->message
+                    );
+                }
+
+                emitted_end =
+                    end;
+
+                have_region =
+                    true;
+
+                continue;
+            }
+
+            if (
+                start >
+                emitted_end
+            ) {
+                detail_append_gap(
+                    &app->detail
+                );
+
+                for (
+                    size_t k = start;
+                    k < end;
+                    ++k
+                ) {
+                    const ContextItem *x =
+                        &items->v[k];
+
+                    detail_append_log(
+                        &app->detail,
+                        x->ts_usec,
+                        x->priority,
+                        x->is_error,
+                        x->message
+                    );
+                }
+
+                emitted_end =
+                    end;
+
+                continue;
+            }
+
+            if (
+                end >
+                emitted_end
+            ) {
+                for (
+                    size_t k = emitted_end;
+                    k < end;
+                    ++k
+                ) {
+                    const ContextItem *x =
+                        &items->v[k];
+
+                    detail_append_log(
+                        &app->detail,
+                        x->ts_usec,
+                        x->priority,
+                        x->is_error,
+                        x->message
+                    );
+                }
+
+                emitted_end =
+                    end;
+            }
+        }
+
+        if (
+            have_region &&
+            emitted_end <
+                items->len
+        ) {
+            detail_append_gap(
+                &app->detail
+            );
+        }
+    }
+
+    static void
+    load_detail_local(
+        App *app,
+        const char *unit,
+        ContextVec *items
+    )
+    {
+        sd_journal *j =
+            NULL;
+
+        int r =
+            sd_journal_open(
+                &j,
+                SD_JOURNAL_SYSTEM |
+                    SD_JOURNAL_LOCAL_ONLY
+            );
+
+        if (r < 0) {
+            die_errno(
+                "sd_journal_open(detail)",
+                r
+            );
+        }
+
+        size_t match_len =
+            strlen(
+                "_SYSTEMD_UNIT="
+            ) +
+            strlen(unit) +
+            1u;
+
+        char *match =
+            xmalloc(
+                match_len
+            );
+
+        snprintf(
+            match,
+            match_len,
+            "_SYSTEMD_UNIT=%s",
+            unit
+        );
+
+        r =
+            sd_journal_add_match(
+                j,
+                match,
+                0
+            );
+
+        free(match);
+
+        if (r < 0) {
+            sd_journal_close(j);
+
+            die_errno(
+                "sd_journal_add_match(detail unit)",
+                r
+            );
+        }
+
+        uint64_t now =
+            realtime_usec();
+
+        uint64_t cutoff =
+            now >
+                app->window_usec
+                    ? now -
+                        app->window_usec
+                    : 0;
+
+        r =
+            sd_journal_seek_realtime_usec(
+                j,
+                cutoff
+            );
+
+        if (r < 0) {
+            sd_journal_close(j);
+
+            die_errno(
+                "sd_journal_seek_realtime_usec(detail)",
+                r
+            );
+        }
+
+        while (
+            (
+                r =
+                    sd_journal_next(j)
+            ) > 0
+        ) {
+            uint64_t ts_usec;
+
+            int rr =
+                sd_journal_get_realtime_usec(
+                    j,
+                    &ts_usec
+                );
+
+            if (rr < 0) {
+                sd_journal_close(j);
+
+                die_errno(
+                    "sd_journal_get_realtime_usec(detail)",
+                    rr
+                );
+            }
+
+            if (
+                ts_usec >
+                now
+            ) {
+                break;
+            }
+
+            int priority =
+                journal_current_priority(
+                    j
+                );
+
+            char *message =
+                journal_current_message(
+                    j
+                );
+
+            context_vec_append(
+                items,
+                ts_usec,
+                priority,
+                message
+            );
+
+            free(message);
+        }
+
+        if (r < 0) {
+            sd_journal_close(j);
+
+            die_errno(
+                "sd_journal_next(detail)",
+                r
+            );
+        }
+
+        sd_journal_close(j);
+    }
+
+    static void
+    load_detail_remote(
+        App *app,
+        const char *unit,
+        ContextVec *items
+    )
+    {
+        char *command =
+            remote_journal_command(
+                app,
+                unit,
+                false,
+                false
+            );
+
+        pid_t pid;
+        int fd;
+
+        spawn_remote_command(
+            app,
+            command,
+            false,
+            &pid,
+            &fd
+        );
+
+        free(command);
+
+        FILE *in =
+            fdopen(
+                fd,
+                "r"
+            );
+
+        if (!in) {
+            int err =
+                errno;
+
+            close(fd);
+            kill(pid, SIGTERM);
+            (void)waitpid(pid, NULL, 0);
+
+            die_errno(
+                "fdopen(remote detail)",
+                err
+            );
+        }
+
+        char *line =
+            NULL;
+
+        size_t cap =
+            0;
+
+        uint64_t now =
+            realtime_usec();
+
+        while (
+            getline(
+                &line,
+                &cap,
+                in
+            ) >= 0
+        ) {
+            size_t len =
+                strlen(line);
+
+            while (
+                len &&
+                (
+                    line[len - 1u] ==
+                        '\n' ||
+                    line[len - 1u] ==
+                        '\r'
+                )
+            ) {
+                --len;
+            }
+
+            if (!len)
+                continue;
+
+            RemoteEntry entry;
+
+            if (
+                !parse_remote_json_line(
+                    line,
+                    len,
+                    &entry
+                )
+            ) {
+                set_remote_error(
+                    app,
+                    line,
+                    len
+                );
+
+                continue;
+            }
+
+            if (
+                entry.ts_usec <=
+                now
+            ) {
+                context_vec_append(
+                    items,
+                    entry.ts_usec,
+                    entry.priority,
+                    entry.message
+                );
+            }
+
+            remote_entry_clear(
+                &entry
+            );
+        }
+
+        free(line);
+
+        if (
+            ferror(in)
+        ) {
+            int err =
+                errno;
+
+            fclose(in);
+            kill(pid, SIGTERM);
+            (void)waitpid(pid, NULL, 0);
+
+            die_errno(
+                "read(remote detail)",
+                err
+            );
+        }
+
+        fclose(in);
+
+        int status =
+            0;
+
+        while (
+            waitpid(
+                pid,
+                &status,
+                0
+            ) < 0
+        ) {
+            if (
+                errno ==
+                EINTR
+            ) {
+                continue;
+            }
+
+            die_errno(
+                "waitpid(remote detail)",
+                errno
+            );
+        }
+
+        if (
+            !WIFEXITED(status) ||
+            WEXITSTATUS(status) !=
+                0
+        ) {
+            restore_terminal();
+
+            fprintf(
+                stderr,
+                "remote detail query on %s failed",
+                app->source
+                    ? app->source
+                    : "(unknown)"
+            );
+
+            if (WIFEXITED(status)) {
+                fprintf(
+                    stderr,
+                    " (ssh exit %d)",
+                    WEXITSTATUS(status)
+                );
+            } else if (WIFSIGNALED(status)) {
+                fprintf(
+                    stderr,
+                    " (ssh signal %d)",
+                    WTERMSIG(status)
+                );
+            }
+
+            fputc('\n', stderr);
+
+            if (
+                app->remote_error &&
+                *app->remote_error
+            ) {
+                fprintf(
+                    stderr,
+                    "%s\n",
+                    app->remote_error
+                );
+            }
+
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    static void
+    load_detail(
+        App *app,
+        const char *unit
+    )
+    {
+        detail_clear(
+            &app->detail
+        );
+
+        app->detail.unit =
+            xstrdup(unit);
+
+        ContextVec items = {
+            0
+        };
+
+        if (app->remote) {
+            load_detail_remote(
+                app,
+                unit,
+                &items
+            );
+        } else {
+            load_detail_local(
+                app,
+                unit,
+                &items
+            );
+        }
+
+        build_detail_from_context(
+            app,
+            &items
+        );
+
+        context_vec_destroy(
+            &items
+        );
+
+        app->detail.top =
+            0;
+    }
+
+    static const char *
+    priority_name(int priority)
+    {
+        static const char *names[] = {
+            "EMERG",
+            "ALERT",
+            "CRIT",
+            "ERR",
+            "WARN",
+            "NOTICE",
+            "INFO",
+            "DEBUG",
+        };
+
+        if (
+            priority <
+                0 ||
+            priority >
+                7
+        ) {
+            return "?";
+        }
+
+        return
+            names[priority];
+    }
+
+    static const char *
+    priority_color(
+        int priority,
+        bool is_error
+    )
+    {
+        if (is_error) {
+            return
+                C_BASE08;
+        }
+
+        switch (priority) {
+        case 4:
+            return
+                C_BASE0A;
+
+        case 5:
+            return
+                C_BASE0C;
+
+        case 6:
+            return
+                C_BASE05;
+
+        case 7:
+            return
+                C_BASE03;
+
+        default:
+            return
+                C_BASE05;
+        }
+    }
+
+    static size_t
+    detail_visible_rows(
+        const App *app
+    )
+    {
+        const size_t header_rows =
+            3u;
+
+        const size_t footer_rows =
+            1u;
+
+        return
+            app->rows >
+                header_rows +
+                    footer_rows
+                    ? app->rows -
+                        header_rows -
+                        footer_rows
+                    : 1u;
+    }
+
+    static size_t
+    detail_max_top(
+        const App *app
+    )
+    {
+        size_t visible =
+            detail_visible_rows(
+                app
+            );
+
+        if (
+            app->detail.len <=
+            visible
+        ) {
+            return 0;
+        }
+
+        /*
+         * Once top > 0 one row is occupied by the leading viewport "...".
+         * Therefore at the bottom only visible-1 actual detail rows fit.
+         */
+        size_t actual_rows =
+            visible >
+                1u
+                    ? visible -
+                        1u
+                    : 1u;
+
+        return
+            app->detail.len >
+                actual_rows
+                    ? app->detail.len -
+                        actual_rows
+                    : 0u;
+    }
+
+    static void
+    format_time(
+        uint64_t usec,
+        char out[32]
+    )
+    {
+        static const char *days[] = {
+            "SUN",
+            "MON",
+            "TUE",
+            "WED",
+            "THU",
+            "FRI",
+            "SAT",
+        };
+
+        time_t sec =
+            (time_t)(
+                usec /
+                UINT64_C(1000000)
+            );
+
+        struct tm tm;
+
+        if (
+            !localtime_r(
+                &sec,
+                &tm
+            )
+        ) {
+            snprintf(
+                out,
+                32,
+                "??? 0000-00-00 00:00:00"
+            );
+
+            return;
+        }
+
+        const char *day =
+            tm.tm_wday >= 0 &&
+            tm.tm_wday <= 6
+                ? days[tm.tm_wday]
+                : "???";
+
+        memcpy(
+            out,
+            day,
+            3u
+        );
+
+        out[3] =
+            ' ';
+
+        if (
+            !strftime(
+                out + 4,
+                28u,
+                "%Y-%m-%d %H:%M:%S",
+                &tm
+            )
+        ) {
+            strcpy(
+                out,
+                "??? 0000-00-00 00:00:00"
+            );
+        }
+    }
+
+    static void
+    render_gap_line(void)
+    {
+        fputs(
+            C_BASE03
+            "  ..."
+            C_RESET
+            ESC_CLEAR_EOL
+            "\n",
+            stdout
+        );
+    }
+
+    static void
+    render_detail(App *app)
+    {
+        update_terminal_size(
+            app
+        );
+
+        frame_begin();
+
+        printf(
+            C_BASE0D
+            C_BOLD
+            "%s"
+            C_RESET
+            C_BASE03
+            "  %s  errors=%zu  context=±%u  last %.3g min"
+            C_RESET
+            ESC_CLEAR_EOL
+            "\n",
+            app->detail.unit
+                ? app->detail.unit
+                : "(unknown)",
+            app->source
+                ? app->source
+                : "local",
+            app->detail.error_count,
+            app->context_lines,
+            app->minutes
+        );
+
+        fputs(
+            C_BASE03
+            "j/k: line   "
+            "Ctrl-D/Ctrl-U: half-page   "
+            "gg/G: top/bottom   "
+            "Esc/q: back"
+            C_RESET
+            ESC_CLEAR_EOL
+            "\n"
+            ESC_CLEAR_EOL
+            "\n",
+            stdout
+        );
+
+        size_t visible =
+            detail_visible_rows(
+                app
+            );
+
+        if (
+            app->detail.len ==
+            0
+        ) {
+            fputs(
+                C_BASE03
+                "  no matching error entries"
+                C_RESET
+                ESC_CLEAR_EOL
+                "\n",
+                stdout
+            );
+
+            frame_end();
+
+            return;
+        }
+
+        size_t max_top =
+            detail_max_top(
+                app
+            );
+
+        if (
+            app->detail.top >
+            max_top
+        ) {
+            app->detail.top =
+                max_top;
+        }
+
+        bool hidden_above =
+            app->detail.top >
+            0;
+
+        size_t rows_left =
+            visible;
+
+        /*
+         * If this viewport doesn't start with the first available detail
+         * line, its FIRST visible row is "...".
+         */
+        if (
+            hidden_above &&
+            rows_left
+        ) {
+            render_gap_line();
+
+            --rows_left;
+        }
+
+        size_t start =
+            app->detail.top;
+
+        size_t available =
+            app->detail.len -
+            start;
+
+        /*
+         * Decide whether a final viewport "..." is required.
+         *
+         * If everything does not fit, reserve the final row for it.
+         */
+        size_t content_rows =
+            available <
+                rows_left
+                    ? available
+                    : rows_left;
+
+        bool hidden_below =
+            available >
+            rows_left;
+
+        if (
+            hidden_below &&
+            content_rows
+        ) {
+            --content_rows;
+        }
+
+        /*
+         * Tiny terminals: show a real detail row rather than using every
+         * available row exclusively for omission markers.
+         */
+        if (
+            content_rows ==
+                0 &&
+            available &&
+            rows_left
+        ) {
+            content_rows =
+                1u;
+
+            hidden_below =
+                available >
+                1u;
+        }
+
+        size_t end =
+            start +
+            content_rows;
+
+        if (
+            end >
+            app->detail.len
+        ) {
+            end =
+                app->detail.len;
+        }
+
+        for (
+            size_t i = start;
+            i < end;
+            ++i
+        ) {
+            DetailLine *line =
+                &app->detail.v[i];
+
+            if (
+                line->kind ==
+                DETAIL_GAP
+            ) {
+                /*
+                 * Semantic gap: context was omitted between log regions.
+                 */
+                render_gap_line();
+
+                continue;
+            }
+
+            char ts[32];
+
+            format_time(
+                line->ts_usec,
+                ts
+            );
+
+            const char *color =
+                priority_color(
+                    line->priority,
+                    line->is_error
+                );
+
+            char prefix[64];
+
+            int pfx =
+                snprintf(
+                    prefix,
+                    sizeof(prefix),
+                    "%c %s %-6s ",
+                    line->is_error
+                        ? '!'
+                        : ' ',
+                    ts,
+                    priority_name(
+                        line->priority
+                    )
+                );
+
+            if (
+                pfx <
+                0
+            ) {
+                pfx =
+                    0;
+            }
+
+            fputs(
+                color,
+                stdout
+            );
+
+            if (
+                line->is_error
+            ) {
+                fputs(
+                    C_BOLD,
+                    stdout
+                );
+            }
+
+            fwrite(
+                prefix,
+                1,
+                (size_t)pfx,
+                stdout
+            );
+
+            size_t room =
+                app->cols >
+                    (size_t)pfx
+                    ? app->cols -
+                        (size_t)pfx
+                    : 0u;
+
+            print_clipped(
+                line->message
+                    ? line->message
+                    : "",
+                room
+            );
+
+            fputs(
+                C_RESET
+                ESC_CLEAR_EOL
+                "\n",
+                stdout
+            );
+        }
+
+        /*
+         * If this viewport does not include the final available detail
+         * line, its LAST visible row is "...".
+         */
+        if (
+            hidden_below
+        ) {
+            render_gap_line();
+        }
+
+        frame_end();
+    }
+
+    static void
+    render(App *app)
+    {
+        if (
+            app->view ==
+            VIEW_MAIN
+        ) {
+            render_main(app);
+        } else {
+            render_detail(app);
+        }
+    }
+
+    static uint64_t
+    next_expiry_timeout(
+        const App *app,
+        uint64_t now
+    )
+    {
+        if (
+            app->events.len ==
+            0
+        ) {
+            return
+                UINT64_MAX;
+        }
+
+        uint64_t ts =
+            app->events.v[0].ts_usec;
+
+        uint64_t expiry =
+            ts >
+                UINT64_MAX -
+                    app->window_usec
+                    ? UINT64_MAX
+                    : ts +
+                        app->window_usec;
+
+        return
+            expiry <= now
+                ? 0
+                : expiry -
+                    now;
+    }
+
+    static const struct timespec *
+    make_poll_timeout(
+        App *app,
+        struct timespec *ts
+    )
+    {
+        uint64_t timeout =
+            next_expiry_timeout(
+                app,
+                realtime_usec()
+            );
+
+        if (!app->remote) {
+            uint64_t journal_abs;
+
+            int r =
+                sd_journal_get_timeout(
+                    app->journal,
+                    &journal_abs
+                );
+
+            if (r < 0) {
+                die_errno(
+                    "sd_journal_get_timeout",
+                    r
+                );
+            }
+
+            if (
+                journal_abs !=
+                UINT64_MAX
+            ) {
+                uint64_t now =
+                    monotonic_usec();
+
+                uint64_t journal_rel =
+                    journal_abs <= now
+                        ? 0
+                        : journal_abs -
+                            now;
+
+                if (
+                    timeout ==
+                        UINT64_MAX ||
+                    journal_rel <
+                        timeout
+                ) {
+                    timeout =
+                        journal_rel;
+                }
+            }
+        }
+
+        if (
+            timeout ==
+            UINT64_MAX
+        ) {
+            return NULL;
+        }
+
+        ts->tv_sec =
+            (time_t)(
+                timeout /
+                UINT64_C(1000000)
+            );
+
+        ts->tv_nsec =
+            (long)(
+                (
+                    timeout %
+                    UINT64_C(1000000)
+                ) *
+                UINT64_C(1000)
+            );
+
+        return ts;
+    }
+
+    static void
+    move_selection(
+        App *app,
+        int delta
+    )
+    {
+        size_t n =
+            prepare_render_units(
+                app
+            );
+
+        if (
+            n ==
+            0
+        ) {
+            return;
+        }
+
+        if (
+            delta <
+            0
+        ) {
+            if (
+                app->selected >
+                0
+            ) {
+                --app->selected;
+            }
+        } else if (
+            delta >
+            0
+        ) {
+            if (
+                app->selected +
+                    1u <
+                n
+            ) {
+                ++app->selected;
+            }
+        }
+
+        set_selected_name(
+            app,
+            app->render_units[
+                app->selected
+            ]->name
+        );
+    }
+
+    static void
+    detail_scroll_lines(
+        App *app,
+        long delta
+    )
+    {
+        size_t max_top =
+            detail_max_top(
+                app
+            );
+
+        if (
+            delta <
+            0
+        ) {
+            size_t amount =
+                (size_t)(-delta);
+
+            app->detail.top =
+                amount >
+                    app->detail.top
+                    ? 0u
+                    : app->detail.top -
+                        amount;
+        } else {
+            size_t amount =
+                (size_t)delta;
+
+            size_t current =
+                app->detail.top >
+                    max_top
+                    ? max_top
+                    : app->detail.top;
+
+            size_t remaining =
+                max_top -
+                current;
+
+            app->detail.top =
+                amount >
+                    remaining
+                    ? max_top
+                    : current +
+                        amount;
+        }
+    }
+
+    static void
+    detail_scroll_top(
+        App *app
+    )
+    {
+        app->detail.top =
+            0;
+    }
+
+    static void
+    detail_scroll_bottom(
+        App *app
+    )
+    {
+        app->detail.top =
+            detail_max_top(
+                app
+            );
+    }
+
+    static void
+    enter_detail(App *app)
+    {
+        size_t n =
+            prepare_render_units(
+                app
+            );
+
+        if (
+            n ==
+                0 ||
+            app->selected >=
+                n
+        ) {
+            return;
+        }
+
+        const char *unit =
+            app->render_units[
+                app->selected
+            ]->name;
+
+        set_selected_name(
+            app,
+            unit
+        );
+
+        load_detail(
+            app,
+            unit
+        );
+
+        app->pending_g =
+            false;
+
+        app->view =
+            VIEW_DETAIL;
+    }
+
+    static bool
+    handle_key(
+        App *app,
+        unsigned char c
+    )
+    {
+        if (
+            app->view ==
+            VIEW_MAIN
+        ) {
+            /*
+             * On the main view q behaves exactly like Esc: exit.
+             */
+            if (
+                c == 0x1b ||
+                c == 'q' ||
+                c == 'Q'
+            ) {
+                return true;
+            }
+
+            app->pending_g =
+                false;
+
+            switch (c) {
+            case 'j':
+                move_selection(
+                    app,
+                    +1
+                );
+
+                render_main(
+                    app
+                );
+
+                break;
+
+            case 'k':
+                move_selection(
+                    app,
+                    -1
+                );
+
+                render_main(
+                    app
+                );
+
+                break;
+
+            case '\r':
+            case '\n':
+                enter_detail(
+                    app
+                );
+
+                if (
+                    app->view ==
+                    VIEW_DETAIL
+                ) {
+                    render_detail(
+                        app
+                    );
+                }
+
+                break;
+
+            default:
+                break;
+            }
+
+            return false;
+        }
+
+        /*
+         * On the detail view q behaves exactly like Esc: go back.
+         */
+        if (
+            c == 0x1b ||
+            c == 'q' ||
+            c == 'Q'
+        ) {
+            app->pending_g =
+                false;
+
+            app->view =
+                VIEW_MAIN;
+
+            render_main(
+                app
+            );
+
+            return false;
+        }
+
+        /*
+         * Vim-style gg.
+         *
+         * The first g arms the sequence; a second consecutive g jumps to
+         * the top without performing a redraw after the first key.
+         */
+        if (
+            c ==
+            'g'
+        ) {
+            if (
+                app->pending_g
+            ) {
+                app->pending_g =
+                    false;
+
+                detail_scroll_top(
+                    app
+                );
+
+                render_detail(
+                    app
+                );
+            } else {
+                app->pending_g =
+                    true;
+            }
+
+            return false;
+        }
+
+        /*
+         * Any non-g key cancels an incomplete g sequence.
+         */
+        app->pending_g =
+            false;
+
+        switch (c) {
+        case 'G':
+            detail_scroll_bottom(
+                app
+            );
+
+            render_detail(
+                app
+            );
+
+            break;
+
+        case 'j':
+            detail_scroll_lines(
+                app,
+                +1
+            );
+
+            render_detail(
+                app
+            );
+
+            break;
+
+        case 'k':
+            detail_scroll_lines(
+                app,
+                -1
+            );
+
+            render_detail(
+                app
+            );
+
+            break;
+
+        case 0x04: {
+            /*
+             * Ctrl-D:
+             * Vim/Neovim-style default half-page downward.
+             */
+            size_t half =
+                detail_visible_rows(
+                    app
+                ) /
+                2u;
+
+            detail_scroll_lines(
+                app,
+                (long)(
+                    half
+                        ? half
+                        : 1u
+                )
+            );
+
+            render_detail(
+                app
+            );
+
+            break;
+        }
+
+        case 0x15: {
+            /*
+             * Ctrl-U:
+             * Vim/Neovim-style default half-page upward.
+             */
+            size_t half =
+                detail_visible_rows(
+                    app
+                ) /
+                2u;
+
+            detail_scroll_lines(
+                app,
+                -(long)(
+                    half
+                        ? half
+                        : 1u
+                )
+            );
+
+            render_detail(
+                app
+            );
+
+            break;
+        }
+
+        default:
+            break;
+        }
+
+        return false;
+    }
+
+    static bool
+    read_and_handle_keys(App *app)
+    {
+        unsigned char buf[64];
+
+        ssize_t n =
+            read(
+                STDIN_FILENO,
+                buf,
+                sizeof(buf)
+            );
+
+        if (n < 0) {
+            if (
+                errno ==
+                    EINTR ||
+                errno ==
+                    EAGAIN
+            ) {
+                return false;
+            }
+
+            die_errno(
+                "read(stdin)",
+                errno
+            );
+        }
+
+        if (
+            n ==
+            0
+        ) {
+            return false;
+        }
+
+        for (
+            ssize_t i = 0;
+            i < n;
+            ++i
+        ) {
+            if (
+                handle_key(
+                    app,
+                    buf[i]
+                )
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    static void
+    enable_tui(App *app)
+    {
+        app->tty_in =
+            isatty(
+                STDIN_FILENO
+            );
+
+        app->tty_out =
+            isatty(
+                STDOUT_FILENO
+            );
+
+        if (
+            !app->tty_in ||
+            !app->tty_out
+        ) {
+            restore_terminal();
+
+            fputs(
+                "systemd-errors requires an interactive terminal "
+                "on stdin/stdout\n",
+                stderr
+            );
+
+            exit(EXIT_FAILURE);
+        }
+
+        if (
+            tcgetattr(
+                STDIN_FILENO,
+                &saved_termios
+            ) < 0
+        ) {
+            die_errno(
+                "tcgetattr",
+                errno
+            );
+        }
+
+        struct termios t =
+            saved_termios;
+
+        /*
+         * Immediate single-key input.
+         *
+         * ISIG remains enabled so Ctrl-C continues to produce SIGINT.
+         */
+        t.c_lflag &=
+            ~(
+                ICANON |
+                ECHO
+            );
+
+        t.c_cc[VMIN] =
+            1;
+
+        t.c_cc[VTIME] =
+            0;
+
+        if (
+            tcsetattr(
+                STDIN_FILENO,
+                TCSANOW,
+                &t
+            ) < 0
+        ) {
+            die_errno(
+                "tcsetattr",
+                errno
+            );
+        }
+
+        terminal_modified =
+            true;
+
+        if (
+            atexit(
+                restore_terminal
+            ) != 0
+        ) {
+            restore_terminal();
+
+            fputs(
+                "atexit failed\n",
+                stderr
+            );
+
+            exit(EXIT_FAILURE);
+        }
+
+        /*
+         * Enter the alternate screen only once.
+         */
+        fputs(
+            ESC_ALT_ON
+            ESC_CURSOR_HIDE,
+            stdout
+        );
+
+        fflush(stdout);
+
+        alternate_screen_active =
+            true;
+
+        update_terminal_size(
+            app
+        );
+    }
+
+    static void
+    usage(
+        FILE *out,
+        const char *argv0
+    )
+    {
+        fprintf(
+            out,
+            "Usage: %s [-m MINUTES] [-C LINES] [ssh://HOST]\n"
+            "\n"
+            "Interactive rolling view of systemd service journal messages at\n"
+            "priority err or higher. Default window: 5 minutes. Without a source\n"
+            "the local journal is used. An ssh:// source streams journalctl over\n"
+            "one persistent SSH connection.\n"
+            "\n"
+            "Examples:\n"
+            "  %s\n"
+            "  %s ssh://nas\n"
+            "  %s ssh://user@nas\n"
+            "\n"
+            "  -m, --minutes MINUTES   rolling error window "
+            "(> 0; fractional allowed)\n"
+            "  -C, --context LINES     context lines above/below each error "
+            "(default: 4)\n"
+            "  -h, --help              show this help\n"
+            "\n"
+            "Main view:\n"
+            "  j/k       select service\n"
+            "  Enter     open journal errors + context\n"
+            "  Esc/q     quit\n"
+            "  Ctrl-C    quit\n"
+            "\n"
+            "Detail view:\n"
+            "  j/k       scroll one line\n"
+            "  Ctrl-D    half-page down\n"
+            "  Ctrl-U    half-page up\n"
+            "  gg        go to top\n"
+            "  G         go to bottom\n"
+            "  Esc/q     return to service list\n"
+            "  Ctrl-C    quit\n",
+            argv0,
+            argv0,
+            argv0,
+            argv0
+        );
+    }
+
+    static double
+    parse_minutes(const char *s)
+    {
+        char *end =
+            NULL;
+
+        errno =
+            0;
+
+        double v =
+            strtod(
+                s,
+                &end
+            );
+
+        if (
+            errno ||
+            end ==
+                s ||
+            *end !=
+                '\0' ||
+            !(v > 0.0) ||
+            v >
+                1000000.0
+        ) {
+            fprintf(
+                stderr,
+                "invalid minutes value: %s\n",
+                s
+            );
+
+            exit(EXIT_FAILURE);
+        }
+
+        return v;
+    }
+
+    static unsigned
+    parse_context(const char *s)
+    {
+        char *end =
+            NULL;
+
+        errno =
+            0;
+
+        unsigned long v =
+            strtoul(
+                s,
+                &end,
+                10
+            );
+
+        if (
+            errno ||
+            end ==
+                s ||
+            *end !=
+                '\0' ||
+            v >
+                100000u
+        ) {
+            fprintf(
+                stderr,
+                "invalid context line count: %s\n",
+                s
+            );
+
+            exit(EXIT_FAILURE);
+        }
+
+        return
+            (unsigned)v;
+    }
+
+    int
+    main(
+        int argc,
+        char **argv
+    )
+    {
+        /*
+         * Fully buffer stdout before emitting terminal control sequences.
+         */
+        (void)setvbuf(
+            stdout,
+            stdout_buffer,
+            _IOFBF,
+            sizeof(stdout_buffer)
+        );
+
+        setlocale(
+            LC_CTYPE,
+            ""
+        );
+
+        App app = {
+            .minutes =
+                5.0,
+
+            .context_lines =
+                4u,
+
+            .view =
+                VIEW_MAIN,
+
+            .remote_pid =
+                -1,
+
+            .remote_fd =
+                -1,
+        };
+
+        static const struct option options[] = {
+            {
+                "minutes",
+                required_argument,
+                NULL,
+                'm',
+            },
+            {
+                "context",
+                required_argument,
+                NULL,
+                'C',
+            },
+            {
+                "help",
+                no_argument,
+                NULL,
+                'h',
+            },
+            {
+                NULL,
+                0,
+                NULL,
+                0,
+            },
+        };
+
+        for (;;) {
+            int c =
+                getopt_long(
+                    argc,
+                    argv,
+                    "m:C:h",
+                    options,
+                    NULL
+                );
+
+            if (
+                c ==
+                -1
+            ) {
+                break;
+            }
+
+            switch (c) {
+            case 'm':
+                app.minutes =
+                    parse_minutes(
+                        optarg
+                    );
+
+                break;
+
+            case 'C':
+                app.context_lines =
+                    parse_context(
+                        optarg
+                    );
+
+                break;
+
+            case 'h':
+                usage(
+                    stdout,
+                    argv[0]
+                );
+
+                fflush(stdout);
+
+                return
+                    EXIT_SUCCESS;
+
+            default:
+                usage(
+                    stderr,
+                    argv[0]
+                );
+
+                return
+                    EXIT_FAILURE;
+            }
+        }
+
+        if (
+            argc -
+                optind >
+            1
+        ) {
+            usage(
+                stderr,
+                argv[0]
+            );
+
+            return
+                EXIT_FAILURE;
+        }
+
+        if (
+            optind <
+            argc
+        ) {
+            const char *source =
+                argv[optind];
+
+            if (
+                strncmp(
+                    source,
+                    "ssh://",
+                    6u
+                ) != 0 ||
+                source[6] ==
+                    '\0'
+            ) {
+                fprintf(
+                    stderr,
+                    "unsupported journal source: %s\n"
+                    "expected ssh://HOST or no source for local logs\n",
+                    source
+                );
+
+                return
+                    EXIT_FAILURE;
+            }
+
+            app.remote =
+                true;
+
+            app.source =
+                xstrdup(source);
+        } else {
+            app.source =
+                xstrdup("local");
+        }
+
+        long double usec =
+            (long double)app.minutes *
+            60.0L *
+            1000000.0L;
+
+        if (
+            usec <
+                1.0L ||
+            usec >
+                (long double)UINT64_MAX
+        ) {
+            fputs(
+                "time window is outside the supported range\n",
+                stderr
+            );
+
+            return
+                EXIT_FAILURE;
+        }
+
+        app.window_usec =
+            (uint64_t)usec;
+
+        struct sigaction sa = {
+            .sa_handler =
+                on_signal,
+        };
+
+        sigemptyset(
+            &sa.sa_mask
+        );
+
+        if (
+            sigaction(
+                SIGINT,
+                &sa,
+                NULL
+            ) < 0 ||
+            sigaction(
+                SIGTERM,
+                &sa,
+                NULL
+            ) < 0 ||
+            sigaction(
+                SIGWINCH,
+                &sa,
+                NULL
+            ) < 0
+        ) {
+            die_errno(
+                "sigaction",
+                errno
+            );
+        }
+
+        enable_tui(
+            &app
+        );
+
+        unitmap_init(
+            &app.units
+        );
+
+        int r =
+            0;
+
+        if (app.remote) {
+            start_remote_stream(
+                &app
+            );
+        } else {
+            r =
+                sd_journal_open(
+                    &app.journal,
+                    SD_JOURNAL_SYSTEM |
+                        SD_JOURNAL_LOCAL_ONLY
+                );
+
+            if (r < 0) {
+                die_errno(
+                    "sd_journal_open",
+                    r
+                );
+            }
+
+            /*
+             * Same-field journal matches are ORed:
+             *
+             * PRIORITY=0 OR
+             * PRIORITY=1 OR
+             * PRIORITY=2 OR
+             * PRIORITY=3
+             *
+             * equivalent to journalctl -p err.
+             */
+            static const char *priority_matches[] = {
+                "PRIORITY=0",
+                "PRIORITY=1",
+                "PRIORITY=2",
+                "PRIORITY=3",
+            };
+
+            for (
+                size_t i = 0;
+                i <
+                    sizeof(priority_matches) /
+                    sizeof(priority_matches[0]);
+                ++i
+            ) {
+                r =
+                    sd_journal_add_match(
+                        app.journal,
+                        priority_matches[i],
+                        0
+                    );
+
+                if (r < 0) {
+                    die_errno(
+                        "sd_journal_add_match",
+                        r
+                    );
+                }
+            }
+
+            /*
+             * Initial rolling-window snapshot. Afterwards the cursor remains at
+             * the tail and normal operation consumes only appended errors.
+             */
+            rebuild_window(
+                &app
+            );
+        }
+
+        render(
+            &app
+        );
+
+        while (
+            !stop_requested
+        ) {
+            int source_fd;
+            short source_events;
+
+            if (app.remote) {
+                source_fd =
+                    app.remote_fd;
+
+                source_events =
+                    POLLIN;
+            } else {
+                source_fd =
+                    sd_journal_get_fd(
+                        app.journal
+                    );
+
+                if (
+                    source_fd <
+                    0
+                ) {
+                    die_errno(
+                        "sd_journal_get_fd",
+                        source_fd
+                    );
+                }
+
+                int journal_events =
+                    sd_journal_get_events(
+                        app.journal
+                    );
+
+                if (
+                    journal_events <
+                    0
+                ) {
+                    die_errno(
+                        "sd_journal_get_events",
+                        journal_events
+                    );
+                }
+
+                source_events =
+                    (short)journal_events;
+            }
+
+            /*
+             * One event loop handles either local journald notifications or the
+             * remote SSH stream, plus keyboard input and exact window expiry.
+             */
+            struct pollfd fds[2] = {
+                {
+                    .fd =
+                        source_fd,
+
+                    .events =
+                        source_events,
+                },
+                {
+                    .fd =
+                        STDIN_FILENO,
+
+                    .events =
+                        POLLIN,
+                },
+            };
+
+            struct timespec timeout_storage;
+
+            const struct timespec *timeout =
+                make_poll_timeout(
+                    &app,
+                    &timeout_storage
+                );
+
+            int pr =
+                ppoll(
+                    fds,
+                    2,
+                    timeout,
+                    NULL
+                );
+
+            if (
+                pr <
+                0
+            ) {
+                if (
+                    errno ==
+                    EINTR
+                ) {
+                    if (
+                        stop_requested
+                    ) {
+                        break;
+                    }
+
+                    if (
+                        resize_requested
+                    ) {
+                        resize_requested =
+                            0;
+
+                        render(
+                            &app
+                        );
+                    }
+
+                    continue;
+                }
+
+                die_errno(
+                    "ppoll",
+                    errno
+                );
+            }
+
+            if (
+                resize_requested
+            ) {
+                resize_requested =
+                    0;
+
+                render(
+                    &app
+                );
+            }
+
+            /*
+             * Handle keyboard input first so navigation and exits stay immediate
+             * even when the journal source wakes us at the same time.
+             */
+            if (
+                (
+                    fds[1].revents &
+                    POLLIN
+                ) &&
+                read_and_handle_keys(
+                    &app
+                )
+            ) {
+                break;
+            }
+
+            bool changed =
+                false;
+
+            if (app.remote) {
+                if (
+                    fds[0].revents &
+                    POLLNVAL
+                ) {
+                    restore_terminal();
+                    fputs(
+                        "remote journal stream became invalid\n",
+                        stderr
+                    );
+                    exit(EXIT_FAILURE);
+                }
+
+                if (
+                    fds[0].revents &
+                    (
+                        POLLIN |
+                        POLLHUP |
+                        POLLERR
+                    )
+                ) {
+                    bool eof =
+                        false;
+
+                    changed |=
+                        remote_drain_stream(
+                            &app,
+                            &eof
+                        );
+
+                    if (eof) {
+                        remote_stream_died(
+                            &app
+                        );
+                    }
+                }
+            } else {
+                int jr =
+                    sd_journal_process(
+                        app.journal
+                    );
+
+                if (
+                    jr <
+                    0
+                ) {
+                    die_errno(
+                        "sd_journal_process",
+                        jr
+                    );
+                }
+
+                if (
+                    jr ==
+                    SD_JOURNAL_INVALIDATE
+                ) {
+                    /* Journal rotation, vacuuming or file-set change. */
+                    rebuild_window(
+                        &app
+                    );
+
+                    changed =
+                        true;
+                } else if (
+                    jr ==
+                    SD_JOURNAL_APPEND
+                ) {
+                    uint64_t now =
+                        realtime_usec();
+
+                    uint64_t cutoff =
+                        now >
+                            app.window_usec
+                                ? now -
+                                    app.window_usec
+                                : 0;
+
+                    while (
+                        (
+                            r =
+                                sd_journal_next(
+                                    app.journal
+                                )
+                        ) > 0
+                    ) {
+                        changed |=
+                            add_current_entry(
+                                &app,
+                                cutoff
+                            );
+                    }
+
+                    if (
+                        r <
+                        0
+                    ) {
+                        die_errno(
+                            "sd_journal_next",
+                            r
+                        );
+                    }
+                }
+            }
+
+            changed |=
+                expire_old(
+                    &app,
+                    realtime_usec()
+                );
+
+            /*
+             * Detail is a snapshot. Main counters keep updating behind it.
+             */
+            if (
+                changed &&
+                app.view ==
+                    VIEW_MAIN
+            ) {
+                render_main(
+                    &app
+                );
+            }
+        }
+
+        restore_terminal();
+
+        if (app.remote) {
+            stop_remote_stream(
+                &app
+            );
+        } else if (app.journal) {
+            sd_journal_close(
+                app.journal
+            );
+        }
+
+        detail_destroy(
+            &app.detail
+        );
+
+        heap_destroy(
+            &app.events
+        );
+
+        unitmap_destroy(
+            &app.units
+        );
+
+        free(
+            app.render_units
+        );
+
+        free(
+            app.selected_name
+        );
+
+        free(app.remote_buf);
+        free(app.remote_error);
+        free(app.source);
+
+        return
+            EXIT_SUCCESS;
+    }
+  meson.build: |
+    project(
+      'systemd-errors',
+      'c',
+      default_options: [
+        'c_std=c17',
+        'buildtype=release',
+        'warning_level=3',
+      ],
+    )
+
+    systemd_dep = dependency(
+      'libsystemd',
+      required: true,
+    )
+
+    jsonc_dep = dependency(
+      'json-c',
+      required: true,
+    )
+
+    executable(
+      'systemd-errors',
+      'main.c',
+      dependencies: [
+        systemd_dep,
+        jsonc_dep,
+      ],
+      install: false,
+    )
