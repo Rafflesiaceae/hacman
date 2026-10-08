@@ -1,8 +1,72 @@
 #!/usr/bin/env hacman
-# A single-line install script is fine too, as is a schedule that only ever
-# runs under `hacman --force`.
+# Keep a private Go toolchain current, then forward commands such as
+# `./examples/go.siml version` to it.
 name: go
-url: https://go.dev/VERSION?m=text
-check: hash
-schedule: never
-install: echo "go moved, see https://go.dev/dl/"
+# go.dev/dl/?mode=json lists only stable releases, newest first, so the first
+# "version" field is the current release. The same response carries the
+# SHA-256 of every published archive, which the install block verifies
+# against without a second request.
+url: https://go.dev/dl/?mode=json
+check: version
+version-prefix: "version": "
+version-suffix: "
+schedule: daily
+bin-path: go/bin/go
+install: |
+  set -eu
+  echo "installing $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  # Recover the last good toolchain if a previous replacement was interrupted.
+  previous="$PWD/.go-previous"
+  if [ ! -d "$PWD/go" ] && [ -d "$previous" ]; then
+    mv "$previous" "$PWD/go"
+  fi
+  rm -rf "$previous"
+
+  # Go publishes separate archives for the supported Linux architectures.
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=amd64 ;;
+    aarch64|arm64) release_arch=arm64 ;;
+    *)
+      echo "go: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  # The version field already carries the "go" prefix, e.g. go1.27.1.
+  archive="${HACMAN_VERSION}.linux-${release_arch}.tar.gz"
+
+  # Pick the checksum that follows this archive's filename in the listing.
+  expected="$(awk -v f="\"$archive\"," '
+    $1 == "\"filename\":" && $2 == f { found = 1; next }
+    found && $1 == "\"sha256\":" { gsub(/[",]/, "", $2); print $2; exit }
+  ' "$HACMAN_RESPONSE")"
+  if [ -z "$expected" ]; then
+    echo "go: no checksum entry for $archive" >&2
+    exit 1
+  fi
+
+  # Stage and verify the archive before touching the installed toolchain.
+  stage="$(mktemp -d "$PWD/.go-update.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  curl -fsSL "https://go.dev/dl/$archive" -o "$stage/$archive"
+  actual="$(sha256sum "$stage/$archive" | cut -d' ' -f1)"
+  if [ "$actual" != "$expected" ]; then
+    echo "go: checksum mismatch for $archive" >&2
+    exit 1
+  fi
+  tar -xzf "$stage/$archive" -C "$stage"
+  "$stage/go/bin/go" version >/dev/null
+
+  # Rotate only after the downloaded toolchain proves executable.
+  if [ -d "$PWD/go" ]; then
+    mv "$PWD/go" "$previous"
+  fi
+  if mv "$stage/go" "$PWD/go"; then
+    rm -rf "$previous"
+  else
+    if [ -d "$previous" ]; then
+      mv "$previous" "$PWD/go"
+    fi
+    exit 1
+  fi
