@@ -1,8 +1,8 @@
 #!/usr/bin/env hacman
 # Interactive Varlink shell.
 # Run:
-#   ./vsh.siml /run/path/to/varlink.sock
-#   ./vsh.siml raf@server.example.com:/run/path/to/varlink.sock
+# ./vsh.siml /run/path/to/varlink.sock
+# ./vsh.siml raf@server.example.com:/run/path/to/varlink.sock
 name: vsh
 command: meson setup build && meson compile -C build
 bin-path: build/vsh
@@ -12,6 +12,8 @@ files:
 
     #include <ctype.h>
     #include <errno.h>
+    #include <fcntl.h>
+    #include <inttypes.h>
     #include <signal.h>
     #include <stdbool.h>
     #include <stddef.h>
@@ -26,6 +28,8 @@ files:
     #include <time.h>
     #include <unistd.h>
 
+    #include <readline/history.h>
+    #include <readline/readline.h>
     #include <yyjson.h>
 
     typedef struct {
@@ -36,6 +40,7 @@ files:
         size_t rx_cap;
         bool color;
         bool interactive;
+        char *history_path;
 
         bool remote;
         char *connect_path;
@@ -45,6 +50,12 @@ files:
         char *forward_dir;
         char *forward_path;
         pid_t ssh_pid;
+
+        char **completion_interfaces;
+        size_t completion_interface_count;
+        char **completion_methods;
+        size_t completion_method_count;
+        bool completion_loaded;
     } Shell;
 
     #define RST "\x1b[0m"
@@ -66,6 +77,45 @@ files:
     #define BRIGHT_WHITE "\x1b[97m"
 
     #define C(sh, s) ((sh)->color ? (s) : "")
+
+    static void free_string_list(char ***items, size_t *count)
+    {
+        if (!items || !*items)
+            return;
+
+        for (size_t i = 0; i < *count; i++)
+            free((*items)[i]);
+
+        free(*items);
+        *items = NULL;
+        *count = 0;
+    }
+
+    static void clear_completion_cache(Shell *sh)
+    {
+        free_string_list(&sh->completion_interfaces,
+                         &sh->completion_interface_count);
+        free_string_list(&sh->completion_methods,
+                         &sh->completion_method_count);
+        sh->completion_loaded = false;
+    }
+
+    static int append_string(char ***items, size_t *count, const char *value)
+    {
+        char **next = realloc(*items, (*count + 1) * sizeof(*next));
+        if (!next)
+            return -1;
+
+        next[*count] = strdup(value);
+        if (!next[*count]) {
+            *items = next;
+            return -1;
+        }
+
+        *items = next;
+        (*count)++;
+        return 0;
+    }
 
     static char *dup_range(const char *a, const char *b)
     {
@@ -1357,6 +1407,267 @@ files:
         yyjson_doc_free(doc);
     }
 
+    static int load_completion_cache(Shell *sh)
+    {
+        if (sh->completion_loaded)
+            return 0;
+
+        clear_completion_cache(sh);
+
+        yyjson_doc *info = get_info(sh);
+        if (!info)
+            return -1;
+
+        yyjson_val *params = reply_parameters(info);
+        yyjson_val *interfaces =
+            yyjson_is_obj(params) ? yyjson_obj_get(params, "interfaces") : NULL;
+
+        if (!yyjson_is_arr(interfaces)) {
+            yyjson_doc_free(info);
+            return -1;
+        }
+
+        size_t idx, max;
+        yyjson_val *val;
+
+        yyjson_arr_foreach(interfaces, idx, max, val) {
+            if (!yyjson_is_str(val))
+                continue;
+
+            const char *interface = yyjson_get_str(val);
+            if (append_string(&sh->completion_interfaces,
+                              &sh->completion_interface_count,
+                              interface) < 0) {
+                yyjson_doc_free(info);
+                clear_completion_cache(sh);
+                return -1;
+            }
+        }
+
+        yyjson_doc_free(info);
+
+        for (size_t i = 0; i < sh->completion_interface_count; i++) {
+            const char *interface = sh->completion_interfaces[i];
+            yyjson_doc *doc = get_interface_description(sh, interface);
+            if (!doc)
+                continue;
+
+            const char *desc = description_from_reply(doc);
+            if (!desc) {
+                yyjson_doc_free(doc);
+                continue;
+            }
+
+            for (const char *p = desc; *p;) {
+                const char *after = NULL;
+
+                if (line_has_keyword(p, "method", &after)) {
+                    const char *e = line_end(p);
+                    const char *open = memchr(after, '(', (size_t)(e - after));
+
+                    if (open) {
+                        char *method = compact_range(after, open);
+
+                        if (method && *method) {
+                            size_t n =
+                                strlen(interface) + 1 + strlen(method) + 1;
+                            char *full = malloc(n);
+
+                            if (!full) {
+                                free(method);
+                                yyjson_doc_free(doc);
+                                clear_completion_cache(sh);
+                                return -1;
+                            }
+
+                            snprintf(full, n, "%s.%s", interface, method);
+
+                            if (append_string(&sh->completion_methods,
+                                              &sh->completion_method_count,
+                                              full) < 0) {
+                                free(full);
+                                free(method);
+                                yyjson_doc_free(doc);
+                                clear_completion_cache(sh);
+                                return -1;
+                            }
+
+                            free(full);
+                        }
+
+                        free(method);
+                    }
+                }
+
+                const char *e = line_end(p);
+                p = *e == '\n' ? e + 1 : e;
+            }
+
+            yyjson_doc_free(doc);
+        }
+
+        sh->completion_loaded = true;
+        return 0;
+    }
+
+    static const char *completion_commands[] = {
+        "help",
+        "info",
+        "interfaces",
+        "show",
+        "raw",
+        "reconnect",
+        "more",
+        "oneway",
+        "exit",
+        "quit",
+    };
+
+    typedef enum {
+        COMPLETE_NONE,
+        COMPLETE_COMMAND_OR_METHOD,
+        COMPLETE_INTERFACE,
+        COMPLETE_METHOD,
+    } CompletionMode;
+
+    static Shell *completion_shell;
+    static CompletionMode completion_mode;
+    static size_t completion_index;
+
+    static const char *completion_candidate_at(size_t index)
+    {
+        const size_t command_count =
+            sizeof(completion_commands) / sizeof(completion_commands[0]);
+
+        switch (completion_mode) {
+        case COMPLETE_COMMAND_OR_METHOD:
+            if (index < command_count)
+                return completion_commands[index];
+
+            index -= command_count;
+            if (index < completion_shell->completion_method_count)
+                return completion_shell->completion_methods[index];
+            return NULL;
+
+        case COMPLETE_INTERFACE:
+            if (index == 0)
+                return "*";
+
+            index--;
+            if (index < completion_shell->completion_interface_count)
+                return completion_shell->completion_interfaces[index];
+            return NULL;
+
+        case COMPLETE_METHOD:
+            if (index < completion_shell->completion_method_count)
+                return completion_shell->completion_methods[index];
+            return NULL;
+
+        case COMPLETE_NONE:
+            return NULL;
+        }
+
+        return NULL;
+    }
+
+    static char *completion_generator(const char *text, int state)
+    {
+        if (state == 0) {
+            completion_index = 0;
+
+            if (completion_mode != COMPLETE_NONE)
+                load_completion_cache(completion_shell);
+        }
+
+        size_t text_len = strlen(text);
+
+        for (;;) {
+            const char *candidate = completion_candidate_at(completion_index++);
+            if (!candidate)
+                return NULL;
+
+            if (!strncmp(candidate, text, text_len))
+                return strdup(candidate);
+        }
+    }
+
+    static size_t completion_word_index(int start)
+    {
+        size_t words = 0;
+        bool in_word = false;
+
+        for (int i = 0; i < start; i++) {
+            unsigned char ch = (unsigned char)rl_line_buffer[i];
+
+            if (isspace(ch)) {
+                in_word = false;
+            } else if (!in_word) {
+                words++;
+                in_word = true;
+            }
+        }
+
+        return words;
+    }
+
+    static char *completion_first_word(void)
+    {
+        const char *p = rl_line_buffer;
+
+        while (*p && isspace((unsigned char)*p))
+            p++;
+
+        const char *e = p;
+        while (*e && !isspace((unsigned char)*e))
+            e++;
+
+        return dup_range(p, e);
+    }
+
+    static char **vsh_completion(const char *text, int start, int end)
+    {
+        (void)end;
+
+        rl_attempted_completion_over = 1;
+        rl_completion_append_character = ' ';
+        completion_mode = COMPLETE_NONE;
+
+        size_t word = completion_word_index(start);
+
+        if (word == 0) {
+            completion_mode = COMPLETE_COMMAND_OR_METHOD;
+        } else if (word == 1) {
+            char *first = completion_first_word();
+
+            if (first) {
+                if (!strcmp(first, "show") || !strcmp(first, "raw"))
+                    completion_mode = COMPLETE_INTERFACE;
+                else if (!strcmp(first, "more") || !strcmp(first, "oneway"))
+                    completion_mode = COMPLETE_METHOD;
+
+                free(first);
+            }
+        }
+
+        if (completion_mode == COMPLETE_NONE)
+            return NULL;
+
+        return rl_completion_matches(text, completion_generator);
+    }
+
+    static const char *readline_prompt(Shell *sh)
+    {
+        static char buf[128];
+
+        if (!sh->color)
+            return "vsh> ";
+
+        snprintf(buf, sizeof(buf),
+                 "\001%s\002vsh\001%s%s\002>\001%s\002 ",
+                 BRIGHT_MAGENTA, BOLD, BRIGHT_WHITE, RST);
+        return buf;
+    }
+
     static void print_help(Shell *sh)
     {
         printf(
@@ -1392,6 +1703,13 @@ files:
             "  %shelp%s         Show this help.\n"
             "  %sexit%s, %squit%s   Leave vsh.\n"
             "\n"
+            "%sEditing%s\n"
+            "  TAB             Complete commands, interfaces, and methods.\n"
+            "  C-a / C-e       Move to start / end of the line.\n"
+            "  C-p / Up        Previous history entry.\n"
+            "  C-n / Down      Next history entry.\n"
+            "  History         Saved per endpoint under ~/.cache/vsh/.\n"
+            "\n"
             "%sExamples%s\n"
             "  org.example.math.Add {\"a\": 2, \"b\": 40}\n"
             "  org.example.health.Ping\n"
@@ -1412,6 +1730,7 @@ files:
             C(sh, BRIGHT_CYAN), C(sh, RST),
             C(sh, BRIGHT_CYAN), C(sh, RST),
             C(sh, BRIGHT_CYAN), C(sh, RST),
+            C(sh, BOLD), C(sh, RST),
             C(sh, BOLD), C(sh, RST));
     }
 
@@ -1446,20 +1765,81 @@ files:
         return word;
     }
 
-    static void prompt(Shell *sh)
-    {
-        if (!sh->interactive)
-            return;
-
-        printf("%svsh%s%s>%s ",
-               C(sh, BRIGHT_MAGENTA), C(sh, BOLD), C(sh, BRIGHT_WHITE), C(sh, RST));
-        fflush(stdout);
-    }
-
     static bool is_method_name(const char *s)
     {
         const char *dot = strrchr(s, '.');
         return dot && dot != s && dot[1] != '\0';
+    }
+
+    /* Stable per-endpoint file names, without unsafe path characters. */
+    static char *history_file_path(const char *endpoint)
+    {
+        const char *home = getenv("HOME");
+        if (!home || !*home)
+            return NULL;
+
+        uint64_t hash = UINT64_C(14695981039346656037);
+        for (const unsigned char *p = (const unsigned char *)endpoint; *p; p++) {
+            hash ^= *p;
+            hash *= UINT64_C(1099511628211);
+        }
+
+        size_t dir_len = strlen(home) + sizeof("/.cache/vsh");
+        char *dir = malloc(dir_len);
+        if (!dir)
+            return NULL;
+        snprintf(dir, dir_len, "%s/.cache/vsh", home);
+
+        size_t cache_len = strlen(home) + sizeof("/.cache");
+        char *cache = malloc(cache_len);
+        if (!cache) {
+            free(dir);
+            return NULL;
+        }
+        snprintf(cache, cache_len, "%s/.cache", home);
+        if (mkdir(cache, 0700) < 0 && errno != EEXIST) {
+            free(cache);
+            free(dir);
+            return NULL;
+        }
+        free(cache);
+        if (mkdir(dir, 0700) < 0 && errno != EEXIST) {
+            free(dir);
+            return NULL;
+        }
+
+        size_t size = strlen(dir) + sizeof("/0000000000000000.history");
+        char *path = malloc(size);
+        if (path)
+            snprintf(path, size, "%s/%016" PRIx64 ".history", dir, hash);
+        free(dir);
+        return path;
+    }
+
+    static void initialize_history(Shell *sh)
+    {
+        sh->history_path = history_file_path(sh->path);
+        if (!sh->history_path) {
+            fprintf(stderr, "vsh: unable to create history directory\n");
+            return;
+        }
+
+        int fd = open(sh->history_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            fprintf(stderr, "vsh: history: %s\n", strerror(errno));
+            free(sh->history_path);
+            sh->history_path = NULL;
+            return;
+        }
+        close(fd);
+        if (read_history(sh->history_path) != 0)
+            fprintf(stderr, "vsh: could not load history: %s\n", sh->history_path);
+    }
+
+    static void save_history_entry(Shell *sh)
+    {
+        if (sh->history_path && append_history(1, sh->history_path) != 0)
+            fprintf(stderr, "vsh: could not save history: %s\n", sh->history_path);
     }
 
     static void repl(Shell *sh)
@@ -1467,19 +1847,50 @@ files:
         char *line = NULL;
         size_t cap = 0;
 
-        for (;;) {
-            prompt(sh);
+        if (sh->interactive) {
+            completion_shell = sh;
+            rl_readline_name = "vsh";
+            rl_attempted_completion_function = vsh_completion;
 
-            ssize_t n = getline(&line, &cap, stdin);
-            if (n < 0) {
-                if (sh->interactive)
+            /*
+             * Bind these explicitly instead of relying on the user's Readline
+             * editing mode/inputrc so the advertised vsh keys are stable.
+             */
+            rl_bind_key('\001', rl_beg_of_line);
+            rl_bind_key('\005', rl_end_of_line);
+            rl_bind_key('\020', rl_get_previous_history);
+            rl_bind_key('\016', rl_get_next_history);
+            rl_bind_keyseq("\\e[A", rl_get_previous_history);
+            rl_bind_keyseq("\\e[B", rl_get_next_history);
+
+            using_history();
+            initialize_history(sh);
+        }
+
+        for (;;) {
+            if (sh->interactive) {
+                free(line);
+                line = readline(readline_prompt(sh));
+                cap = 0;
+
+                if (!line) {
                     putchar('\n');
-                break;
+                    break;
+                }
+            } else {
+                ssize_t n = getline(&line, &cap, stdin);
+                if (n < 0)
+                    break;
             }
 
             char *cursor = trim(line);
             if (!*cursor || *cursor == '#')
                 continue;
+
+            if (sh->interactive) {
+                add_history(cursor);
+                save_history_entry(sh);
+            }
 
             char *cmd = next_word(&cursor);
             cursor = trim(cursor);
@@ -1520,6 +1931,8 @@ files:
 
             if (!strcmp(cmd, "reconnect")) {
                 disconnect_shell(sh);
+                clear_completion_cache(sh);
+
                 if (connect_shell(sh) == 0)
                     printf("%sreconnected%s %s\n",
                            C(sh, BRIGHT_GREEN), C(sh, RST), sh->path);
@@ -1550,6 +1963,11 @@ files:
                     "%sunknown command:%s %s  %s(type 'help')%s\n",
                     C(sh, BRIGHT_RED), C(sh, RST), cmd,
                     C(sh, BRIGHT_BLACK), C(sh, RST));
+        }
+
+        if (sh->interactive) {
+            rl_attempted_completion_function = NULL;
+            completion_shell = NULL;
         }
 
         free(line);
@@ -1633,8 +2051,10 @@ files:
 
         repl(&sh);
 
+        clear_completion_cache(&sh);
         disconnect_shell(&sh);
         free_endpoint(&sh);
+        free(sh.history_path);
         free(sh.rx);
         return 0;
     }
@@ -1649,9 +2069,10 @@ files:
     )
 
     yyjson = dependency('yyjson', required: true)
+    readline = dependency('readline', required: true)
 
     executable(
       'vsh',
       'main.c',
-      dependencies: yyjson,
+      dependencies: [yyjson, readline],
     )
