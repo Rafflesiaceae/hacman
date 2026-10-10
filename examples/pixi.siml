@@ -3,13 +3,17 @@
 # API: the API's unauthenticated rate limit (60 requests/hour, shared by
 # every project on this machine that polls it) is easy to exhaust, while the
 # feed is served without that limit. The feed lists releases newest first,
-# so the first tag link is the current version. pixi also publishes a bare
-# per-architecture binary alongside the tarball, so the install block
-# downloads it directly instead of unpacking an archive.
+# but it also carries tags for pixi's separately released build backends
+# (pixi-build-rust-v0.5.7, ...), which can sort ahead of the pixi release.
+# Anchoring the prefix on `tag/v` skips those, since they all start with
+# `pixi-`, and picks the newest plain `vX.Y.Z` tag. The `v` is therefore
+# not part of the extracted version and gets re-added in the download URL.
+# pixi also publishes a bare per-architecture binary alongside the tarball,
+# so the install block downloads it directly instead of unpacking an archive.
 name: pixi
 url: https://github.com/prefix-dev/pixi/releases.atom
 check: version
-version-prefix: https://github.com/prefix-dev/pixi/releases/tag/
+version-prefix: https://github.com/prefix-dev/pixi/releases/tag/v
 version-suffix: "
 schedule: daily
 bin-path: pixi
@@ -27,7 +31,7 @@ install: |
   esac
 
   asset="pixi-${release_arch}-unknown-linux-musl"
-  url="https://github.com/prefix-dev/pixi/releases/download/$HACMAN_VERSION/$asset"
+  url="https://github.com/prefix-dev/pixi/releases/download/v$HACMAN_VERSION/$asset"
   curl -fsSL "$url" -o pixi.next
   chmod 755 pixi.next
   ./pixi.next --version >/dev/null
