@@ -32,26 +32,33 @@ files:
     /* XCB owns the event queue; Xlib is used only by Xft.
        Editable input is ASCII-oriented, but result labels support UTF-8. */
     enum { WIDTH=680, ROWS=8, MAX_QUERY=255, MAX_LINE=8192, HASH_INIT=4096,
-           LEGEND_COLS=3, LEGEND_PAD_X=18, LEGEND_PAD_Y=7 };
+           LEGEND_COLS=3, LEGEND_PAD_X=18, LEGEND_PAD_Y=9,
+           LEGEND_GAP_X=8, LEGEND_GAP_Y=7, WHEEL_LINES=3 };
 
     typedef struct { char *label, *path; bool desktop; } Entry;
     typedef struct { xcb_keysym_t sym; char *key, *command; } Shortcut;
-    enum { GC_BG, GC_BORDER, GC_SELECT, GC_ACCENT, GC_CURSOR, GC_COUNT };
+    typedef struct { int entry, score; } Match;
+    enum { GC_BG, GC_BORDER, GC_SELECT, GC_ACCENT, GC_CURSOR,
+           GC_BUTTON, GC_BUTTON_HOVER, GC_ROW_HOVER, GC_ROW_HOVER_ACCENT,
+           GC_COUNT };
     enum { TEXT_MAIN, TEXT_DIM, TEXT_MUTED, TEXT_GREEN, TEXT_BLUE, TEXT_COUNT };
     typedef struct {
         Display *dpy;
         xcb_connection_t *conn;
         xcb_screen_t *screen;
         xcb_window_t win;
+        xcb_pixmap_t back_pixmap; /* Allocated only in double-buffered mode. */
+        xcb_drawable_t paint_target; /* Pixmap by default, window with --no-double-buffering. */
         xcb_gcontext_t gc[GC_COUNT];
         XftDraw *draw;
-        XftFont *font;
+        XftFont *font, *bold_font;
         XftColor ink[TEXT_COUNT];
         xcb_get_keyboard_mapping_reply_t *keymap;
         uint8_t mincode;
         int x, y, width, height, header, row_h, footer, font_size;
-        int visible_rows, legend_rows, legend_row_h, legend_h;
+        int visible_rows, legend_rows, legend_row_h, legend_h, bottom_pad;
         int ascent, descent;
+        int hovered_short, hovered_result, pointer_x, pointer_y;
         char *font_pattern;
         char query[MAX_QUERY+1];
         int qlen, cursor, selected;
@@ -63,10 +70,19 @@ files:
         bool scan_finished;
         char partial[MAX_LINE];
         size_t partial_len;
-        int matches[ROWS], match_count;
+        Match *matches;
+        size_t match_capacity;
+        int match_count, scroll;
         Shortcut *shorts;
         size_t short_count;
-        bool desktop_mode, no_count;
+        bool desktop_mode, no_count, no_remember, no_double_buffering;
+        bool hint_active, remembered_found;
+        Entry remembered;
+        /* Damage tracking: mouse movement never repaints the whole window. */
+        bool redraw_header, redraw_results, redraw_count;
+        unsigned dirty_rows; /* bit per visible result row (ROWS <= 8) */
+        bool button_hover_dirty;
+        int previous_hover_short;
     } App;
 
     static void fatal(const char *msg) { perror(msg); exit(1); }
@@ -74,6 +90,84 @@ files:
     static bool endswith(const char *s, const char *suffix) {
         size_t a=strlen(s), b=strlen(suffix);
         return a>=b && !strcmp(s+a-b,suffix);
+    }
+    /* XDG_STATE_HOME is for persistent user preferences, not a cache. */
+    static char *state_file_path(void) {
+        const char *base=getenv("XDG_STATE_HOME");
+        char *path=NULL;
+        if (base && base[0]=='/') {
+            if (asprintf(&path,"%s/pathpop/last-selection",base)<0) return NULL;
+        } else {
+            const char *home=getenv("HOME");
+            if (!home || home[0]!='/') return NULL;
+            if (asprintf(&path,"%s/.local/state/pathpop/last-selection",home)<0) return NULL;
+        }
+        return path;
+    }
+    static void strip_newline(char *s) {
+        size_t n=strlen(s);
+        while (n && (s[n-1]=='\n' || s[n-1]=='\r')) s[--n]=0;
+    }
+    static void load_remembered(App *a) {
+        if (a->no_remember) return;
+        char *path=state_file_path();
+        if (!path) return;
+        FILE *f=fopen(path,"r"); free(path);
+        if (!f) return;
+        char *kind=NULL, *label=NULL, *desktop_path=NULL;
+        size_t kc=0,lc=0,pc=0;
+        ssize_t kn=getline(&kind,&kc,f);
+        ssize_t ln=getline(&label,&lc,f);
+        ssize_t pn=getline(&desktop_path,&pc,f);
+        fclose(f);
+        if (kn>0 && ln>1 && ln<=MAX_LINE && pn>0 && pn<=MAX_LINE) {
+            strip_newline(kind); strip_newline(label); strip_newline(desktop_path);
+            if ((!strcmp(kind,"P") || !strcmp(kind,"D")) && *label &&
+                !strchr(label,'\t') &&
+                (kind[0]=='P' || (*desktop_path && desktop_path[0]=='/'))) {
+                a->remembered=(Entry){ .label=label,
+                    .path=kind[0]=='D' ? desktop_path : NULL,
+                    .desktop=kind[0]=='D' };
+                a->hint_active=true;
+                label=NULL;
+                if (a->remembered.desktop) desktop_path=NULL;
+            }
+        }
+        free(kind); free(label); free(desktop_path);
+    }
+    static int create_state_dirs(char *path) {
+        /* Create only the directories leading to this file. */
+        for (char *p=path+1;*p;p++) {
+            if (*p!='/') continue;
+            *p=0;
+            int rc=mkdir(path,0700);
+            int err=errno;
+            *p='/';
+            if (rc<0 && err!=EEXIST) return -1;
+        }
+        return 0;
+    }
+    static void save_remembered(App *a, const Entry *entry) {
+        if (a->no_remember || !entry || !entry->label ||
+            strchr(entry->label,'\n') || strchr(entry->label,'\r') ||
+            (entry->desktop && (!entry->path || strchr(entry->path,'\n') ||
+                                strchr(entry->path,'\r')))) return;
+        char *path=state_file_path();
+        if (!path) return;
+        if (create_state_dirs(path)<0) { free(path); return; }
+        char *temp=NULL;
+        if (asprintf(&temp,"%s.tmp.%ld",path,(long)getpid())<0) {
+            free(path); return;
+        }
+        int fd=open(temp,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+        if (fd<0) { free(path); free(temp); return; }
+        FILE *f=fdopen(fd,"w");
+        if (!f) { close(fd); unlink(temp); free(path); free(temp); return; }
+        bool ok=fprintf(f,"%c\n%s\n%s\n",entry->desktop?'D':'P',
+                        entry->label,entry->desktop?entry->path:"")>=0;
+        if (fclose(f)!=0) ok=false;
+        if (!ok || rename(temp,path)!=0) unlink(temp);
+        free(temp); free(path);
     }
     static uint64_t hashstr(const char *s) {
         uint64_t h=UINT64_C(14695981039346656037);
@@ -136,24 +230,95 @@ files:
         }
         return qi==ql ? 1000+gaps*8+(int)nl : -1;
     }
+    static int match_cmp(const void *lhs, const void *rhs, void *ctx) {
+        const App *a=ctx;
+        const Match *l=lhs, *r=rhs;
+        if (l->score!=r->score) return l->score<r->score ? -1 : 1;
+        return strcmp(a->entries[l->entry].label,a->entries[r->entry].label);
+    }
+    static void keep_selection_visible(App *a) {
+        if (a->selected<a->scroll) a->scroll=a->selected;
+        else if (a->selected>=a->scroll+a->visible_rows)
+            a->scroll=a->selected-a->visible_rows+1;
+        int max_scroll=a->match_count>a->visible_rows ? a->match_count-a->visible_rows : 0;
+        if (a->scroll>max_scroll) a->scroll=max_scroll;
+    }
+    static bool is_remembered_entry(const App *a, const Entry *e) {
+        return a->remembered.label && e->desktop==a->remembered.desktop &&
+            !strcmp(e->label,a->remembered.label) &&
+            (!e->desktop || (e->path && a->remembered.path &&
+                             !strcmp(e->path,a->remembered.path)));
+    }
     static void rank_matches(App *a) {
-        int scores[ROWS]; a->match_count=0;
+        /* Retain the whole sorted result list so wheel/keyboard scrolling can
+           reach matches beyond the first ROWS. Re-rank after async scan batches. */
+        if (a->match_capacity<a->count) {
+            Match *p=realloc(a->matches,a->count*sizeof(*p));
+            if (!p) fatal("realloc");
+            a->matches=p; a->match_capacity=a->count;
+        }
+        a->match_count=0;
         for (size_t i=0;i<a->count;i++) {
             int sc=score(a->entries[i].label,a->query);
             if (sc<0) continue;
-            int pos=a->match_count;
-            while (pos>0 && (sc<scores[pos-1] ||
-                 (sc==scores[pos-1] && strcmp(a->entries[i].label,a->entries[a->matches[pos-1]].label)<0))) pos--;
-            if (pos>=a->visible_rows) continue;
-            int upto=a->match_count<a->visible_rows ? a->match_count++ : a->visible_rows-1;
-            for (int j=upto;j>pos;j--) { a->matches[j]=a->matches[j-1]; scores[j]=scores[j-1]; }
-            a->matches[pos]=(int)i; scores[pos]=sc;
+            a->matches[a->match_count++]=(Match){ .entry=(int)i, .score=sc };
         }
-        if (a->selected>=a->match_count) a->selected=a->match_count ? a->match_count-1 : 0;
+        qsort_r(a->matches,(size_t)a->match_count,sizeof(*a->matches),match_cmp,a);
+        a->remembered_found=false;
+        if (a->hint_active) {
+            /* The PATH scan is asynchronous. Keep selecting the *exact* saved
+               entry as results arrive, rather than an arbitrary first row. */
+            for (int i=0;i<a->match_count;i++) {
+                if (is_remembered_entry(a,&a->entries[a->matches[i].entry])) {
+                    a->selected=i;
+                    a->remembered_found=true;
+                    break;
+                }
+            }
+            if (!a->remembered_found) { a->selected=0; a->scroll=0; }
+        } else if (a->selected>=a->match_count) {
+            a->selected=a->match_count ? a->match_count-1 : 0;
+        }
+        if (!a->hint_active || a->remembered_found) keep_selection_visible(a);
+    }
+    /* Match Vim's Ctrl-D/Ctrl-U: move the cursor AND viewport by half the
+       visible page. PageUp/PageDown intentionally use the same distance. */
+    static void half_page_move(App *a, int direction) {
+        if (!a->match_count) return;
+        int amount=a->visible_rows/2;
+        if (amount<1) amount=1;
+        int next=a->selected+direction*amount;
+        if (next<0) next=0;
+        if (next>=a->match_count) next=a->match_count-1;
+        a->selected=next;
+        int max_scroll=a->match_count>a->visible_rows ? a->match_count-a->visible_rows : 0;
+        next=a->scroll+direction*amount;
+        if (next<0) next=0;
+        if (next>max_scroll) next=max_scroll;
+        a->scroll=next;
+        keep_selection_visible(a);
+    }
+    static void paint(App *a);
+    static void mark_row_damage(App *a, int index) {
+        int slot=index-a->scroll;
+        if (slot>=0 && slot<a->visible_rows && slot<32)
+            a->dirty_rows|=1u<<slot;
+    }
+    static void wheel_scroll(App *a, int direction) {
+        int max_scroll=a->match_count>a->visible_rows ? a->match_count-a->visible_rows : 0;
+        int next=a->scroll+direction*WHEEL_LINES;
+        if (next<0) next=0;
+        if (next>max_scroll) next=max_scroll;
+        if (next==a->scroll) return;
+        a->scroll=next;
+        if (a->selected<a->scroll) a->selected=a->scroll;
+        if (a->selected>=a->scroll+a->visible_rows)
+            a->selected=a->scroll+a->visible_rows-1;
+        a->redraw_results=true;
     }
 
-    /* Base16 Kokonai. Background shapes are rendered with XCB core GCs;
-       only font rendering uses Xft (and hence Xlib). */
+    /* Base16 Kokonai. Both XCB and Xft paint to the same drawable:
+       an off-screen pixmap by default, or the window with the opt-out. */
     static unsigned long channel_pixel(unsigned c, unsigned long mask) {
         if (!mask) return 0;
         unsigned shift=0;
@@ -180,10 +345,51 @@ files:
         uint32_t v[]={(uint32_t)px};
         xcb_create_gc(a->conn,a->gc[i],a->win,XCB_GC_FOREGROUND,v);
     }
+    static void shortcut_rect(const App *a, size_t i,
+                              int *x, int *y, int *w, int *h) {
+        int col_w=(a->width-2*LEGEND_PAD_X-(LEGEND_COLS-1)*LEGEND_GAP_X)/LEGEND_COLS;
+        int col=(int)(i%LEGEND_COLS), row=(int)(i/LEGEND_COLS);
+        *x=LEGEND_PAD_X+col*(col_w+LEGEND_GAP_X);
+        *y=a->header+a->visible_rows*a->row_h+1+LEGEND_PAD_Y+
+           row*(a->legend_row_h+LEGEND_GAP_Y);
+        *w=col_w; *h=a->legend_row_h;
+    }
+    static int shortcut_at(const App *a, int px, int py) {
+        for (size_t i=0;i<a->short_count;i++) {
+            int x,y,w,h;
+            shortcut_rect(a,i,&x,&y,&w,&h);
+            if (px>=x && px<x+w && py>=y && py<y+h) return (int)i;
+        }
+        return -1;
+    }
+    static int result_at(const App *a, int x, int y) {
+        if (x<0 || x>=a->width || y<a->header ||
+            y>=a->header+a->visible_rows*a->row_h) return -1;
+        int hit=a->scroll+(y-a->header)/a->row_h;
+        return hit<a->match_count ? hit : -1;
+    }
+    static void mark_row_damage(App *a, int index);
+    static void refresh_hover(App *a) {
+        a->hovered_short=shortcut_at(a,a->pointer_x,a->pointer_y);
+        a->hovered_result=result_at(a,a->pointer_x,a->pointer_y);
+    }
+    static void set_pointer_hover(App *a, int x, int y) {
+        int old_short=a->hovered_short, old_result=a->hovered_result;
+        a->pointer_x=x; a->pointer_y=y;
+        refresh_hover(a);
+        if (old_result!=a->hovered_result) {
+            mark_row_damage(a,old_result);
+            mark_row_damage(a,a->hovered_result);
+        }
+        if (old_short!=a->hovered_short) {
+            if (!a->button_hover_dirty) a->previous_hover_short=old_short;
+            a->button_hover_dirty=true;
+        }
+    }
     static void rect(App *a, int gc, int x, int y, int w, int h) {
         if (w<=0 || h<=0) return;
         xcb_rectangle_t r={(int16_t)x,(int16_t)y,(uint16_t)w,(uint16_t)h};
-        xcb_poly_fill_rectangle(a->conn,a->win,a->gc[gc],1,&r);
+        xcb_poly_fill_rectangle(a->conn,a->paint_target,a->gc[gc],1,&r);
     }
     static int text_width_n(App *a, const char *s, int len) {
         if (len<=0) return 0;
@@ -191,19 +397,24 @@ files:
         XftTextExtentsUtf8(a->dpy,a->font,(const FcChar8*)s,len,&ext);
         return ext.xOff;
     }
-    static void draw_text(App *a, int color, int x, int baseline,
-                          const char *s, int max_width) {
+    static void draw_text_font(App *a, XftFont *font, int color, int x, int baseline,
+                               const char *s, int max_width) {
         if (max_width<=0) return;
         int len=(int)strlen(s);
         /* Use Xft clipping instead of measuring/copying every result label. */
-        XRectangle clip={(short)x,(short)(baseline-a->ascent),
+        XRectangle clip={(short)x,(short)(baseline-font->ascent),
                          (unsigned short)max_width,
-                         (unsigned short)(a->ascent+a->descent+2)};
+                         (unsigned short)(font->ascent+font->descent+2)};
         XftDrawSetClipRectangles(a->draw,0,0,&clip,1);
-        XftDrawStringUtf8(a->draw,&a->ink[color],a->font,x,baseline,
+        XftDrawStringUtf8(a->draw,&a->ink[color],font,x,baseline,
                           (const FcChar8*)s,len);
     }
+    static void draw_text(App *a, int color, int x, int baseline,
+                          const char *s, int max_width) {
+        draw_text_font(a,a->font,color,x,baseline,s,max_width);
+    }
     static void paint(App *a) {
+        refresh_hover(a);  /* Handles scrolling and async result updates. */
         const int w=a->width,h=a->height;
         rect(a,GC_BG,0,0,w,h);
         rect(a,GC_BORDER,0,0,w,1);
@@ -218,34 +429,72 @@ files:
             rect(a,GC_BORDER,0,legend_top,w,1);
         }
         if (a->footer) rect(a,GC_BORDER,0,h-a->footer,w,1);
-        for (int i=0;i<a->match_count;i++) {
-            int y=a->header+i*a->row_h;
-            if (i==a->selected) {
+        for (int i=0;i<a->visible_rows && i+a->scroll<a->match_count;i++) {
+            int index=i+a->scroll, y=a->header+i*a->row_h;
+            bool selected=index==a->selected && (!a->hint_active || a->remembered_found);
+            bool hovered=index==a->hovered_result;
+            if (selected) {
                 rect(a,GC_SELECT,8,y+2,w-16,a->row_h-3);
                 rect(a,GC_ACCENT,8,y+2,3,a->row_h-3);
+            }
+            if (hovered) {
+                if (!selected) {
+                    rect(a,GC_ROW_HOVER,8,y+2,w-16,a->row_h-3);
+                    rect(a,GC_ROW_HOVER_ACCENT,8,y+2,3,a->row_h-3);
+                } else {
+                    /* Both states visible: blue selection left, orange hover right. */
+                    rect(a,GC_ROW_HOVER_ACCENT,w-11,y+2,3,a->row_h-3);
+                }
+            }
+        }
+        if (a->match_count>a->visible_rows) {
+            /* Compact scrollbar proportional to the visible result window. */
+            int top=a->header+3, track=a->visible_rows*a->row_h-6;
+            int thumb=track*a->visible_rows/a->match_count;
+            if (thumb<16) thumb=16;
+            if (thumb>track) thumb=track;
+            int position=(track-thumb)*a->scroll/(a->match_count-a->visible_rows);
+            rect(a,GC_BORDER,w-8,top,3,track);
+            rect(a,GC_ACCENT,w-8,top+position,3,thumb);
+        }
+        if (a->legend_rows) {
+            for (size_t i=0;i<a->short_count;i++) {
+                int x,y,bw,bh;
+                shortcut_rect(a,i,&x,&y,&bw,&bh);
+                rect(a,(int)i==a->hovered_short?GC_BUTTON_HOVER:GC_BUTTON,
+                     x,y,bw,bh);
             }
         }
         /* The caret is drawn by XCB; only text needs Xft. */
         int input_x=79, input_limit=w-input_x-18;
         int start=0;
-        while (start<a->cursor &&
-               text_width_n(a,a->query+start,a->cursor-start)>input_limit-5)
-            start++;
-        int cx=input_x+text_width_n(a,a->query+start,a->cursor-start);
-        if (cx<=w-15) rect(a,GC_CURSOR,cx, (a->header-a->ascent-a->descent)/2,
-                            2,a->ascent+a->descent);
-        /* Ordering: finish XCB background before Xft sends its XRender text. */
+        const char *prompt=a->hint_active ? a->remembered.label : a->query;
+        if (!prompt) prompt="";
+        if (!a->hint_active) {
+            while (start<a->cursor &&
+                   text_width_n(a,a->query+start,a->cursor-start)>input_limit-5)
+                start++;
+            int cx=input_x+text_width_n(a,a->query+start,a->cursor-start);
+            if (cx<=w-15) rect(a,GC_CURSOR,cx, (a->header-a->ascent-a->descent)/2,
+                                2,a->ascent+a->descent);
+        }
+        /* XCB backgrounds must reach the server before Xft draws the text
+           onto the same pixmap (both libraries share this connection). */
         xcb_flush(a->conn);
 
         int baseline=(a->header-a->ascent-a->descent)/2+a->ascent;
         draw_text(a,TEXT_GREEN,18,baseline,"run",50);
         draw_text(a,TEXT_MUTED,56,baseline,">",15);
-        draw_text(a,TEXT_MAIN,input_x,baseline,a->query+start,input_limit);
-        for (int i=0;i<a->match_count;i++) {
+        draw_text(a,a->hint_active?TEXT_MUTED:TEXT_MAIN,input_x,baseline,
+                  prompt+start,input_limit);
+        for (int i=0;i<a->visible_rows && i+a->scroll<a->match_count;i++) {
             int y=a->header+i*a->row_h;
             int row_base=y+(a->row_h-a->ascent-a->descent)/2+a->ascent;
-            draw_text(a,i==a->selected?TEXT_MAIN:TEXT_DIM,20,row_base,
-                      a->entries[a->matches[i]].label,w-40);
+            bool selected=i+a->scroll==a->selected &&
+                          (!a->hint_active || a->remembered_found);
+            bool hovered=i+a->scroll==a->hovered_result;
+            draw_text(a,selected || hovered?TEXT_MAIN:TEXT_DIM,20,row_base,
+                      a->entries[a->matches[i+a->scroll].entry].label,w-40);
         }
         if (!a->match_count) {
             int row_base=a->header+(a->row_h-a->ascent-a->descent)/2+a->ascent;
@@ -253,17 +502,15 @@ files:
                       a->scan_finished?"No matches":"Scanning PATH...",w-40);
         }
         if (a->legend_rows) {
-            int col_w=(w-2*LEGEND_PAD_X)/LEGEND_COLS;
+            XftFont *bf=a->bold_font ? a->bold_font : a->font;
             for (size_t i=0;i<a->short_count;i++) {
-                int row=(int)(i/LEGEND_COLS);
-                int col=(int)(i%LEGEND_COLS);
-                int x=LEGEND_PAD_X+col*col_w;
-                int y=legend_top+1+LEGEND_PAD_Y+row*a->legend_row_h;
-                int base=y+(a->legend_row_h-a->ascent-a->descent)/2+a->ascent;
-                /* Fixed key/arrow slots align the command names within each column. */
-                draw_text(a,TEXT_BLUE,x,base,a->shorts[i].key,52);
-                draw_text(a,TEXT_MUTED,x+53,base,"",18);
-                draw_text(a,TEXT_DIM,x+75,base,a->shorts[i].command,col_w-80);
+                int x,y,bw,bh;
+                shortcut_rect(a,i,&x,&y,&bw,&bh);
+                int base=y+(bh-bf->ascent-bf->descent)/2+bf->ascent;
+                int key_slot=50;
+                draw_text_font(a,bf,TEXT_BLUE,x+12,base,a->shorts[i].key,key_slot-12);
+                draw_text_font(a,bf,TEXT_MAIN,x+key_slot,base,
+                               a->shorts[i].command,bw-key_slot-10);
             }
         }
         if (!a->no_count) {
@@ -272,7 +519,173 @@ files:
                      a->scan_finished?"":"  /  scanning");
             draw_text(a,TEXT_MUTED,18,h-8,footer,w-36);
         }
+        /* Flush Xft before presenting; direct mode has no blit. */
         XFlush(a->dpy);
+        if (!a->no_double_buffering)
+            xcb_copy_area(a->conn,a->back_pixmap,a->win,a->gc[GC_BG],
+                          0,0,0,0,(uint16_t)w,(uint16_t)h);
+        xcb_flush(a->conn);
+    }
+    /* Redraw only damaged surfaces. In default mode they are drawn to the
+       persistent back pixmap and copied; with the opt-out, paint directly.
+       Hover/navigation changes touch only affected rows/buttons. */
+    static void row_background(App *a, int slot) {
+        int y=a->header+slot*a->row_h;
+        int index=a->scroll+slot;
+        rect(a,GC_BG,8,y+2,a->width-16,a->row_h-3);
+        if (index>=a->match_count) return;
+        bool selected=index==a->selected &&
+                      (!a->hint_active || a->remembered_found);
+        bool hovered=index==a->hovered_result;
+        if (selected) {
+            rect(a,GC_SELECT,8,y+2,a->width-16,a->row_h-3);
+            rect(a,GC_ACCENT,8,y+2,3,a->row_h-3);
+        }
+        if (hovered) {
+            if (!selected) {
+                rect(a,GC_ROW_HOVER,8,y+2,a->width-16,a->row_h-3);
+                rect(a,GC_ROW_HOVER_ACCENT,8,y+2,3,a->row_h-3);
+            } else rect(a,GC_ROW_HOVER_ACCENT,a->width-11,y+2,3,a->row_h-3);
+        }
+    }
+    static void row_text(App *a, int slot) {
+        int index=a->scroll+slot;
+        if (index>=a->match_count) return;
+        int y=a->header+slot*a->row_h;
+        int base=y+(a->row_h-a->ascent-a->descent)/2+a->ascent;
+        bool selected=index==a->selected &&
+                      (!a->hint_active || a->remembered_found);
+        bool hovered=index==a->hovered_result;
+        draw_text(a,selected || hovered?TEXT_MAIN:TEXT_DIM,20,base,
+                  a->entries[a->matches[index].entry].label,a->width-40);
+    }
+    static void button_background(App *a, int index) {
+        if (index<0 || (size_t)index>=a->short_count) return;
+        int x,y,w,h;
+        shortcut_rect(a,(size_t)index,&x,&y,&w,&h);
+        rect(a,index==a->hovered_short?GC_BUTTON_HOVER:GC_BUTTON,x,y,w,h);
+    }
+    static void button_text(App *a, int index) {
+        if (index<0 || (size_t)index>=a->short_count) return;
+        int x,y,w,h;
+        shortcut_rect(a,(size_t)index,&x,&y,&w,&h);
+        XftFont *font=a->bold_font ? a->bold_font : a->font;
+        int base=y+(h-font->ascent-font->descent)/2+font->ascent;
+        draw_text_font(a,font,TEXT_BLUE,x+12,base,a->shorts[index].key,38);
+        draw_text_font(a,font,TEXT_MAIN,x+50,base,
+                       a->shorts[index].command,w-60);
+    }
+    static void copy_region(App *a,int x,int y,int w,int h) {
+        if (!a->no_double_buffering && w>0 && h>0)
+            xcb_copy_area(a->conn,a->back_pixmap,a->win,a->gc[GC_BG],
+                          (int16_t)x,(int16_t)y,(int16_t)x,(int16_t)y,
+                          (uint16_t)w,(uint16_t)h);
+    }
+    static void present_pending(App *a) {
+        if (!a->redraw_header && !a->redraw_results && !a->dirty_rows &&
+            !a->button_hover_dirty && !a->redraw_count) return;
+        const int w=a->width, h=a->height;
+        const int rh=a->visible_rows*a->row_h;
+        /* Scanning, re-ranking and scrolling change which result lies under
+           a stationary pointer. Refresh before drawing new result rows. */
+        if (a->redraw_results) refresh_hover(a);
+        if (a->redraw_header) {
+            rect(a,GC_BG,0,0,w,a->header);
+            rect(a,GC_BORDER,0,0,w,1);
+            rect(a,GC_BORDER,0,0,1,a->header);
+            rect(a,GC_BORDER,w-1,0,1,a->header);
+            rect(a,GC_BORDER,0,a->header-1,w,1);
+            if (!a->hint_active) {
+                int lim=w-79-18, start=0;
+                while (start<a->cursor &&
+                       text_width_n(a,a->query+start,a->cursor-start)>lim-5) start++;
+                int cx=79+text_width_n(a,a->query+start,a->cursor-start);
+                if (cx<=w-15)
+                    rect(a,GC_CURSOR,cx,(a->header-a->ascent-a->descent)/2,
+                         2,a->ascent+a->descent);
+            }
+        }
+        if (a->redraw_results) {
+            rect(a,GC_BG,0,a->header,w,rh);
+            rect(a,GC_BORDER,0,a->header,1,rh);
+            rect(a,GC_BORDER,w-1,a->header,1,rh);
+            for (int i=0;i<a->visible_rows;i++) row_background(a,i);
+            if (a->match_count>a->visible_rows) {
+                int top=a->header+3,track=rh-6;
+                int thumb=track*a->visible_rows/a->match_count;
+                if (thumb<16) thumb=16;
+                if (thumb>track) thumb=track;
+                int pos=(track-thumb)*a->scroll/(a->match_count-a->visible_rows);
+                rect(a,GC_BORDER,w-8,top,3,track);
+                rect(a,GC_ACCENT,w-8,top+pos,3,thumb);
+            }
+        } else {
+            for (int i=0;i<a->visible_rows;i++)
+                if (a->dirty_rows & (1u<<i)) row_background(a,i);
+        }
+        int old_button=a->button_hover_dirty ? a->previous_hover_short:-1;
+        int new_button=a->button_hover_dirty ? a->hovered_short:-1;
+        if (old_button>=0) button_background(a,old_button);
+        if (new_button>=0 && new_button!=old_button)
+            button_background(a,new_button);
+        if (a->redraw_count && a->footer) {
+            rect(a,GC_BG,1,h-a->footer+1,w-2,a->footer-2);
+        }
+        /* Preserve XCB -> Xft draw order; no XSync or round trips. */
+        xcb_flush(a->conn);
+        if (a->redraw_header) {
+            int lim=w-79-18, start=0;
+            const char *prompt=a->hint_active ? a->remembered.label : a->query;
+            if (!prompt) prompt="";
+            if (!a->hint_active)
+                while (start<a->cursor &&
+                       text_width_n(a,a->query+start,a->cursor-start)>lim-5) start++;
+            int base=(a->header-a->ascent-a->descent)/2+a->ascent;
+            draw_text(a,TEXT_GREEN,18,base,"run",50);
+            draw_text(a,TEXT_MUTED,56,base,">",15);
+            draw_text(a,a->hint_active?TEXT_MUTED:TEXT_MAIN,79,base,prompt+start,lim);
+        }
+        if (a->redraw_results) {
+            for (int i=0;i<a->visible_rows;i++) row_text(a,i);
+            if (!a->match_count) {
+                int base=a->header+(a->row_h-a->ascent-a->descent)/2+a->ascent;
+                draw_text(a,TEXT_MUTED,20,base,
+                          a->scan_finished?"No matches":"Scanning PATH...",w-40);
+            }
+        } else {
+            for (int i=0;i<a->visible_rows;i++)
+                if (a->dirty_rows & (1u<<i)) row_text(a,i);
+        }
+        if (old_button>=0) button_text(a,old_button);
+        if (new_button>=0 && new_button!=old_button) button_text(a,new_button);
+        if (a->redraw_count && a->footer) {
+            char footer[128];
+            snprintf(footer,sizeof(footer),"%zu entries%s",a->count,
+                     a->scan_finished?"":"  /  scanning");
+            draw_text(a,TEXT_MUTED,18,h-8,footer,w-36);
+        }
+        XFlush(a->dpy);
+        if (a->redraw_header) copy_region(a,0,0,w,a->header);
+        if (a->redraw_results) copy_region(a,0,a->header,w,rh);
+        else for (int i=0;i<a->visible_rows;i++) {
+            if (a->dirty_rows & (1u<<i))
+                copy_region(a,8,a->header+i*a->row_h+2,w-16,a->row_h-3);
+        }
+        if (old_button>=0) {
+            int x,y,bw,bh;
+            shortcut_rect(a,(size_t)old_button,&x,&y,&bw,&bh);
+            copy_region(a,x,y,bw,bh);
+        }
+        if (new_button>=0 && new_button!=old_button) {
+            int x,y,bw,bh;
+            shortcut_rect(a,(size_t)new_button,&x,&y,&bw,&bh);
+            copy_region(a,x,y,bw,bh);
+        }
+        if (a->redraw_count && a->footer) copy_region(a,1,h-a->footer+1,w-2,a->footer-2);
+        xcb_flush(a->conn);
+        a->redraw_header=a->redraw_results=a->redraw_count=false;
+        a->dirty_rows=0;
+        a->button_hover_dirty=false;
     }
     static void init_xft(App *a) {
         int screen=DefaultScreen(a->dpy);
@@ -283,7 +696,13 @@ files:
         }
         a->ascent=a->font->ascent;
         a->descent=a->font->descent;
-        a->draw=XftDrawCreate(a->dpy,a->win,DefaultVisual(a->dpy,screen),
+        /* Use a separately matched bold face for the shortcut buttons. */
+        char *bold_pattern=NULL;
+        if (asprintf(&bold_pattern,"%s:weight=bold",a->font_pattern)<0) fatal("asprintf");
+        a->bold_font=XftFontOpenName(a->dpy,screen,bold_pattern);
+        free(bold_pattern);
+        if (!a->bold_font) a->bold_font=a->font;
+        a->draw=XftDrawCreate(a->dpy,a->paint_target,DefaultVisual(a->dpy,screen),
                               DefaultColormap(a->dpy,screen));
         if (!a->draw) { fputs("pathpop: XftDrawCreate failed\n",stderr); exit(1); }
         init_color(a,TEXT_MAIN,0xf8f8f2);
@@ -323,7 +742,7 @@ files:
     static xcb_keysym_t parse_shortkey(const char *s) {
         if (s[0] && !s[1]) {
             unsigned char c=(unsigned char)s[0];
-            if (isalnum(c)) return (xcb_keysym_t)lower(c);
+            if (isalnum(c)) return (xcb_keysym_t)c;
         }
         if ((s[0]=='F'||s[0]=='f') && isdigit((unsigned char)s[1])) {
             char *end; long n=strtol(s+1,&end,10);
@@ -339,17 +758,23 @@ files:
           "  -h, --help                 Show this help\n"
           "  --list                     Print candidate names without opening X11\n"
           "  --desktop                  Include and launch .desktop applications\n"
+          "  --no-remember              Disable reading and writing last selection\n"
+          "  --no-double-buffering      Draw directly to the window (disable back buffer)\n"
           "  --count                    Show entry count and its footer band\n"
           "  --font FONT                Xft/Fontconfig pattern, e.g. 'Consolas:pixelsize=16'\n"
           "                             Also accepts 'Consolas 16' for compatibility\n"
-          "  --short KEY PROGRAM       Bind F1..F35 or single A..Z/0..9 to PROGRAM\n"
-          "                             Repeat --short; a 3-column legend appears below results\n\n"
+          "  --short KEY PROGRAM       Bind F1..F35 or case-sensitive A..Z/a..z/0..9\n"
+          "                             Repeat --short; clickable buttons appear in 3 columns\n\n"
           "Example:\n"
           "  pathpop --font 'Consolas:pixelsize=16' --desktop\n"
           "    --short F1 thunar --short T thunar --short P pavucontrol\n\n"
           "Unmodified shortcut keys take precedence over search input.\n"
-          "Enter launches selection; Escape, outside click, or focus loss closes.\n"
-          "Ctrl+A/E/B/F/U/K/W/H/D/N/P and arrow keys edit/navigate.\n"
+          "Enter re-launches the remembered item (grey prompt) or selection.\n"
+          "Typing replaces the remembered prompt; Escape/right-click/focus loss closes.\n"
+          "Hover highlights results; left-click launches; wheel scrolls results.\n"
+          "Shortcut footer buttons are clickable.\n"
+          "Ctrl+J/N (down), Ctrl+K/P (up); Ctrl+D/PageDown, Ctrl+U/PageUp: half-page.\n"
+          "Ctrl+A/E/B/F/W/H edit input; Delete deletes the next character.\n"
           "Commands run directly via execvp(), without a shell.\n");
     }
     static void set_font(App *a, const char *arg) {
@@ -395,6 +820,8 @@ files:
             if (!strcmp(v,"-h") || !strcmp(v,"--help")) { usage(stdout); exit(0); }
             if (!strcmp(v,"--list")) { *list=true; continue; }
             if (!strcmp(v,"--desktop")) { a->desktop_mode=true; continue; }
+            if (!strcmp(v,"--no-remember")) { a->no_remember=true; continue; }
+            if (!strcmp(v,"--no-double-buffering")) { a->no_double_buffering=true; continue; }
             if (!strcmp(v,"--count")) { a->no_count=false; continue; }
             if (!strcmp(v,"--font")) {
                 if (++i>=argc) { fputs("pathpop: --font needs a value\n",stderr); exit(2); }
@@ -507,6 +934,12 @@ files:
             }
             perror("pathpop: execvp"); _exit(127);
         }
+        /* Persist only launches we attempted (not cancelled selections).
+           A shortcut command also counts as the last launched program. */
+        if (override) {
+            Entry shortcut={ .label=(char*)override, .desktop=false };
+            save_remembered(a,&shortcut);
+        } else save_remembered(a,entry);
         /* _exit closes the shared Xlib/XCB connection and releases X grabs. */
         _exit(0);
     }
@@ -515,32 +948,54 @@ files:
         bool ctrl=!!(ev->state & XCB_MOD_MASK_CONTROL);
         bool alt=!!(ev->state & XCB_MOD_MASK_1);
         int letter=lower((int)k), changed=0;
+        int before_selected=a->selected, before_scroll=a->scroll;
+        int before_cursor=a->cursor;
+        bool before_hint=a->hint_active;
         if (!ctrl && !alt && !(ev->state & (XCB_MOD_MASK_4|XCB_MOD_MASK_5))) {
-            xcb_keysym_t normal=(k>='A'&&k<='Z') ? k+32 : k;
             for (size_t i=0;i<a->short_count;i++)
-                if (normal==a->shorts[i].sym) { launch_program(a,NULL,a->shorts[i].command); return; }
+                if (k==a->shorts[i].sym) { launch_program(a,NULL,a->shorts[i].command); return; }
         }
         if (k==XK_Escape) _exit(0);
         if (k==XK_Return || k==XK_KP_Enter) {
-            if (a->match_count) launch_program(a,&a->entries[a->matches[a->selected]],NULL);
+            if (a->hint_active && a->remembered.label) {
+                const Entry *e=a->remembered_found ?
+                    &a->entries[a->matches[a->selected].entry] : &a->remembered;
+                /* Works immediately, even before the async PATH scan finishes. */
+                launch_program(a,e,NULL);
+            } else if (a->match_count) {
+                launch_program(a,&a->entries[a->matches[a->selected].entry],NULL);
+            }
             return;
         }
-        if (k==XK_Up || (ctrl && letter=='p')) {
+        bool half_down=(k==XK_Next || k==XK_KP_Next || (ctrl && letter=='d'));
+        bool half_up=(k==XK_Prior || k==XK_KP_Prior || (ctrl && letter=='u'));
+        bool navigating=half_down || half_up || k==XK_Up || k==XK_Down ||
+            (ctrl && (letter=='p' || letter=='k' || letter=='n' || letter=='j'));
+        bool editing=k==XK_BackSpace || k==XK_Delete ||
+            (ctrl && (letter=='w' || letter=='h' ||
+                      letter=='a' || letter=='e' || letter=='b' || letter=='f')) ||
+            k==XK_Home || k==XK_End || k==XK_Left || k==XK_Right;
+        bool inserting=!ctrl && !alt && k>=32 && k<=126;
+        if (a->hint_active && (navigating || editing || inserting)) {
+            /* Remembered text is a placeholder, not an editable query.
+               First keystroke starts a fresh search rather than appending. */
+            a->hint_active=false;
+            a->remembered_found=false;
+            if (!navigating) { a->selected=0; a->scroll=0; }
+        }
+        if (half_down || half_up) {
+            half_page_move(a,half_down ? 1 : -1);
+        } else if (k==XK_Up || (ctrl && (letter=='p' || letter=='k'))) {
             if (a->selected>0) a->selected--;
-        } else if (k==XK_Down || (ctrl && letter=='n')) {
+            keep_selection_visible(a);
+        } else if (k==XK_Down || (ctrl && (letter=='n' || letter=='j'))) {
             if (a->selected+1<a->match_count) a->selected++;
+            keep_selection_visible(a);
         } else if (k==XK_Home || (ctrl && letter=='a')) a->cursor=0;
         else if (k==XK_End || (ctrl && letter=='e')) a->cursor=a->qlen;
         else if (k==XK_Left || (ctrl && letter=='b')) { if (a->cursor) a->cursor--; }
         else if (k==XK_Right || (ctrl && letter=='f')) { if (a->cursor<a->qlen) a->cursor++; }
-        else if (ctrl && letter=='u') {
-            changed=a->cursor>0;
-            memmove(a->query,a->query+a->cursor,(size_t)(a->qlen-a->cursor+1));
-            a->qlen-=a->cursor; a->cursor=0;
-        } else if (ctrl && letter=='k') {
-            changed=a->cursor<a->qlen;
-            a->qlen=a->cursor; a->query[a->qlen]=0;
-        } else if (ctrl && letter=='w') {
+        else if (ctrl && letter=='w') {
             int i=a->cursor;
             while (i && a->query[i-1]==' ') i--;
             while (i && a->query[i-1]!=' ') i--;
@@ -552,7 +1007,7 @@ files:
                 memmove(a->query+a->cursor-1,a->query+a->cursor,(size_t)(a->qlen-a->cursor+1));
                 a->cursor--; a->qlen--; changed=1;
             }
-        } else if (k==XK_Delete || (ctrl && letter=='d')) {
+        } else if (k==XK_Delete) {
             if (a->cursor<a->qlen) {
                 memmove(a->query+a->cursor,a->query+a->cursor+1,(size_t)(a->qlen-a->cursor));
                 a->qlen--; changed=1;
@@ -561,11 +1016,22 @@ files:
             memmove(a->query+a->cursor+1,a->query+a->cursor,(size_t)(a->qlen-a->cursor+1));
             a->query[a->cursor++]=(char)k; a->qlen++; changed=1;
         }
-        if (changed) { a->selected=0; rank_matches(a); }
-        paint(a);
+        if (changed) { a->selected=0; a->scroll=0; rank_matches(a); }
+        if (changed || before_hint!=a->hint_active) {
+            a->redraw_header=true;
+            a->redraw_results=true;
+        } else {
+            if (before_cursor!=a->cursor) a->redraw_header=true;
+            if (before_scroll!=a->scroll) a->redraw_results=true;
+            else if (before_selected!=a->selected) {
+                mark_row_damage(a,before_selected);
+                mark_row_damage(a,a->selected);
+            }
+        }
     }
     static void on_scan_readable(App *a) {
         char data[16384]; bool changed=false;
+        bool was_finished=a->scan_finished;
         for (;;) {
             ssize_t nr=read(a->scan_fd,data,sizeof(data));
             if (!nr) { close(a->scan_fd); a->scan_fd=-1; a->scan_finished=true; break; }
@@ -593,7 +1059,10 @@ files:
             }
         }
         if (changed) rank_matches(a);
-        paint(a);
+        if (changed || a->scan_finished!=was_finished) {
+            a->redraw_results=true;
+            if (!a->no_count) a->redraw_count=true;
+        }
     }
     static int write_full(int fd, const char *s, size_t len) {
         while (len) {
@@ -742,11 +1211,14 @@ files:
     #endif
     }
     int main(int argc, char **argv) {
-        App a={ .scan_fd=-1, .width=WIDTH, .no_count=true };
+        App a={ .scan_fd=-1, .width=WIDTH, .no_count=true,
+                .hovered_short=-1, .hovered_result=-1,
+                .pointer_x=-1, .pointer_y=-1 };
         bool list=false;
         parse_args(&a,argc,argv,&list);
         signal(SIGPIPE,SIG_IGN);
         if (list) { listing_mode=true; scan_all(STDOUT_FILENO,a.desktop_mode); return 0; }
+        load_remembered(&a);
 
         /* Xlib owns the connection for Xft. XCB owns its event queue and
            performs window creation, monitor queries, grabs, and polling. */
@@ -767,17 +1239,27 @@ files:
         a.header=(a.font_size*16/5>50) ? a.font_size*16/5 : 50;
         a.footer=a.no_count ? 0 : ((a.font_size*9/5>25) ? a.font_size*9/5 : 25);
         a.visible_rows=ROWS;
-        a.legend_row_h=(a.font_size*7/5>22) ? a.font_size*7/5 : 22;
+        a.legend_row_h=(a.font_size*5/2>40) ? a.font_size*5/2 : 40;
         a.legend_rows=(int)((a.short_count+LEGEND_COLS-1)/LEGEND_COLS);
-        a.legend_h=a.legend_rows ? 1+2*LEGEND_PAD_Y+a.legend_rows*a.legend_row_h : 0;
+        a.legend_h=a.legend_rows ? 1+2*LEGEND_PAD_Y+
+            a.legend_rows*a.legend_row_h+(a.legend_rows-1)*LEGEND_GAP_Y : 0;
+        /* Without a legend or count footer, leave space below the last row.
+           Otherwise result redraws can erase the bottom border and make
+           the window appear cropped. */
+        a.bottom_pad=(!a.legend_rows && !a.footer) ? 10 : 0;
         int mx,my,mw,mh;
         choose_monitor(a.conn,s,&mx,&my,&mw,&mh);
         a.width=a.width>mw ? mw : a.width;
         /* On short screens, keep the entire legend by showing fewer results. */
         while (a.visible_rows>1 &&
-               a.header+a.visible_rows*a.row_h+a.legend_h+a.footer>mh)
+               a.header+a.visible_rows*a.row_h+a.legend_h+a.footer+a.bottom_pad>mh)
             a.visible_rows--;
-        a.height=a.header+a.visible_rows*a.row_h+a.legend_h+a.footer;
+        a.height=a.header+a.visible_rows*a.row_h+a.legend_h+a.footer+a.bottom_pad;
+        if (a.height>mh && a.bottom_pad) {
+            int excess=a.height-mh;
+            a.bottom_pad-=excess<a.bottom_pad?excess:a.bottom_pad;
+            a.height=a.header+a.visible_rows*a.row_h+a.legend_h+a.footer+a.bottom_pad;
+        }
         if (a.height>mh) a.height=mh;
         a.x=mx+(mw-a.width)/2;
         a.y=my+(mh-a.height)/2;
@@ -786,23 +1268,39 @@ files:
         uint32_t mask=XCB_CW_BACK_PIXEL|XCB_CW_OVERRIDE_REDIRECT|XCB_CW_EVENT_MASK;
         uint32_t vals[]={ 0x272822,1,
             XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_KEY_PRESS |
-            XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_FOCUS_CHANGE |
-            XCB_EVENT_MASK_STRUCTURE_NOTIFY };
+            XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_POINTER_MOTION |
+            XCB_EVENT_MASK_ENTER_WINDOW | XCB_EVENT_MASK_LEAVE_WINDOW |
+            XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_STRUCTURE_NOTIFY };
         xcb_create_window(a.conn,XCB_COPY_FROM_PARENT,a.win,s->root,
             (int16_t)a.x,(int16_t)a.y,(uint16_t)a.width,(uint16_t)a.height,0,
             XCB_WINDOW_CLASS_INPUT_OUTPUT,s->root_visual,mask,vals);
+        /* A persistent same-depth back buffer is used unless explicitly
+           disabled. XCB and Xft must always share the chosen drawable. */
+        a.paint_target=a.win;
+        if (!a.no_double_buffering) {
+            a.back_pixmap=xcb_generate_id(a.conn);
+            xcb_create_pixmap(a.conn,s->root_depth,a.back_pixmap,a.win,
+                              (uint16_t)a.width,(uint16_t)a.height);
+            a.paint_target=a.back_pixmap;
+        }
         make_gc(&a,GC_BG,0x272822);
         make_gc(&a,GC_BORDER,0x49483e);
         make_gc(&a,GC_SELECT,0x383830);
         make_gc(&a,GC_ACCENT,0x2790d9);
         make_gc(&a,GC_CURSOR,0xf8f8f2);
+        make_gc(&a,GC_BUTTON,0x49483e);
+        make_gc(&a,GC_BUTTON_HOVER,0x272822);
+        make_gc(&a,GC_ROW_HOVER,0x49483e);
+        make_gc(&a,GC_ROW_HOVER_ACCENT,0xfd971f);
 
         /* Show an immediately centered popup BEFORE Xft/Fontconfig resolution. */
         xcb_map_window(a.conn,a.win);
         xcb_set_input_focus(a.conn,XCB_INPUT_FOCUS_POINTER_ROOT,a.win,XCB_CURRENT_TIME);
         xcb_grab_keyboard(a.conn,0,a.win,XCB_CURRENT_TIME,
                           XCB_GRAB_MODE_ASYNC,XCB_GRAB_MODE_ASYNC);
-        xcb_grab_pointer(a.conn,0,a.win,XCB_EVENT_MASK_BUTTON_PRESS,
+        xcb_grab_pointer(a.conn,0,a.win,
+            XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_POINTER_MOTION |
+            XCB_EVENT_MASK_ENTER_WINDOW | XCB_EVENT_MASK_LEAVE_WINDOW,
             XCB_GRAB_MODE_ASYNC,XCB_GRAB_MODE_ASYNC,XCB_NONE,XCB_NONE,XCB_CURRENT_TIME);
         xcb_flush(a.conn);
 
@@ -839,15 +1337,30 @@ files:
                     bool lost=!f || f->focus!=a.win;
                     free(f);
                     if (lost) { free(ev); return 0; }
-                }
-                else if (type==XCB_BUTTON_PRESS) {
+                } else if (type==XCB_MOTION_NOTIFY || type==XCB_ENTER_NOTIFY) {
+                    xcb_motion_notify_event_t *m=(xcb_motion_notify_event_t*)ev;
+                    set_pointer_hover(&a,m->event_x,m->event_y);
+                } else if (type==XCB_LEAVE_NOTIFY) {
+                    set_pointer_hover(&a,-1,-1);
+                } else if (type==XCB_BUTTON_PRESS) {
                     xcb_button_press_event_t *b=(xcb_button_press_event_t*)ev;
-                    if (b->root_x<a.x || b->root_x>=a.x+a.width ||
-                        b->root_y<a.y || b->root_y>=a.y+a.height) { free(ev); return 0; }
-                    int y=(int)b->root_y-a.y;
-                    if (b->detail==1 && y>=a.header && y<a.header+a.row_h*a.visible_rows) {
-                        int row=(y-a.header)/a.row_h;
-                        if (row<a.match_count) { a.selected=row; launch_program(&a,&a.entries[a.matches[row]],NULL); }
+                    int x=b->event_x, y=b->event_y;
+                    a.pointer_x=x; a.pointer_y=y;
+                    if (x<0 || x>=a.width || y<0 || y>=a.height || b->detail==3) {
+                        free(ev); return 0;
+                    }
+                    if (b->detail==4 || b->detail==5) {
+                        wheel_scroll(&a,b->detail==4 ? -1 : 1);
+                    } else if (b->detail==1) {
+                        int hit=shortcut_at(&a,x,y);
+                        if (hit>=0) launch_program(&a,NULL,a.shorts[hit].command);
+                        else if (y>=a.header && y<a.header+a.row_h*a.visible_rows) {
+                            int row=a.scroll+(y-a.header)/a.row_h;
+                            if (row<a.match_count) {
+                                a.selected=row;
+                                launch_program(&a,&a.entries[a.matches[row].entry],NULL);
+                            }
+                        }
                     }
                 } else if (type==XCB_DESTROY_NOTIFY || type==XCB_UNMAP_NOTIFY) {
                     free(ev); return 0;
@@ -855,6 +1368,9 @@ files:
                 free(ev);
             }
             if (xcb_connection_has_error(a.conn)) return 1;
+            /* Batch bursts of motion/keypress events into one presentation.
+               Input is handled before paint and without a frame-rate timer. */
+            present_pending(&a);
             struct pollfd pfds[2]; nfds_t n=1;
             pfds[0]=(struct pollfd){ .fd=xcb_get_file_descriptor(a.conn), .events=POLLIN };
             if (a.scan_fd>=0)
