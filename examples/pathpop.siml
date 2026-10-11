@@ -31,12 +31,13 @@ files:
 
     /* XCB owns the event queue; Xlib is used only by Xft.
        Editable input is ASCII-oriented, but result labels support UTF-8. */
-    enum { WIDTH=680, ROWS=8, MAX_QUERY=255, MAX_LINE=8192, HASH_INIT=4096 };
+    enum { WIDTH=680, ROWS=8, MAX_QUERY=255, MAX_LINE=8192, HASH_INIT=4096,
+           LEGEND_COLS=3, LEGEND_PAD_X=18, LEGEND_PAD_Y=7 };
 
     typedef struct { char *label, *path; bool desktop; } Entry;
-    typedef struct { xcb_keysym_t sym; char *command; } Shortcut;
+    typedef struct { xcb_keysym_t sym; char *key, *command; } Shortcut;
     enum { GC_BG, GC_BORDER, GC_SELECT, GC_ACCENT, GC_CURSOR, GC_COUNT };
-    enum { TEXT_MAIN, TEXT_DIM, TEXT_MUTED, TEXT_GREEN, TEXT_COUNT };
+    enum { TEXT_MAIN, TEXT_DIM, TEXT_MUTED, TEXT_GREEN, TEXT_BLUE, TEXT_COUNT };
     typedef struct {
         Display *dpy;
         xcb_connection_t *conn;
@@ -49,6 +50,7 @@ files:
         xcb_get_keyboard_mapping_reply_t *keymap;
         uint8_t mincode;
         int x, y, width, height, header, row_h, footer, font_size;
+        int visible_rows, legend_rows, legend_row_h, legend_h;
         int ascent, descent;
         char *font_pattern;
         char query[MAX_QUERY+1];
@@ -64,7 +66,7 @@ files:
         int matches[ROWS], match_count;
         Shortcut *shorts;
         size_t short_count;
-        bool desktop_mode;
+        bool desktop_mode, no_count;
     } App;
 
     static void fatal(const char *msg) { perror(msg); exit(1); }
@@ -142,8 +144,8 @@ files:
             int pos=a->match_count;
             while (pos>0 && (sc<scores[pos-1] ||
                  (sc==scores[pos-1] && strcmp(a->entries[i].label,a->entries[a->matches[pos-1]].label)<0))) pos--;
-            if (pos>=ROWS) continue;
-            int upto=a->match_count<ROWS ? a->match_count++ : ROWS-1;
+            if (pos>=a->visible_rows) continue;
+            int upto=a->match_count<a->visible_rows ? a->match_count++ : a->visible_rows-1;
             for (int j=upto;j>pos;j--) { a->matches[j]=a->matches[j-1]; scores[j]=scores[j-1]; }
             a->matches[pos]=(int)i; scores[pos]=sc;
         }
@@ -209,6 +211,13 @@ files:
         rect(a,GC_BORDER,0,0,1,h);
         rect(a,GC_BORDER,w-1,0,1,h);
         rect(a,GC_BORDER,0,a->header-1,w,1);
+        const int legend_top=a->header+a->visible_rows*a->row_h;
+        if (a->legend_rows) {
+            /* The three-column shortcut legend is a dedicated footer band. */
+            rect(a,GC_SELECT,1,legend_top,w-2,a->legend_h);
+            rect(a,GC_BORDER,0,legend_top,w,1);
+        }
+        if (a->footer) rect(a,GC_BORDER,0,h-a->footer,w,1);
         for (int i=0;i<a->match_count;i++) {
             int y=a->header+i*a->row_h;
             if (i==a->selected) {
@@ -243,10 +252,26 @@ files:
             draw_text(a,TEXT_MUTED,20,row_base,
                       a->scan_finished?"No matches":"Scanning PATH...",w-40);
         }
-        char footer[128];
-        snprintf(footer,sizeof footer,"%zu entries%s",a->count,
-                 a->scan_finished?"":"  /  scanning");
-        draw_text(a,TEXT_MUTED,18,h-8,footer,w-36);
+        if (a->legend_rows) {
+            int col_w=(w-2*LEGEND_PAD_X)/LEGEND_COLS;
+            for (size_t i=0;i<a->short_count;i++) {
+                int row=(int)(i/LEGEND_COLS);
+                int col=(int)(i%LEGEND_COLS);
+                int x=LEGEND_PAD_X+col*col_w;
+                int y=legend_top+1+LEGEND_PAD_Y+row*a->legend_row_h;
+                int base=y+(a->legend_row_h-a->ascent-a->descent)/2+a->ascent;
+                /* Fixed key/arrow slots align the command names within each column. */
+                draw_text(a,TEXT_BLUE,x,base,a->shorts[i].key,52);
+                draw_text(a,TEXT_MUTED,x+53,base,"",18);
+                draw_text(a,TEXT_DIM,x+75,base,a->shorts[i].command,col_w-80);
+            }
+        }
+        if (!a->no_count) {
+            char footer[128];
+            snprintf(footer,sizeof footer,"%zu entries%s",a->count,
+                     a->scan_finished?"":"  /  scanning");
+            draw_text(a,TEXT_MUTED,18,h-8,footer,w-36);
+        }
         XFlush(a->dpy);
     }
     static void init_xft(App *a) {
@@ -265,6 +290,7 @@ files:
         init_color(a,TEXT_DIM,0xa59f85);
         init_color(a,TEXT_MUTED,0x75715e);
         init_color(a,TEXT_GREEN,0xa6e22e);
+        init_color(a,TEXT_BLUE,0x33b9f3);
     }
     static void keymap_load(App *a) {
         const xcb_setup_t *setup=xcb_get_setup(a->conn);
@@ -313,10 +339,11 @@ files:
           "  -h, --help                 Show this help\n"
           "  --list                     Print candidate names without opening X11\n"
           "  --desktop                  Include and launch .desktop applications\n"
+          "  --count                    Show entry count and its footer band\n"
           "  --font FONT                Xft/Fontconfig pattern, e.g. 'Consolas:pixelsize=16'\n"
           "                             Also accepts 'Consolas 16' for compatibility\n"
           "  --short KEY PROGRAM       Bind F1..F35 or single A..Z/0..9 to PROGRAM\n"
-          "                             Repeat --short for multiple shortcuts\n\n"
+          "                             Repeat --short; a 3-column legend appears below results\n\n"
           "Example:\n"
           "  pathpop --font 'Consolas:pixelsize=16' --desktop\n"
           "    --short F1 thunar --short T thunar --short P pavucontrol\n\n"
@@ -368,19 +395,24 @@ files:
             if (!strcmp(v,"-h") || !strcmp(v,"--help")) { usage(stdout); exit(0); }
             if (!strcmp(v,"--list")) { *list=true; continue; }
             if (!strcmp(v,"--desktop")) { a->desktop_mode=true; continue; }
+            if (!strcmp(v,"--count")) { a->no_count=false; continue; }
             if (!strcmp(v,"--font")) {
                 if (++i>=argc) { fputs("pathpop: --font needs a value\n",stderr); exit(2); }
                 set_font(a,argv[i]); continue;
             }
             if (!strcmp(v,"--short")) {
                 if (i+2>=argc) { fputs("pathpop: --short needs KEY PROGRAM\n",stderr); exit(2); }
-                xcb_keysym_t sym=parse_shortkey(argv[++i]);
-                if (!sym) { fprintf(stderr,"pathpop: invalid shortcut key: %s\n",argv[i]); exit(2); }
+                const char *key=argv[++i];
+                xcb_keysym_t sym=parse_shortkey(key);
+                if (!sym) { fprintf(stderr,"pathpop: invalid shortcut key: %s\n",key); exit(2); }
                 const char *cmd=argv[++i];
                 if (!*cmd) { fputs("pathpop: empty shortcut program\n",stderr); exit(2); }
                 Shortcut *s=realloc(a->shorts,(a->short_count+1)*sizeof(*s));
                 if (!s) fatal("realloc");
-                a->shorts=s; a->shorts[a->short_count++]=(Shortcut){sym,strdup(cmd)};
+                a->shorts=s;
+                Shortcut item={ .sym=sym, .key=strdup(key), .command=strdup(cmd) };
+                if (!item.key || !item.command) fatal("strdup");
+                a->shorts[a->short_count++]=item;
                 continue;
             }
             fprintf(stderr,"pathpop: unknown option: %s\n",v);
@@ -710,7 +742,7 @@ files:
     #endif
     }
     int main(int argc, char **argv) {
-        App a={ .scan_fd=-1, .width=WIDTH };
+        App a={ .scan_fd=-1, .width=WIDTH, .no_count=true };
         bool list=false;
         parse_args(&a,argc,argv,&list);
         signal(SIGPIPE,SIG_IGN);
@@ -733,11 +765,19 @@ files:
         a.screen=s;
         a.row_h=(a.font_size*7/4>28) ? a.font_size*7/4 : 28;
         a.header=(a.font_size*16/5>50) ? a.font_size*16/5 : 50;
-        a.footer=(a.font_size*9/5>25) ? a.font_size*9/5 : 25;
-        a.height=a.header+ROWS*a.row_h+a.footer;
+        a.footer=a.no_count ? 0 : ((a.font_size*9/5>25) ? a.font_size*9/5 : 25);
+        a.visible_rows=ROWS;
+        a.legend_row_h=(a.font_size*7/5>22) ? a.font_size*7/5 : 22;
+        a.legend_rows=(int)((a.short_count+LEGEND_COLS-1)/LEGEND_COLS);
+        a.legend_h=a.legend_rows ? 1+2*LEGEND_PAD_Y+a.legend_rows*a.legend_row_h : 0;
         int mx,my,mw,mh;
         choose_monitor(a.conn,s,&mx,&my,&mw,&mh);
         a.width=a.width>mw ? mw : a.width;
+        /* On short screens, keep the entire legend by showing fewer results. */
+        while (a.visible_rows>1 &&
+               a.header+a.visible_rows*a.row_h+a.legend_h+a.footer>mh)
+            a.visible_rows--;
+        a.height=a.header+a.visible_rows*a.row_h+a.legend_h+a.footer;
         if (a.height>mh) a.height=mh;
         a.x=mx+(mw-a.width)/2;
         a.y=my+(mh-a.height)/2;
@@ -805,7 +845,7 @@ files:
                     if (b->root_x<a.x || b->root_x>=a.x+a.width ||
                         b->root_y<a.y || b->root_y>=a.y+a.height) { free(ev); return 0; }
                     int y=(int)b->root_y-a.y;
-                    if (b->detail==1 && y>=a.header && y<a.header+a.row_h*ROWS) {
+                    if (b->detail==1 && y>=a.header && y<a.header+a.row_h*a.visible_rows) {
                         int row=(y-a.header)/a.row_h;
                         if (row<a.match_count) { a.selected=row; launch_program(&a,&a.entries[a.matches[row]],NULL); }
                     }
