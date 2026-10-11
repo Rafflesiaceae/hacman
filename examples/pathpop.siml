@@ -1,0 +1,508 @@
+#!/usr/bin/env hacman
+# Minimal C/XCB launcher: compile once, then bind build/pathpop in i3.
+# Run the compiled binary directly for minimum hotkey-to-window latency.
+name: pathpop
+command: (test -f build/build.ninja || meson setup build --buildtype=release) && meson compile -C build
+bin-path: build/pathpop
+files:
+  main.c: |
+    #define _GNU_SOURCE
+    #include <xcb/xcb.h>
+    #include <X11/keysym.h>
+    #include <ctype.h>
+    #include <dirent.h>
+    #include <errno.h>
+    #include <fcntl.h>
+    #include <poll.h>
+    #include <signal.h>
+    #include <stdint.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <sys/stat.h>
+    #include <sys/types.h>
+    #include <unistd.h>
+
+    /* Deliberately minimal: XCB + X11 core bitmap font, ASCII input/display. */
+    enum { WIDTH = 660, ROWS = 8, ROW_H = 23, HEADER = 44,
+           HEIGHT = HEADER + ROWS * ROW_H + 20, CHAR_W = 6,
+           MAX_QUERY = 255, HASH_INIT = 4096 };
+
+    typedef struct {
+        xcb_connection_t *conn;
+        xcb_window_t win;
+        xcb_gcontext_t text, dim, background, highlight, accent;
+        xcb_get_keyboard_mapping_reply_t *keymap;
+        uint8_t mincode;
+        char query[MAX_QUERY + 1];
+        int qlen, cursor, selected;
+        char **names;
+        size_t count, capacity;
+        char **hash;
+        size_t hash_cap;
+        int scan_fd, scan_finished;
+        char partial[512];
+        size_t partial_len;
+        int matches[ROWS];
+        int match_count;
+    } App;
+
+    static void fatal(const char *msg) { perror(msg); exit(1); }
+    static int lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
+
+    static uint64_t hashstr(const char *s) {
+        uint64_t h = UINT64_C(14695981039346656037);
+        while (*s) { h ^= (unsigned char)*s++; h *= UINT64_C(1099511628211); }
+        return h;
+    }
+
+    static void resize_hash(App *a) {
+        size_t next = a->hash_cap ? a->hash_cap * 2 : HASH_INIT;
+        char **slots = calloc(next, sizeof(*slots));
+        if (!slots) fatal("calloc");
+        for (size_t i = 0; i < a->hash_cap; ++i) {
+            if (!a->hash[i]) continue;
+            size_t j = hashstr(a->hash[i]) & (next - 1);
+            while (slots[j]) j = (j + 1) & (next - 1);
+            slots[j] = a->hash[i];
+        }
+        free(a->hash);
+        a->hash = slots;
+        a->hash_cap = next;
+    }
+
+    static void add_name(App *a, const char *name) {
+        if (!*name) return;
+        if ((a->count + 1) * 10 >= a->hash_cap * 7) resize_hash(a);
+        size_t slot = hashstr(name) & (a->hash_cap - 1);
+        while (a->hash[slot]) {
+            if (!strcmp(a->hash[slot], name)) return;
+            slot = (slot + 1) & (a->hash_cap - 1);
+        }
+        if (a->count == a->capacity) {
+            size_t cap = a->capacity ? a->capacity * 2 : 1024;
+            char **p = realloc(a->names, cap * sizeof(*p));
+            if (!p) fatal("realloc");
+            a->names = p;
+            a->capacity = cap;
+        }
+        char *copy = strdup(name);
+        if (!copy) fatal("strdup");
+        a->names[a->count++] = copy;
+        a->hash[slot] = copy;
+    }
+
+    static int score(const char *name, const char *query) {
+        if (!*query) return 0;
+        const size_t nl = strlen(name), ql = strlen(query);
+        if (nl == ql) {
+            size_t i = 0;
+            for (; i < ql && lower((unsigned char)name[i]) == lower((unsigned char)query[i]); ++i) {}
+            if (i == ql) return 0;
+        }
+        size_t i = 0;
+        for (; i < ql && i < nl && lower((unsigned char)name[i]) == lower((unsigned char)query[i]); ++i) {}
+        if (i == ql) return 100 + (int)(nl - ql);
+        for (size_t p = 0; p + ql <= nl; ++p) {
+            for (i = 0; i < ql && lower((unsigned char)name[p+i]) == lower((unsigned char)query[i]); ++i) {}
+            if (i == ql) return 400 + (int)(p * 8 + nl - ql);
+        }
+        size_t last = 0, qi = 0;
+        int gaps = 0;
+        for (size_t p = 0; p < nl && qi < ql; ++p) {
+            if (lower((unsigned char)name[p]) == lower((unsigned char)query[qi])) {
+                if (qi) gaps += (int)(p - last - 1);
+                last = p;
+                ++qi;
+            }
+        }
+        return qi == ql ? 1000 + gaps * 8 + (int)nl : -1;
+    }
+
+    static void rank_matches(App *a) {
+        int scores[ROWS];
+        a->match_count = 0;
+        for (size_t i = 0; i < a->count; ++i) {
+            int sc = score(a->names[i], a->query);
+            if (sc < 0) continue;
+            int pos = a->match_count;
+            while (pos > 0 &&
+                   (sc < scores[pos - 1] ||
+                    (sc == scores[pos - 1] && strcmp(a->names[i], a->names[a->matches[pos - 1]]) < 0))) {
+                --pos;
+            }
+            if (pos >= ROWS) continue;
+            int upto = a->match_count < ROWS ? a->match_count++ : ROWS - 1;
+            for (int j = upto; j > pos; --j) {
+                a->matches[j] = a->matches[j-1];
+                scores[j] = scores[j-1];
+            }
+            a->matches[pos] = (int)i;
+            scores[pos] = sc;
+        }
+        if (a->selected >= a->match_count) a->selected = a->match_count ? a->match_count - 1 : 0;
+    }
+
+    static void rect(App *a, xcb_gcontext_t gc, int x, int y, int w, int h) {
+        xcb_rectangle_t r = { (int16_t)x, (int16_t)y, (uint16_t)w, (uint16_t)h };
+        xcb_poly_fill_rectangle(a->conn, a->win, gc, 1, &r);
+    }
+
+    static void text(App *a, xcb_gcontext_t gc, int x, int baseline, const char *s, int max_chars) {
+        char ascii[250];
+        int n = 0;
+        while (*s && n < max_chars && n < 240) {
+            unsigned char c = (unsigned char)*s++;
+            ascii[n++] = (c >= 32 && c <= 126) ? (char)c : '?';
+        }
+        if (!n) return;
+        unsigned char item[242];
+        item[0] = (unsigned char)n;
+        item[1] = 0;
+        memcpy(item + 2, ascii, (size_t)n);
+        xcb_poly_text_8(a->conn, a->win, gc, (int16_t)x, (int16_t)baseline,
+                        (uint32_t)n + 2, item);
+    }
+
+    static void paint(App *a) {
+        rect(a, a->background, 0, 0, WIDTH, HEIGHT);
+        text(a, a->accent, 17, 27, "run", 3);
+        text(a, a->dim, 48, 27, ">", 1);
+
+        /* Keep the text cursor visible when the query is wider than the window. */
+        int columns = (WIDTH - 81) / CHAR_W;
+        int start = a->cursor > columns ? a->cursor - columns : 0;
+        if (a->qlen - start > columns && a->cursor == a->qlen) start = a->qlen - columns;
+        text(a, a->text, 65, 27, a->query + start, columns);
+        int caret_col = a->cursor - start;
+        if (caret_col >= 0 && caret_col <= columns)
+            rect(a, a->accent, 65 + CHAR_W * caret_col, 13, 2, 17);
+
+        rect(a, a->dim, 0, HEADER - 1, WIDTH, 1);
+        for (int i = 0; i < a->match_count; ++i) {
+            int y = HEADER + i * ROW_H;
+            if (i == a->selected) rect(a, a->highlight, 7, y, WIDTH - 14, ROW_H);
+            text(a, a->text, 18, y + 16, a->names[a->matches[i]], (WIDTH - 36) / CHAR_W);
+        }
+        if (!a->match_count)
+            text(a, a->dim, 18, HEADER + 16,
+                 a->scan_finished ? "No matches" : "Scanning PATH...", 70);
+        char footer[100];
+        snprintf(footer, sizeof footer, "%zu commands%s", a->count,
+                 a->scan_finished ? "" : " (scanning)");
+        text(a, a->dim, 18, HEIGHT - 6, footer, 80);
+        xcb_flush(a->conn);
+    }
+
+    static xcb_gcontext_t gc(App *a, uint32_t color, xcb_font_t font) {
+        xcb_gcontext_t id = xcb_generate_id(a->conn);
+        uint32_t mask = XCB_GC_FOREGROUND | (font ? XCB_GC_FONT : 0);
+        uint32_t vals[2] = { color, font };
+        xcb_create_gc(a->conn, id, a->win, mask, vals);
+        return id;
+    }
+
+    static void keymap_load(App *a) {
+        const xcb_setup_t *setup = xcb_get_setup(a->conn);
+        a->mincode = setup->min_keycode;
+        xcb_get_keyboard_mapping_cookie_t cookie = xcb_get_keyboard_mapping(
+            a->conn, a->mincode, (uint8_t)(setup->max_keycode - a->mincode + 1));
+        free(a->keymap);
+        a->keymap = xcb_get_keyboard_mapping_reply(a->conn, cookie, NULL);
+    }
+
+    static xcb_keysym_t keysym_for(App *a, xcb_key_press_event_t *ev) {
+        if (!a->keymap || ev->detail < a->mincode) return 0;
+        const int stride = a->keymap->keysyms_per_keycode;
+        const int total = xcb_get_keyboard_mapping_keysyms_length(a->keymap);
+        const int base = (ev->detail - a->mincode) * stride;
+        if (stride < 1 || base >= total) return 0;
+        const xcb_keysym_t *syms = xcb_get_keyboard_mapping_keysyms(a->keymap);
+        int shift = !!(ev->state & XCB_MOD_MASK_SHIFT);
+        int altgr = !!(ev->state & XCB_MOD_MASK_5);
+        int group = (altgr && stride >= 3) ? 2 : 0;
+        int col = group + (shift && stride > group + 1);
+        if (col >= stride || !syms[base + col]) col = group;
+        if (col >= stride || !syms[base + col]) col = 0;
+        xcb_keysym_t k = syms[base + col];
+        if ((ev->state & XCB_MOD_MASK_LOCK) && !altgr) {
+            if (k >= 'a' && k <= 'z') k -= 32;
+            else if (k >= 'A' && k <= 'Z') k += 32;
+        }
+        return k;
+    }
+
+    static void erase_range(App *a, int from, int to) {
+        if (from >= to) return;
+        memmove(a->query + from, a->query + to, (size_t)(a->qlen - to + 1));
+        a->qlen -= to - from;
+        a->cursor = from;
+    }
+
+    static void launch(App *a) {
+        if (a->match_count == 0) return;
+        const char *selected = a->names[a->matches[a->selected]];
+        pid_t pid = fork();
+        if (pid < 0) return;
+        if (pid == 0) {
+            close(xcb_get_file_descriptor(a->conn));
+            if (a->scan_fd >= 0) close(a->scan_fd);
+            setsid();
+            signal(SIGCHLD, SIG_DFL);
+            char *const argv[] = { (char *)selected, NULL };
+            execvp(selected, argv);
+            _exit(127);
+        }
+        /* The X connection close destroys the popup and releases its key grab. */
+        xcb_disconnect(a->conn);
+        _exit(0);
+    }
+
+    static void on_key(App *a, xcb_key_press_event_t *ev) {
+        xcb_keysym_t k = keysym_for(a, ev);
+        int ctrl = !!(ev->state & XCB_MOD_MASK_CONTROL);
+        int ch = (int)k;
+        int letter = lower(ch);
+        int changed = 0;
+        if (k == XK_Escape) { xcb_disconnect(a->conn); _exit(0); }
+        if (k == XK_Return || k == XK_KP_Enter) { launch(a); return; }
+        if (k == XK_Up || (ctrl && letter == 'p')) {
+            if (a->selected > 0) --a->selected;
+        } else if (k == XK_Down || (ctrl && letter == 'n')) {
+            if (a->selected + 1 < a->match_count) ++a->selected;
+        } else if (k == XK_Home || (ctrl && letter == 'a')) {
+            a->cursor = 0;
+        } else if (k == XK_End || (ctrl && letter == 'e')) {
+            a->cursor = a->qlen;
+        } else if (k == XK_Left || (ctrl && letter == 'b')) {
+            if (a->cursor) --a->cursor;
+        } else if (k == XK_Right || (ctrl && letter == 'f')) {
+            if (a->cursor < a->qlen) ++a->cursor;
+        } else if (ctrl && letter == 'u') {
+            changed = a->cursor > 0;
+            erase_range(a, 0, a->cursor);
+        } else if (ctrl && letter == 'k') {
+            changed = a->cursor < a->qlen;
+            erase_range(a, a->cursor, a->qlen);
+        } else if (ctrl && letter == 'w') {
+            int i = a->cursor;
+            while (i && a->query[i-1] == ' ') --i;
+            while (i && a->query[i-1] != ' ') --i;
+            changed = i < a->cursor;
+            erase_range(a, i, a->cursor);
+        } else if (k == XK_BackSpace || (ctrl && letter == 'h')) {
+            if (a->cursor) { erase_range(a, a->cursor - 1, a->cursor); changed = 1; }
+        } else if (k == XK_Delete || (ctrl && letter == 'd')) {
+            if (a->cursor < a->qlen) { erase_range(a, a->cursor, a->cursor + 1); changed = 1; }
+        } else if (!ctrl && !(ev->state & XCB_MOD_MASK_1) &&
+                   k >= 32 && k <= 126 && a->qlen < MAX_QUERY) {
+            memmove(a->query + a->cursor + 1, a->query + a->cursor,
+                    (size_t)(a->qlen - a->cursor + 1));
+            a->query[a->cursor++] = (char)k;
+            ++a->qlen;
+            changed = 1;
+        }
+        if (changed) { a->selected = 0; rank_matches(a); }
+        paint(a);
+    }
+
+    static void on_scan_readable(App *a) {
+        char data[16384];
+        int changed = 0;
+        for (;;) {
+            ssize_t nr = read(a->scan_fd, data, sizeof data);
+            if (nr == 0) {
+                close(a->scan_fd);
+                a->scan_fd = -1;
+                a->scan_finished = 1;
+                break;
+            }
+            if (nr < 0) {
+                if (errno == EINTR) continue;
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    close(a->scan_fd); a->scan_fd = -1; a->scan_finished = 1;
+                }
+                break;
+            }
+            for (ssize_t i = 0; i < nr; ++i) {
+                char c = data[i];
+                if (c == '\n') {
+                    a->partial[a->partial_len] = 0;
+                    add_name(a, a->partial);
+                    a->partial_len = 0;
+                    changed = 1;
+                } else if (a->partial_len + 1 < sizeof(a->partial)) {
+                    a->partial[a->partial_len++] = c;
+                }
+            }
+        }
+        if (changed) rank_matches(a);
+        paint(a);
+    }
+
+    static int write_full(int fd, const char *s, size_t len) {
+        while (len) {
+            ssize_t n = write(fd, s, len);
+            if (n > 0) { s += n; len -= (size_t)n; }
+            else if (n < 0 && errno == EINTR) continue;
+            else return -1;
+        }
+        return 0;
+    }
+
+    static void scan_path(int outfd) {
+        const char *path = getenv("PATH");
+        if (!path) path = "";
+        const char *p = path;
+        char output[4096];
+        size_t output_len = 0;
+        for (;;) {
+            const char *end = strchr(p, ':');
+            size_t len = end ? (size_t)(end - p) : strlen(p);
+            char *dir = len ? strndup(p, len) : strdup(".");
+            if (dir) {
+                DIR *d = opendir(dir);
+                if (d) {
+                    int dfd = dirfd(d);
+                    struct dirent *de;
+                    while ((de = readdir(d))) {
+                        const char *n = de->d_name;
+                        size_t nl = strlen(n);
+                        if ((n[0] == '.' && (!n[1] || (n[1] == '.' && !n[2]))) ||
+                            (nl >= 8 && !strcmp(n + nl - 8, ".desktop")) || strchr(n, '\n'))
+                            continue;
+                        int reg = de->d_type == DT_REG;
+                        if (de->d_type == DT_LNK || de->d_type == DT_UNKNOWN) {
+                            struct stat st;
+                            reg = fstatat(dfd, n, &st, 0) == 0 && S_ISREG(st.st_mode);
+                        }
+                        if (!reg || faccessat(dfd, n, X_OK, 0) != 0) continue;
+                        if (output_len + nl + 1 > sizeof(output)) {
+                            if (write_full(outfd, output, output_len)) {
+                                closedir(d); free(dir); return;
+                            }
+                            output_len = 0;
+                        }
+                        memcpy(output + output_len, n, nl);
+                        output_len += nl;
+                        output[output_len++] = '\n';
+                        if (output_len >= 2048) {
+                            if (write_full(outfd, output, output_len)) {
+                                closedir(d); free(dir); return;
+                            }
+                            output_len = 0;
+                        }
+                    }
+                    closedir(d);
+                    if (output_len) {
+                        if (write_full(outfd, output, output_len)) {
+                            free(dir); return;
+                        }
+                        output_len = 0;
+                    }
+                }
+                free(dir);
+            }
+            if (!end) break;
+            p = end + 1;
+        }
+    }
+
+    int main(int argc, char **argv) {
+        if (argc > 1 && !strcmp(argv[1], "--list")) {
+            scan_path(STDOUT_FILENO);
+            return 0;
+        }
+        App a = { .scan_fd = -1 };
+        int screen_number = 0;
+        a.conn = xcb_connect(NULL, &screen_number);
+        if (xcb_connection_has_error(a.conn)) {
+            fprintf(stderr, "pathpop: cannot connect to X11\n");
+            return 1;
+        }
+        const xcb_setup_t *setup = xcb_get_setup(a.conn);
+        xcb_screen_iterator_t si = xcb_setup_roots_iterator(setup);
+        for (int i = 0; i < screen_number && si.rem; ++i) xcb_screen_next(&si);
+        if (!si.rem) return 1;
+        xcb_screen_t *s = si.data;
+        int x = ((int)s->width_in_pixels - WIDTH) / 2;
+        int y = (int)s->height_in_pixels / 5;
+        if (x < 0) x = 0;
+        a.win = xcb_generate_id(a.conn);
+        uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_OVERRIDE_REDIRECT | XCB_CW_EVENT_MASK;
+        uint32_t vals[] = { 0x151923, 1,
+            XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_KEY_PRESS |
+            XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_STRUCTURE_NOTIFY };
+        xcb_create_window(a.conn, XCB_COPY_FROM_PARENT, a.win, s->root,
+                          (int16_t)x, (int16_t)y, WIDTH, HEIGHT, 0,
+                          XCB_WINDOW_CLASS_INPUT_OUTPUT, s->root_visual, mask, vals);
+
+        xcb_font_t font = xcb_generate_id(a.conn);
+        xcb_open_font(a.conn, font, 5, "fixed");
+        a.text = gc(&a, 0xe1e7ef, font);
+        a.dim = gc(&a, 0x8893a1, font);
+        a.accent = gc(&a, 0x82cfff, font);
+        a.background = gc(&a, 0x151923, 0);
+        a.highlight = gc(&a, 0x29394d, 0);
+        xcb_map_window(a.conn, a.win);
+        xcb_set_input_focus(a.conn, XCB_INPUT_FOCUS_POINTER_ROOT, a.win, XCB_CURRENT_TIME);
+        xcb_grab_keyboard(a.conn, 0, a.win, XCB_CURRENT_TIME,
+                          XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+        /* First frame is queued BEFORE asking for the keyboard map or scanning PATH. */
+        paint(&a);
+
+        keymap_load(&a);
+
+        int fds[2];
+        if (pipe2(fds, O_CLOEXEC) != 0) fatal("pipe2");
+        signal(SIGCHLD, SIG_IGN);
+        pid_t scanner = fork();
+        if (scanner < 0) fatal("fork");
+        if (scanner == 0) {
+            close(fds[0]);
+            close(xcb_get_file_descriptor(a.conn));
+            scan_path(fds[1]);
+            close(fds[1]);
+            _exit(0);
+        }
+        close(fds[1]);
+        a.scan_fd = fds[0];
+        int flags = fcntl(a.scan_fd, F_GETFL);
+        if (flags >= 0) fcntl(a.scan_fd, F_SETFL, flags | O_NONBLOCK);
+
+        for (;;) {
+            xcb_generic_event_t *ev;
+            while ((ev = xcb_poll_for_event(a.conn))) {
+                int type = ev->response_type & 0x7f;
+                if (type == XCB_KEY_PRESS) on_key(&a, (xcb_key_press_event_t *)ev);
+                else if (type == XCB_EXPOSE) paint(&a);
+                else if (type == XCB_MAPPING_NOTIFY) keymap_load(&a);
+                else if (type == XCB_BUTTON_PRESS) {
+                    xcb_button_press_event_t *b = (xcb_button_press_event_t *)ev;
+                    int row = ((int)b->event_y - HEADER) / ROW_H;
+                    if (b->detail == 1 && b->event_y >= HEADER && row < a.match_count) {
+                        a.selected = row; launch(&a);
+                    }
+                } else if (type == XCB_DESTROY_NOTIFY) return 0;
+                free(ev);
+            }
+            if (xcb_connection_has_error(a.conn)) return 1;
+            struct pollfd pfds[2];
+            nfds_t n = 1;
+            pfds[0] = (struct pollfd){ .fd = xcb_get_file_descriptor(a.conn), .events = POLLIN };
+            if (a.scan_fd >= 0)
+                pfds[n++] = (struct pollfd){ .fd = a.scan_fd, .events = POLLIN | POLLHUP };
+            int rc = poll(pfds, n, -1);
+            if (rc < 0) { if (errno == EINTR) continue; return 1; }
+            if (n == 2 && pfds[1].revents) on_scan_readable(&a);
+        }
+    }
+  meson.build: |
+    project('pathpop', 'c', default_options: [
+      'c_std=gnu11',
+      'buildtype=release',
+      'b_lto=true',
+      'strip=true',
+    ])
+    xcb = dependency('xcb', required: true)
+    executable('pathpop', 'main.c', dependencies: xcb, install: false)
