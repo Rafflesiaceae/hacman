@@ -19,6 +19,7 @@ files:
     #include <dirent.h>
     #include <errno.h>
     #include <fcntl.h>
+    #include <limits.h>
     #include <poll.h>
     #include <signal.h>
     #include <stdbool.h>
@@ -281,8 +282,8 @@ files:
         }
         if (!a->hint_active || a->remembered_found) keep_selection_visible(a);
     }
-    /* Match Vim's Ctrl-D/Ctrl-U: move the cursor AND viewport by half the
-       visible page. PageUp/PageDown intentionally use the same distance. */
+    /* Move the selection and viewport by half the visible page.
+       Ctrl+D is reserved for abort; PageUp/PageDown do the scrolling. */
     static void half_page_move(App *a, int direction) {
         if (!a->match_count) return;
         int amount=a->visible_rows/2;
@@ -756,6 +757,8 @@ files:
         fprintf(out,
           "Usage: pathpop [OPTIONS]\n\n"
           "  -h, --help                 Show this help\n"
+          "  ~/.config/pathpop          Optional startup options, one argument per line\n"
+          "                             Config is loaded first; CLI options take precedence\n"
           "  --list                     Print candidate names without opening X11\n"
           "  --desktop                  Include and launch .desktop applications\n"
           "  --no-remember              Disable reading and writing last selection\n"
@@ -765,16 +768,18 @@ files:
           "                             Also accepts 'Consolas 16' for compatibility\n"
           "  --short KEY PROGRAM       Bind F1..F35 or case-sensitive A..Z/a..z/0..9\n"
           "                             Repeat --short; clickable buttons appear in 3 columns\n\n"
+          "Config example (~/.config/pathpop):\n"
+          "  --short\n  F1\n  thunar\n\n"
           "Example:\n"
           "  pathpop --font 'Consolas:pixelsize=16' --desktop\n"
           "    --short F1 thunar --short T thunar --short P pavucontrol\n\n"
-          "Unmodified shortcut keys take precedence over search input.\n"
+          "Unmodified shortcut keys activate only when the typed prompt is empty.\n"
           "Enter re-launches the remembered item (grey prompt) or selection.\n"
-          "Typing replaces the remembered prompt; Escape/right-click/focus loss closes.\n"
+          "Typing replaces the remembered prompt; Escape/Ctrl+C/Ctrl+D/right-click/focus loss closes.\n"
           "Hover highlights results; left-click launches; wheel scrolls results.\n"
           "Shortcut footer buttons are clickable.\n"
-          "Ctrl+J/N (down), Ctrl+K/P (up); Ctrl+D/PageDown, Ctrl+U/PageUp: half-page.\n"
-          "Ctrl+A/E/B/F/W/H edit input; Delete deletes the next character.\n"
+          "Ctrl+J/N (down), Ctrl+K/P (up); PageDown/PageUp: half-page.\n"
+          "Ctrl+U clears text before cursor; Ctrl+A/E/B/F/W/H edit input; Delete deletes next character.\n"
           "Commands run directly via execvp(), without a shell.\n");
     }
     static void set_font(App *a, const char *arg) {
@@ -812,6 +817,59 @@ files:
             a->font_pattern=strdup("monospace:pixelsize=15");
         }
     }
+    /* ~/.config/pathpop: one argument per line, not shell syntax.
+       Blank lines and full-line # comments are ignored.  Parse config
+       arguments BEFORE the real command line so explicit flags win. */
+    typedef struct { char **args; size_t count, capacity; } ConfigArgs;
+    static void free_config_args(ConfigArgs *c) {
+        for (size_t i=0;i<c->count;i++) free(c->args[i]);
+        free(c->args);
+        *c=(ConfigArgs){0};
+    }
+    static void load_config_args(ConfigArgs *c) {
+        const char *home=getenv("HOME");
+        if (!home || home[0]!='/') return;
+        char *path=NULL;
+        if (asprintf(&path,"%s/.config/pathpop",home)<0) fatal("asprintf");
+        FILE *f=fopen(path,"r");
+        if (!f) {
+            if (errno!=ENOENT) { perror(path); free(path); exit(2); }
+            free(path);
+            return;
+        }
+        char *line=NULL;
+        size_t line_cap=0;
+        ssize_t len;
+        unsigned long line_no=0;
+        while ((len=getline(&line,&line_cap,f))!=-1) {
+            line_no++;
+            /* Strip CR/LF and whitespace around the argument; leave inner
+               spaces intact (e.g. a font pattern on a single line). */
+            while (len>0 && (line[len-1]=='\n' || line[len-1]=='\r')) line[--len]=0;
+            char *arg=line;
+            while (*arg==' ' || *arg=='\t') arg++;
+            size_t n=strlen(arg);
+            while (n && (arg[n-1]==' ' || arg[n-1]=='\t')) arg[--n]=0;
+            if (!*arg || *arg=='#') continue;
+            if (c->count>=4096 || n>65536) {
+                fprintf(stderr,"pathpop: %s:%lu: config limit exceeded\n",path,line_no);
+                free(line); fclose(f); free(path); free_config_args(c); exit(2);
+            }
+            if (c->count==c->capacity) {
+                size_t next=c->capacity ? c->capacity*2 : 16;
+                char **args=realloc(c->args,next*sizeof(*args));
+                if (!args) fatal("realloc");
+                c->args=args; c->capacity=next;
+            }
+            c->args[c->count]=strdup(arg);
+            if (!c->args[c->count]) fatal("strdup");
+            c->count++;
+        }
+        if (ferror(f)) { perror(path); free(line); fclose(f); free(path); free_config_args(c); exit(2); }
+        free(line);
+        fclose(f);
+        free(path);
+    }
     static void parse_args(App *a, int argc, char **argv, bool *list) {
         a->font_size=15;
         a->font_pattern=strdup("monospace:pixelsize=15");
@@ -834,17 +892,53 @@ files:
                 if (!sym) { fprintf(stderr,"pathpop: invalid shortcut key: %s\n",key); exit(2); }
                 const char *cmd=argv[++i];
                 if (!*cmd) { fputs("pathpop: empty shortcut program\n",stderr); exit(2); }
-                Shortcut *s=realloc(a->shorts,(a->short_count+1)*sizeof(*s));
-                if (!s) fatal("realloc");
-                a->shorts=s;
                 Shortcut item={ .sym=sym, .key=strdup(key), .command=strdup(cmd) };
                 if (!item.key || !item.command) fatal("strdup");
-                a->shorts[a->short_count++]=item;
+                /* Last definition wins, including CLI over config.  Preserve
+                   its footer position rather than creating duplicate buttons. */
+                bool replaced=false;
+                for (size_t j=0;j<a->short_count;j++) {
+                    if (a->shorts[j].sym!=sym) continue;
+                    free(a->shorts[j].key);
+                    free(a->shorts[j].command);
+                    a->shorts[j]=item;
+                    replaced=true;
+                    break;
+                }
+                if (!replaced) {
+                    Shortcut *s=realloc(a->shorts,(a->short_count+1)*sizeof(*s));
+                    if (!s) fatal("realloc");
+                    a->shorts=s;
+                    a->shorts[a->short_count++]=item;
+                }
                 continue;
             }
             fprintf(stderr,"pathpop: unknown option: %s\n",v);
             usage(stderr); exit(2);
         }
+    }
+
+    static void parse_config_and_args(App *a, int argc, char **argv, bool *list) {
+        ConfigArgs c={0};
+        load_config_args(&c);
+        if (!c.count) {
+            parse_args(a,argc,argv,list);
+            free_config_args(&c);
+            return;
+        }
+        if (c.count>(size_t)(INT_MAX-argc)) {
+            fputs("pathpop: too many config arguments\n",stderr);
+            free_config_args(&c); exit(2);
+        }
+        int merged_argc=argc+(int)c.count;
+        char **merged=calloc((size_t)merged_argc+1,sizeof(*merged));
+        if (!merged) fatal("calloc");
+        merged[0]=argv[0];
+        for (size_t i=0;i<c.count;i++) merged[i+1]=c.args[i];
+        for (int i=1;i<argc;i++) merged[c.count+(size_t)i]=argv[i];
+        parse_args(a,merged_argc,merged,list);
+        free(merged);
+        free_config_args(&c);
     }
 
     /* A minimal desktop-entry reader: Name/Exec in [Desktop Entry], with hidden
@@ -951,7 +1045,12 @@ files:
         int before_selected=a->selected, before_scroll=a->scroll;
         int before_cursor=a->cursor;
         bool before_hint=a->hint_active;
-        if (!ctrl && !alt && !(ev->state & (XCB_MOD_MASK_4|XCB_MOD_MASK_5))) {
+        /* Ctrl+C/Ctrl+D abort immediately, including during async scanning. */
+        if (ctrl && (letter=='c' || letter=='d')) _exit(0);
+        /* The remembered grey hint is not typed input (qlen is zero).
+           An actual query takes precedence over --short mappings. */
+        if (!a->qlen && !ctrl && !alt &&
+            !(ev->state & (XCB_MOD_MASK_4|XCB_MOD_MASK_5))) {
             for (size_t i=0;i<a->short_count;i++)
                 if (k==a->shorts[i].sym) { launch_program(a,NULL,a->shorts[i].command); return; }
         }
@@ -967,12 +1066,12 @@ files:
             }
             return;
         }
-        bool half_down=(k==XK_Next || k==XK_KP_Next || (ctrl && letter=='d'));
-        bool half_up=(k==XK_Prior || k==XK_KP_Prior || (ctrl && letter=='u'));
+        bool half_down=(k==XK_Next || k==XK_KP_Next);
+        bool half_up=(k==XK_Prior || k==XK_KP_Prior);
         bool navigating=half_down || half_up || k==XK_Up || k==XK_Down ||
             (ctrl && (letter=='p' || letter=='k' || letter=='n' || letter=='j'));
         bool editing=k==XK_BackSpace || k==XK_Delete ||
-            (ctrl && (letter=='w' || letter=='h' ||
+            (ctrl && (letter=='u' || letter=='w' || letter=='h' ||
                       letter=='a' || letter=='e' || letter=='b' || letter=='f')) ||
             k==XK_Home || k==XK_End || k==XK_Left || k==XK_Right;
         bool inserting=!ctrl && !alt && k>=32 && k<=126;
@@ -995,7 +1094,13 @@ files:
         else if (k==XK_End || (ctrl && letter=='e')) a->cursor=a->qlen;
         else if (k==XK_Left || (ctrl && letter=='b')) { if (a->cursor) a->cursor--; }
         else if (k==XK_Right || (ctrl && letter=='f')) { if (a->cursor<a->qlen) a->cursor++; }
-        else if (ctrl && letter=='w') {
+        else if (ctrl && letter=='u') {
+            /* Readline-style Ctrl+U: delete everything before the cursor.
+               Restore the original editing action; PageUp scrolls results. */
+            changed=a->cursor>0;
+            memmove(a->query,a->query+a->cursor,(size_t)(a->qlen-a->cursor+1));
+            a->qlen-=a->cursor; a->cursor=0;
+        } else if (ctrl && letter=='w') {
             int i=a->cursor;
             while (i && a->query[i-1]==' ') i--;
             while (i && a->query[i-1]!=' ') i--;
@@ -1215,7 +1320,7 @@ files:
                 .hovered_short=-1, .hovered_result=-1,
                 .pointer_x=-1, .pointer_y=-1 };
         bool list=false;
-        parse_args(&a,argc,argv,&list);
+        parse_config_and_args(&a,argc,argv,&list);
         signal(SIGPIPE,SIG_IGN);
         if (list) { listing_mode=true; scan_all(STDOUT_FILENO,a.desktop_mode); return 0; }
         load_remembered(&a);
