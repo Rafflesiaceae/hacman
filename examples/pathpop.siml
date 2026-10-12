@@ -34,7 +34,9 @@ files:
        Editable input is ASCII-oriented, but result labels support UTF-8. */
     enum { WIDTH=680, ROWS=8, MAX_QUERY=255, MAX_LINE=8192, HASH_INIT=4096,
            LEGEND_COLS=3, LEGEND_PAD_X=18, LEGEND_PAD_Y=9,
-           LEGEND_GAP_X=8, LEGEND_GAP_Y=7, WHEEL_LINES=3 };
+           LEGEND_GAP_X=8, LEGEND_GAP_Y=7,
+           LEGEND_BUTTON_HEIGHT=44, /* Edit this to resize shortcut buttons (pixels). */
+           WHEEL_LINES=3 };
 
     typedef struct { char *label, *path; bool desktop; } Entry;
     typedef struct { xcb_keysym_t sym; char *key, *command; } Shortcut;
@@ -77,6 +79,7 @@ files:
         Shortcut *shorts;
         size_t short_count;
         bool desktop_mode, no_count, no_remember, no_double_buffering;
+        bool fuzz_char_swap;
         bool hint_active, remembered_found;
         Entry remembered;
         /* Damage tracking: mouse movement never repaints the whole window. */
@@ -213,8 +216,11 @@ files:
         if (!*query) return 0;
         size_t nl=strlen(name), ql=strlen(query), i=0;
         if (nl==ql) {
+            /* Prefer the exact spelling and capitalization of the query.
+               A case-insensitive full-name match remains a close second. */
+            if (!strcmp(name,query)) return 0;
             for (;i<ql && lower((unsigned char)name[i])==lower((unsigned char)query[i]);i++);
-            if (i==ql) return 0;
+            if (i==ql) return 1;
         }
         for (i=0;i<ql && i<nl && lower((unsigned char)name[i])==lower((unsigned char)query[i]);i++);
         if (i==ql) return 100+(int)(nl-ql);
@@ -231,11 +237,64 @@ files:
         }
         return qi==ql ? 1000+gaps*8+(int)nl : -1;
     }
+    /* Match one adjacent transposition in a contiguous query-length span.
+       All other characters must agree, case-insensitively. The two swapped
+       characters must differ; swapping identical characters is not a typo. */
+    static bool matches_one_swap(const char *name, const char *query, size_t ql) {
+        bool swapped=false;
+        for (size_t i=0;i<ql;) {
+            if (lower((unsigned char)name[i])==lower((unsigned char)query[i])) {
+                i++;
+                continue;
+            }
+            if (swapped || i+1>=ql ||
+                lower((unsigned char)name[i])!=lower((unsigned char)query[i+1]) ||
+                lower((unsigned char)name[i+1])!=lower((unsigned char)query[i]))
+                return false;
+            swapped=true;
+            i+=2;
+        }
+        return swapped;
+    }
+
+    /* Transposition candidate categories: exact full name, prefix, substring.
+       Do not permit additional fuzzy edits, insertions, or deletions. */
+    enum { SWAP_EXACT=0, SWAP_PREFIX=1, SWAP_SUBSTRING=2 };
+    static int score_one_swap(const char *name, const char *query, int *tier) {
+        size_t nl=strlen(name), ql=strlen(query);
+        if (ql<2 || nl<ql) return -1;
+        if (nl==ql) {
+            if (!matches_one_swap(name,query,ql)) return -1;
+            *tier=SWAP_EXACT;
+            return 50; /* After a true exact match (0), before regular prefix (100). */
+        }
+        if (matches_one_swap(name,query,ql)) {
+            *tier=SWAP_PREFIX;
+            return 200+(int)(nl-ql);
+        }
+        for (size_t pos=1;pos+ql<=nl;pos++) {
+            if (matches_one_swap(name+pos,query,ql)) {
+                *tier=SWAP_SUBSTRING;
+                return 600+(int)(pos*8+nl-ql);
+            }
+        }
+        return -1;
+    }
+
     static int match_cmp(const void *lhs, const void *rhs, void *ctx) {
         const App *a=ctx;
         const Match *l=lhs, *r=rhs;
         if (l->score!=r->score) return l->score<r->score ? -1 : 1;
-        return strcmp(a->entries[l->entry].label,a->entries[r->entry].label);
+        const char *ln=a->entries[l->entry].label;
+        const char *rn=a->entries[r->entry].label;
+        /* When quality is otherwise tied, prefer names containing the
+           query with matching capitalization (also for partial prefixes). */
+        if (a->qlen) {
+            bool lc=strstr(ln,a->query)!=NULL;
+            bool rc=strstr(rn,a->query)!=NULL;
+            if (lc!=rc) return lc ? -1 : 1;
+        }
+        return strcmp(ln,rn);
     }
     static void keep_selection_visible(App *a) {
         if (a->selected<a->scroll) a->scroll=a->selected;
@@ -258,11 +317,39 @@ files:
             if (!p) fatal("realloc");
             a->matches=p; a->match_capacity=a->count;
         }
+        /* Detect whether the query names a real command exactly. If so,
+           do not suggest transposition alternatives at all. Otherwise find
+           the highest-quality transposition tier across *all* commands. */
+        int best_swap_tier=INT_MAX;
+        if (a->fuzz_char_swap && a->qlen>=2) {
+            for (size_t i=0;i<a->count;i++) {
+                const char *name=a->entries[i].label;
+                if (score(name,a->query)<=1) {
+                    best_swap_tier=INT_MAX;
+                    break;
+                }
+                int tier;
+                if (score_one_swap(name,a->query,&tier)>=0 &&
+                    tier<best_swap_tier) best_swap_tier=tier;
+            }
+        }
         a->match_count=0;
         for (size_t i=0;i<a->count;i++) {
-            int sc=score(a->entries[i].label,a->query);
-            if (sc<0) continue;
-            a->matches[a->match_count++]=(Match){ .entry=(int)i, .score=sc };
+            const char *name=a->entries[i].label;
+            int sc=score(name,a->query);
+            if (best_swap_tier!=INT_MAX) {
+                int tier;
+                int swap_sc=score_one_swap(name,a->query,&tier);
+                if (swap_sc>=0 && tier==best_swap_tier &&
+                    (sc<0 || swap_sc<sc)) sc=swap_sc;
+            }
+            /* Ambiguity must not hide a valid candidate. Multiple equally
+               plausible corrections remain visible for explicit selection;
+               unlike the old implementation, we never discard all matches
+               when there is more than one swapped candidate. */
+            if (sc>=0)
+                a->matches[a->match_count++]=(Match){ .entry=(int)i,
+                                                       .score=sc };
         }
         qsort_r(a->matches,(size_t)a->match_count,sizeof(*a->matches),match_cmp,a);
         a->remembered_found=false;
@@ -283,7 +370,7 @@ files:
         if (!a->hint_active || a->remembered_found) keep_selection_visible(a);
     }
     /* Move the selection and viewport by half the visible page.
-       Ctrl+D is reserved for abort; PageUp/PageDown do the scrolling. */
+       PageDown and PageUp use the same scrolling behavior. */
     static void half_page_move(App *a, int direction) {
         if (!a->match_count) return;
         int amount=a->visible_rows/2;
@@ -761,6 +848,7 @@ files:
           "                             Config is loaded first; CLI options take precedence\n"
           "  --list                     Print candidate names without opening X11\n"
           "  --desktop                  Include and launch .desktop applications\n"
+          "  --fuzz-char-swap           Match one adjacent-character transposition\n"
           "  --no-remember              Disable reading and writing last selection\n"
           "  --no-double-buffering      Draw directly to the window (disable back buffer)\n"
           "  --count                    Show entry count and its footer band\n"
@@ -775,11 +863,11 @@ files:
           "    --short F1 thunar --short T thunar --short P pavucontrol\n\n"
           "Unmodified shortcut keys activate only when the typed prompt is empty.\n"
           "Enter re-launches the remembered item (grey prompt) or selection.\n"
-          "Typing replaces the remembered prompt; Escape/Ctrl+C/Ctrl+D/right-click/focus loss closes.\n"
+          "Typing replaces the remembered prompt; Escape/Ctrl+C/right-click/focus loss closes.\n"
           "Hover highlights results; left-click launches; wheel scrolls results.\n"
           "Shortcut footer buttons are clickable.\n"
           "Ctrl+J/N (down), Ctrl+K/P (up); PageDown/PageUp: half-page.\n"
-          "Ctrl+U clears text before cursor; Ctrl+A/E/B/F/W/H edit input; Delete deletes next character.\n"
+          "Ctrl+U clears the query; Ctrl+A/E/B/F/W/H edit input; Delete deletes next character.\n"
           "Commands run directly via execvp(), without a shell.\n");
     }
     static void set_font(App *a, const char *arg) {
@@ -878,6 +966,7 @@ files:
             if (!strcmp(v,"-h") || !strcmp(v,"--help")) { usage(stdout); exit(0); }
             if (!strcmp(v,"--list")) { *list=true; continue; }
             if (!strcmp(v,"--desktop")) { a->desktop_mode=true; continue; }
+            if (!strcmp(v,"--fuzz-char-swap")) { a->fuzz_char_swap=true; continue; }
             if (!strcmp(v,"--no-remember")) { a->no_remember=true; continue; }
             if (!strcmp(v,"--no-double-buffering")) { a->no_double_buffering=true; continue; }
             if (!strcmp(v,"--count")) { a->no_count=false; continue; }
@@ -1045,8 +1134,8 @@ files:
         int before_selected=a->selected, before_scroll=a->scroll;
         int before_cursor=a->cursor;
         bool before_hint=a->hint_active;
-        /* Ctrl+C/Ctrl+D abort immediately, including during async scanning. */
-        if (ctrl && (letter=='c' || letter=='d')) _exit(0);
+        /* Ctrl+C aborts immediately, including during async scanning. */
+        if (ctrl && letter=='c') _exit(0);
         /* The remembered grey hint is not typed input (qlen is zero).
            An actual query takes precedence over --short mappings. */
         if (!a->qlen && !ctrl && !alt &&
@@ -1090,17 +1179,17 @@ files:
         } else if (k==XK_Down || (ctrl && (letter=='n' || letter=='j'))) {
             if (a->selected+1<a->match_count) a->selected++;
             keep_selection_visible(a);
+        } else if (ctrl && letter=='u') {
+            /* Clear the whole query, regardless of cursor position. */
+            changed=a->qlen>0;
+            a->query[0]='\0';
+            a->qlen=0;
+            a->cursor=0;
         } else if (k==XK_Home || (ctrl && letter=='a')) a->cursor=0;
         else if (k==XK_End || (ctrl && letter=='e')) a->cursor=a->qlen;
         else if (k==XK_Left || (ctrl && letter=='b')) { if (a->cursor) a->cursor--; }
         else if (k==XK_Right || (ctrl && letter=='f')) { if (a->cursor<a->qlen) a->cursor++; }
-        else if (ctrl && letter=='u') {
-            /* Readline-style Ctrl+U: delete everything before the cursor.
-               Restore the original editing action; PageUp scrolls results. */
-            changed=a->cursor>0;
-            memmove(a->query,a->query+a->cursor,(size_t)(a->qlen-a->cursor+1));
-            a->qlen-=a->cursor; a->cursor=0;
-        } else if (ctrl && letter=='w') {
+        else if (ctrl && letter=='w') {
             int i=a->cursor;
             while (i && a->query[i-1]==' ') i--;
             while (i && a->query[i-1]!=' ') i--;
@@ -1344,7 +1433,7 @@ files:
         a.header=(a.font_size*16/5>50) ? a.font_size*16/5 : 50;
         a.footer=a.no_count ? 0 : ((a.font_size*9/5>25) ? a.font_size*9/5 : 25);
         a.visible_rows=ROWS;
-        a.legend_row_h=(a.font_size*5/2>40) ? a.font_size*5/2 : 40;
+        a.legend_row_h=LEGEND_BUTTON_HEIGHT;
         a.legend_rows=(int)((a.short_count+LEGEND_COLS-1)/LEGEND_COLS);
         a.legend_h=a.legend_rows ? 1+2*LEGEND_PAD_Y+
             a.legend_rows*a.legend_row_h+(a.legend_rows-1)*LEGEND_GAP_Y : 0;
