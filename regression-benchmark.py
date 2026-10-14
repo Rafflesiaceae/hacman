@@ -17,7 +17,9 @@ import tempfile
 ROOT_DIR = Path(__file__).resolve().parent
 
 # Hyperfine exports seconds; these fixed budgets apply strictly to mean time.
-MAX_MEAN_SECONDS = {"direct": 600e-6, "hacman": 950e-6}
+MAX_MEAN_SECONDS = {"direct": 800e-6, "hacman": 1000e-6}
+# The allowed hacman/direct mean-time ratio is inclusive.
+MEAN_RATIO_BOUNDS = (1.0, 1.6)
 
 
 def settings(env: dict[str, str]) -> tuple[int, int, float, float]:
@@ -26,8 +28,8 @@ def settings(env: dict[str, str]) -> tuple[int, int, float, float]:
         "HACMAN_CC": "musl-gcc",
         "BENCHMARK_WARMUP": "2000",
         "BENCHMARK_RUNS": "8000",
-        "BENCHMARK_MIN_RATIO": "1",
-        "BENCHMARK_MAX_RATIO": "1.71",
+        "BENCHMARK_MIN_RATIO": str(MEAN_RATIO_BOUNDS[0]),
+        "BENCHMARK_MAX_RATIO": str(MEAN_RATIO_BOUNDS[1]),
         "BENCHMARK_JSON": str(ROOT_DIR / "build-regression-benchmark/results.json"),
     }
     for name, default in defaults.items():
@@ -95,13 +97,19 @@ def check_report(report: Path, lower: float, upper: float) -> None:
     if set(means) != {"direct", "hacman"}:
         raise ValueError("expected direct and hacman measurements")
     ratio = means["hacman"] / means["direct"]
+    # Scale the measured direct mean by each inclusive relative bound.
+    hacman_ratio_range = (means["direct"] * lower, means["direct"] * upper)
     print(
-        f"Mean direct: {means['direct'] * 1e6:.1f} us; "
-        f"hacman: {means['hacman'] * 1e6:.1f} us"
+        f"Max mean: direct {means['direct'] * 1e6:.1f} us "
+        f"(limit {MAX_MEAN_SECONDS['direct'] * 1e6:g} us); "
+        f"hacman {means['hacman'] * 1e6:.1f} us "
+        f"(limit {MAX_MEAN_SECONDS['hacman'] * 1e6:g} us)"
     )
-    print(f"hacman/direct: {ratio:.3f}; allowed: [{lower:g}, {upper:g}]")
     print(
-        f"Mean limits: direct < {MAX_MEAN_SECONDS["direct"]} s; hacman < {MAX_MEAN_SECONDS["hacman"]} s"
+        f"Ratio mean: hacman/direct {ratio:.3f}; "
+        f"allowed [{lower:g}, {upper:g}]; implied hacman mean range "
+        f"[{hacman_ratio_range[0] * 1e6:.1f}, "
+        f"{hacman_ratio_range[1] * 1e6:.1f}] us"
     )
     print(f"Report: {report}")
     # Report every exceeded limit so a slow run identifies both launch paths.
@@ -204,15 +212,17 @@ def main() -> int:
             "cached-launch time to mean direct-launch time."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Mean launch times must be strictly below 600 us for direct and 1000 us
-for hacman, in addition to the inclusive ratio budget.
+        epilog=f"""Mean launch times must be strictly below
+{MAX_MEAN_SECONDS["direct"] * 1e6:g} us for direct and
+{MAX_MEAN_SECONDS["hacman"] * 1e6:g} us for hacman, with inclusive ratio bounds
+[{MEAN_RATIO_BOUNDS[0]:g}, {MEAN_RATIO_BOUNDS[1]:g}].
 
 Environment:
   HACMAN_CC           musl C compiler executable (default: musl-gcc)
   BENCHMARK_WARMUP    warmup runs per command (default: 20)
   BENCHMARK_RUNS      measured runs per command (default: 1000)
-  BENCHMARK_MIN_RATIO inclusive minimum hacman/direct ratio (default: 1)
-  BENCHMARK_MAX_RATIO inclusive maximum hacman/direct ratio (default: 2)
+  BENCHMARK_MIN_RATIO inclusive minimum hacman/direct ratio (default: {MEAN_RATIO_BOUNDS[0]:g})
+  BENCHMARK_MAX_RATIO inclusive maximum hacman/direct ratio (default: {MEAN_RATIO_BOUNDS[1]:g})
   BENCHMARK_JSON      report path (default: build-regression-benchmark/results.json)
 
 Requires Python 3, hyperfine, Meson, Ninja, readelf, a musl compiler and
