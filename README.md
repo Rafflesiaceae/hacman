@@ -180,6 +180,9 @@ project in [`examples/regression-benchmark.siml`](examples/regression-benchmark.
 It checks output, argument forwarding, static linking and cached execution,
 then uses hyperfine with no shell to compare direct program launches against
 cached launches through hacman. Compilation stays outside the timed runs.
+Hyperfine and its children are pinned to the lowest-numbered CPU in the
+process's allowed set to reduce scheduling variation. This requires OS support
+for `sched_getaffinity` and `sched_setaffinity`; the script prints the chosen CPU.
 
 Mean launch times must be strictly below **600 microseconds for direct** and
 **1000 microseconds for hacman**, in addition to the ratio check. Reaching or

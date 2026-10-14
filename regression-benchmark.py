@@ -129,6 +129,12 @@ def benchmark() -> None:
     """Build and check the fixture, then measure cached and direct launches."""
     env = os.environ.copy()
     warmup, runs, lower, upper = settings(env)
+    if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
+        raise ValueError(
+            "CPU pinning requires sched_getaffinity/sched_setaffinity support"
+        )
+    available_cpus = os.sched_getaffinity(0)
+    cpu = min(available_cpus)
     for tool in ("bash", "hyperfine", "meson", "ninja", "readelf", env["HACMAN_CC"]):
         if shutil.which(tool) is None:
             raise ValueError(f"required executable not found: {tool}")
@@ -177,29 +183,37 @@ def benchmark() -> None:
         for command in (direct_command, hacman_command):
             check_output(command, env, "regression-benchmark")
 
-        # Hyperfine parses argument strings even with no shell. Quote paths so
-        # spaces and apostrophes remain literal without timing a shell process.
-        run(
-            [
-                "hyperfine",
-                "--style",
-                "basic",
-                "--shell=none",
-                "--warmup",
-                str(warmup),
-                "--runs",
-                str(runs),
-                "--export-json",
-                report,
-                "--command-name",
-                "direct",
-                shlex.join(str(argument) for argument in direct_command),
-                "--command-name",
-                "hacman",
-                shlex.join(str(argument) for argument in hacman_command),
-            ],
-            env,
-        )
+        # Hyperfine and its children inherit this affinity, keeping both launch
+        # paths on the same allowed CPU without restricting parallel compilation.
+        print(f"Benchmark CPU: {cpu}", flush=True)
+        os.sched_setaffinity(0, {cpu})
+        try:
+            # Hyperfine parses argument strings even with no shell. Quote paths so
+            # spaces and apostrophes remain literal without timing a shell process.
+            run(
+                [
+                    "hyperfine",
+                    "--style",
+                    "basic",
+                    "--shell=none",
+                    "--warmup",
+                    str(warmup),
+                    "--runs",
+                    str(runs),
+                    "--export-json",
+                    report,
+                    "--command-name",
+                    "direct",
+                    shlex.join(str(argument) for argument in direct_command),
+                    "--command-name",
+                    "hacman",
+                    shlex.join(str(argument) for argument in hacman_command),
+                ],
+                env,
+            )
+        finally:
+            # Restore the caller's affinity even when Hyperfine fails.
+            os.sched_setaffinity(0, available_cpus)
         check_report(report, lower, upper)
 
 
@@ -216,6 +230,9 @@ def main() -> int:
 {MAX_MEAN_SECONDS["direct"] * 1e6:g} us for direct and
 {MAX_MEAN_SECONDS["hacman"] * 1e6:g} us for hacman, with inclusive ratio bounds
 [{MEAN_RATIO_BOUNDS[0]:g}, {MEAN_RATIO_BOUNDS[1]:g}].
+
+Hyperfine and its children are pinned to the lowest-numbered allowed CPU.
+Requires OS support for sched_getaffinity and sched_setaffinity.
 
 Environment:
   HACMAN_CC           musl C compiler executable (default: musl-gcc)
