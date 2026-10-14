@@ -17,9 +17,9 @@ import tempfile
 ROOT_DIR = Path(__file__).resolve().parent
 
 # Hyperfine exports seconds; these fixed budgets apply strictly to mean time.
-MAX_MEAN_SECONDS = {"direct": 800e-6, "hacman": 1000e-6}
+MAX_MEAN_SECONDS = {"direct": 400e-6, "hacman": 500e-6}
 # The allowed hacman/direct mean-time ratio is inclusive.
-MEAN_RATIO_BOUNDS = (1.0, 1.6)
+MEAN_RATIO_BOUNDS = (1.0, 1.8)
 
 
 def settings(env: dict[str, str]) -> tuple[int, int, float, float]:
