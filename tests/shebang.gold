@@ -1,11 +1,11 @@
 name: printf shebang-supported
 sandboxed: true
-sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-e2d45689246619aa.work
+sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-<identity-hash>.work
 command: printf shebang-supported
 workdir: /home/hacman-test
 run: /bin/sh -c <command>, in workdir
 record-when: the command exits 0
 schedule: never
 check-when: only with --force
-cache-identity: cmd /home/hacman-test $ printf shebang-supported
-cache-file: /home/hacman-test/.cache/hacman/cmd-e2d45689246619aa
+cache-identity: cmd /home/hacman-test $ printf shebang-supported hacman:<version>
+cache-file: /home/hacman-test/.cache/hacman/cmd-<identity-hash>

@@ -191,10 +191,17 @@ class Suite:
 
     @staticmethod
     def normalize_plan(output: str) -> str:
-        """Replace source-path-derived embedded cache identifiers."""
+        """Replace cache identifiers that depend on the source path or version."""
         if "files-dir: " in output:
             output = re.sub(r"cmd-[0-9a-f]{16}", "cmd-<source-path-hash>", output)
             output = re.sub(r"source:.* files:", "source:<input-path> files:", output)
+        output = re.sub(r"(cmd|url)-[0-9a-f]{16}", r"\1-<identity-hash>", output)
+        output = re.sub(
+            r"^(cache-identity: .* hacman:)\S+$",
+            r"\1<version>",
+            output,
+            flags=re.MULTILINE,
+        )
         return output.rstrip("\n") + "\n"
 
     def golden_tests(self) -> bool:
@@ -451,6 +458,69 @@ raise OSError(ctypes.get_errno(), 'execve failed')
             "missing HOME explains cache overrides",
             "HOME is not set; use --cache or HACMAN_CACHE",
         )
+
+    def cache_version_tests(self) -> None:
+        """Reject successful setup state recorded by another hacman version."""
+        version = self.hacman("--version").stdout.strip().removeprefix("hacman ")
+        suffix = f" hacman:{version}"
+        payload = self.temp / "cache-version-payload"
+        self.write(payload, "unchanged payload\n")
+        projects = {
+            "command": "command: :\nschedule: 1d\n",
+            "embedded": "command: :\nfiles:\n  input: |\n    unchanged input\n",
+            "url": f"url: {payload.as_uri()}\ncheck: hash\nschedule: 1d\ninstall: :\n",
+        }
+        for kind, content in projects.items():
+            project = self.temp / f"cache-version-{kind}.siml"
+            cache = self.temp / f"cache-version-{kind}"
+            self.write(project, content)
+            self.expect_hacman(
+                f"{kind} versioned setup succeeds", 0, "--cache", cache, project
+            )
+            record = next(
+                path
+                for path in cache.iterdir()
+                if path.is_file() and path.suffix != ".lock"
+            )
+            identity, state = record.read_text(encoding="utf-8").split("\n", 1)
+            self.check(
+                f"{kind} identity includes the running version",
+                identity.endswith(suffix),
+            )
+            self.expect_hacman(
+                f"{kind} current version reuses setup",
+                0,
+                "-c",
+                "--cache",
+                cache,
+                project,
+            )
+
+            # Embedded projects keep their record path across upgrades. Model
+            # an older writer without changing any project or upstream input.
+            old_identity = (
+                identity.removesuffix(suffix) + " hacman:previous-test-version"
+            )
+            self.write(record, old_identity + "\n" + state)
+            self.expect_hacman(
+                f"{kind} previous version requires setup",
+                10,
+                "-c",
+                "--cache",
+                cache,
+                project,
+            )
+            self.expect_hacman(
+                f"{kind} rebuild after version change succeeds",
+                0,
+                "--cache",
+                cache,
+                project,
+            )
+            self.check(
+                f"{kind} rebuild records the current version",
+                record.read_text(encoding="utf-8").split("\n", 1)[0] == identity,
+            )
 
     def trace_tests(self) -> None:
         """Verify setup output policy and shell tracing from both option sources."""
@@ -1886,6 +1956,7 @@ schedule: always
         with tempfile.TemporaryDirectory() as directory:
             self.temp = Path(directory)
             self.input_tests()
+            self.cache_version_tests()
             self.trace_tests()
             self.embedded_tests()
             self.sandbox_tests()

@@ -1,14 +1,14 @@
 name: nixpkgs-unstable
 sandboxed: true
-sandbox-write-dir: /home/hacman-test/.cache/hacman/url-6a1547ac49fb605b.work
+sandbox-write-dir: /home/hacman-test/.cache/hacman/url-<identity-hash>.work
 url: https://channels.nixos.org/nixpkgs-unstable/git-revision
 check: etag
 request: HEAD https://channels.nixos.org/nixpkgs-unstable/git-revision
 compare: the ETag header, or Last-Modified when absent
 schedule: always
 check-when: on every invocation
-cache-identity: url etag https://channels.nixos.org/nixpkgs-unstable/git-revision
-cache-file: /home/hacman-test/.cache/hacman/url-6a1547ac49fb605b
+cache-identity: url etag https://channels.nixos.org/nixpkgs-unstable/git-revision hacman:<version>
+cache-file: /home/hacman-test/.cache/hacman/url-<identity-hash>
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS]
 install: |

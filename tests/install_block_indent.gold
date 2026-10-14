@@ -1,14 +1,14 @@
 name: indented
 sandboxed: true
-sandbox-write-dir: /home/hacman-test/.cache/hacman/url-96cea8e79893536c.work
+sandbox-write-dir: /home/hacman-test/.cache/hacman/url-<identity-hash>.work
 url: https://example.com/x
 check: hash
 request: GET https://example.com/x
 compare: an XXH3 hash of the whole response body
 schedule: 2w
 check-when: 1209600 seconds after the last run
-cache-identity: url hash https://example.com/x
-cache-file: /home/hacman-test/.cache/hacman/url-96cea8e79893536c
+cache-identity: url hash https://example.com/x hacman:<version>
+cache-file: /home/hacman-test/.cache/hacman/url-<identity-hash>
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
 install: |

@@ -25,6 +25,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "version.h"
+
 #define XXH_STATIC_LINKING_ONLY
 #include "xxhash.h"
 
@@ -119,7 +121,13 @@ const char *hm_cache_dir(const char *override)
  * cycle and makes edits rebuild. */
 static void build_identity(const hm_project *p, const char *source_path, char *out, size_t cap)
 {
-    size_t o = 0;
+    static const char version[] = " hacman:" HM_VERSION;
+    const size_t      full_cap  = cap;
+    size_t            o         = 0;
+
+    /* Reserve the version suffix even for a truncated project identity so
+     * every hacman upgrade invalidates prior successful setup state. */
+    cap -= sizeof(version) - 1;
 
     if (p->kind == HM_KIND_COMMAND) {
         o = append_str(out, o, cap, "cmd ");
@@ -154,6 +162,7 @@ static void build_identity(const hm_project *p, const char *source_path, char *o
             o = append_str(out, o, cap, "]");
         }
     }
+    o      = append_str(out, o, full_cap, version);
     out[o] = '\0';
 }
 

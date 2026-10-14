@@ -1,11 +1,11 @@
 name: prune-journal
 sandboxed: true
-sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-a7364c66f35cc228.work
+sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-<identity-hash>.work
 command: journalctl --vacuum-time=30d
 workdir: /home/hacman-test
 run: /bin/sh -c <command>, in workdir
 record-when: the command exits 0
 schedule: 1w
 check-when: 604800 seconds after the last run
-cache-identity: cmd /home/hacman-test $ journalctl --vacuum-time=30d
-cache-file: /home/hacman-test/.cache/hacman/cmd-a7364c66f35cc228
+cache-identity: cmd /home/hacman-test $ journalctl --vacuum-time=30d hacman:<version>
+cache-file: /home/hacman-test/.cache/hacman/cmd-<identity-hash>

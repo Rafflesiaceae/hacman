@@ -614,6 +614,10 @@ record and work directory. A record whose identity does not match is ignored
 rather than trusted, so changed embedded inputs rebuild instead of inheriting
 the prior successful state.
 
+Every identity also includes the running hacman version. Changing hacman
+versions invalidates prior setup state, so projects rebuild on their next
+eligible invocation even when their own inputs have not changed.
+
 When work is due, hacman takes a per-project advisory lock beside the cache
 record before checking or updating. A concurrent invocation blocks in the
 kernel, reloads the record after acquiring the lock, and skips duplicate work

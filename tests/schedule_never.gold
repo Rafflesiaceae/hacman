@@ -1,14 +1,14 @@
 name: manual-only
 sandboxed: true
-sandbox-write-dir: /home/hacman-test/.cache/hacman/url-51a3deab7dcbf75a.work
+sandbox-write-dir: /home/hacman-test/.cache/hacman/url-<identity-hash>.work
 url: https://example.com/manual
 check: hash
 request: GET https://example.com/manual
 compare: an XXH3 hash of the whole response body
 schedule: never
 check-when: only with --force
-cache-identity: url hash https://example.com/manual
-cache-file: /home/hacman-test/.cache/hacman/url-51a3deab7dcbf75a
+cache-identity: url hash https://example.com/manual hacman:<version>
+cache-file: /home/hacman-test/.cache/hacman/url-<identity-hash>
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
 install: |

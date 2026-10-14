@@ -18,5 +18,5 @@ files:
 cache-policy: input path, command, and embedded-file contents
 workdir-policy: stable per input path, cleared when inputs change
 check-when: inputs change, cached executable is missing, or with --force
-cache-identity: cmd source:<input-path> files:e2d7338fb2fdd7f8 $ test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready
+cache-identity: cmd source:<input-path> files:e2d7338fb2fdd7f8 $ test -f main.c && test "$(cat message.txt)" = "built before the command" && test "$PWD" = "$HACMAN_WORKDIR" && echo embedded-ready hacman:<version>
 cache-file: /home/hacman-test/.cache/hacman/cmd-<source-path-hash>

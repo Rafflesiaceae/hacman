@@ -1,6 +1,6 @@
 name: go
 sandboxed: true
-sandbox-write-dir: /home/hacman-test/.cache/hacman/url-eee9529e4ec50629.work
+sandbox-write-dir: /home/hacman-test/.cache/hacman/url-<identity-hash>.work
 url: https://go.dev/VERSION?m=text
 check: version
 version-prefix: go
@@ -8,8 +8,8 @@ request: GET https://go.dev/VERSION?m=text
 compare: the text from version-prefix to the end of that line
 schedule: 1h
 check-when: 3600 seconds after the last run
-cache-identity: url version https://go.dev/VERSION?m=text [go..]
-cache-file: /home/hacman-test/.cache/hacman/url-eee9529e4ec50629
+cache-identity: url version https://go.dev/VERSION?m=text [go..] hacman:<version>
+cache-file: /home/hacman-test/.cache/hacman/url-<identity-hash>
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
 install: |
