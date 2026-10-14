@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include "config.h"
+#include "version.h"
 
 /* Exit codes */
 #define HM_EXIT_OK         0
