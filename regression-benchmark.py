@@ -66,17 +66,34 @@ def check_report(report: Path, lower: float, upper: float) -> None:
     """Assert strict mean-time limits and the inclusive launch-time ratio."""
     with report.open(encoding="utf-8") as stream:
         results = json.load(stream)["results"]
-    if len(results) != 2 or {result["command"] for result in results} != {
-        "direct",
-        "hacman",
-    }:
+    if len(results) != 2:
         raise ValueError("expected direct and hacman measurements")
     means = {}
     for result in results:
-        mean = result["mean"]
-        if not math.isfinite(mean) or mean <= 0 or any(result["exit_codes"]):
+        # Hyperfine 1.x stores a summary per command; 2.x stores each sample.
+        if "measurements" in result:
+            name = result["name"]
+            measurements = result["measurements"]
+            if not measurements:
+                raise ValueError("invalid timings or failed benchmark runs")
+            mean = math.fsum(
+                sample["time_wall_clock"]["value"] for sample in measurements
+            ) / len(measurements)
+            exit_codes = (sample["exit_code"] for sample in measurements)
+        else:
+            name = result["command"]
+            mean = result["mean"]
+            exit_codes = result["exit_codes"]
+        if (
+            not isinstance(mean, (int, float))
+            or not math.isfinite(mean)
+            or mean <= 0
+            or any(exit_codes)
+        ):
             raise ValueError("invalid timings or failed benchmark runs")
-        means[result["command"]] = mean
+        means[name] = mean
+    if set(means) != {"direct", "hacman"}:
+        raise ValueError("expected direct and hacman measurements")
     ratio = means["hacman"] / means["direct"]
     print(
         f"Mean direct: {means['direct'] * 1e6:.1f} us; "
