@@ -369,12 +369,80 @@ static void cache_parent(const hm_cache *c, char out[HM_PATH_MAX + 1])
     out[i] = '\0';
 }
 
+#ifdef __linux__
+/* Reads the parent of `pid` from /proc/<pid>/stat, or returns -1. The comm
+ * field may itself contain spaces and parentheses, so parsing starts after
+ * its last ')': " <state> <ppid> ...". */
+static long parent_pid(long pid)
+{
+    char        path[48], buf[512];
+    const char *p;
+    size_t      o;
+    ssize_t     n;
+    long        ppid = 0;
+    int         fd;
+
+    o       = append_str(path, 0, sizeof(path), "/proc/");
+    o       = append_long(path, o, sizeof(path), pid);
+    o       = append_str(path, o, sizeof(path), "/stat");
+    path[o] = '\0';
+
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+
+    p = strrchr(buf, ')');
+    if (p == NULL || p[1] != ' ' || p[2] == '\0' || p[3] != ' ') return -1;
+    for (p += 4; *p >= '0' && *p <= '9'; ++p) ppid = ppid * 10 + (*p - '0');
+    return ppid;
+}
+
+/* Whether `pid` is one of this process's ancestors. The walk is bounded so a
+ * vanishing or recycled process cannot keep it going. */
+static int is_ancestor(long pid)
+{
+    long cur = (long)getppid();
+    int  depth;
+
+    for (depth = 0; cur > 0 && depth < 256; ++depth) {
+        if (cur == pid) return 1;
+        if (cur == 1) break;
+        cur = parent_pid(cur);
+    }
+    return 0;
+}
+#endif
+
+/* A setup step that runs a tool whose own setup is in progress further up the
+ * process tree (a shim invoking itself, or A -> B -> A) would block forever:
+ * the holder is waiting for this very process to exit. Detect that before
+ * blocking. Returns 1 if the lock on `fd` is held by an ancestor. */
+static int held_by_ancestor(int fd, const struct flock *want, long *holder)
+{
+#ifdef __linux__
+    struct flock probe = *want;
+
+    if (fcntl(fd, F_GETLK, &probe) != 0 || probe.l_type == F_UNLCK) return 0;
+    *holder = (long)probe.l_pid;
+    return is_ancestor(*holder);
+#else
+    (void)fd;
+    (void)want;
+    (void)holder;
+    return 0;
+#endif
+}
+
 int hm_cache_lock(const hm_cache *c)
 {
     char         lock_path[HM_PATH_MAX + 6];
     char         dir[HM_PATH_MAX + 1];
     size_t       o;
     int          fd;
+    long         holder = 0;
     struct flock lock;
 
     /* Lock files are permanent siblings of records. Keeping the inode stable
@@ -399,6 +467,16 @@ int hm_cache_lock(const hm_cache *c)
     memset(&lock, 0, sizeof(lock));
     lock.l_type   = F_WRLCK;
     lock.l_whence = SEEK_SET;
+    /* The uncontended case takes the lock without probing anything. Only a
+     * busy lock pays for the ancestry check before waiting for its holder. */
+    if (fcntl(fd, F_SETLK, &lock) == 0) return fd;
+    if ((errno == EACCES || errno == EAGAIN) && held_by_ancestor(fd, &lock, &holder)) {
+        hm_err("hacman: %s: update lock is held by parent process %d, whose setup "
+               "re-entered this project; refusing to wait for it\n",
+               lock_path, holder);
+        close(fd);
+        return -1;
+    }
     while (fcntl(fd, F_SETLKW, &lock) != 0) {
         if (errno == EINTR) continue;
         hm_err("hacman: %s: cannot acquire update lock: %s\n", lock_path, strerror(errno));

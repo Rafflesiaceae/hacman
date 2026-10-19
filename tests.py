@@ -1388,6 +1388,43 @@ schedule: always
             not (cache_home / ".cache").exists(),
         )
 
+        # A setup that re-enters its own project, directly or through another
+        # project, must fail instead of waiting on its own update lock.
+        cycle_self = self.temp / "nested-self.siml"
+        cycle_a = self.temp / "nested-cycle-a.siml"
+        cycle_b = self.temp / "nested-cycle-b.siml"
+        for this, other in (
+            (cycle_self, cycle_self),
+            (cycle_a, cycle_b),
+            (cycle_b, cycle_a),
+        ):
+            self.write(
+                this,
+                f"""name: {this.stem}
+command: '{self.binary}' --cache '{nested_cache}' '{other}'
+schedule: always
+""",
+            )
+        for name, project in (
+            ("self-recursive setup", cycle_self),
+            ("cyclic setup", cycle_a),
+        ):
+            try:
+                self.expect_hacman(
+                    f"{name} fails instead of deadlocking",
+                    2,
+                    "--cache",
+                    nested_cache,
+                    project,
+                    env=nested_env,
+                )
+            except subprocess.TimeoutExpired:
+                self.check(f"{name} fails instead of deadlocking", False, "timed out")
+                continue
+            self.contains(
+                f"{name} reports the re-entered lock", "refusing to wait for it"
+            )
+
         # An inherited $TMPDIR may name a directory that no longer exists;
         # temporary files then fall back to /tmp instead of failing setup.
         stale_env = self.command_env(

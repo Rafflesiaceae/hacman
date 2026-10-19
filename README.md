@@ -565,7 +565,9 @@ Setup code may run other hacman-managed tools, e.g. a build that calls a
 `meson` shim. The whole cache directory therefore stays writable as well, and
 `HACMAN_CACHE` is exported to sandboxed setup code so such a nested hacman
 uses the very cache the sandbox allows, even when the outer run was started
-with `--cache`.
+with `--cache`. A setup that re-enters its own project while that project's
+setup is still running, directly or through other tools, fails right away
+instead of waiting forever on its own update lock.
 
 Projects can grant setup code write access to a small set of additional host
 directories without disabling the rest of the sandbox. Each directory must
