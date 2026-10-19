@@ -464,7 +464,15 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         setenv("HACMAN_CHECK", hm_check_name(p->check), 1);
         setenv("HACMAN_VERSION", new_mark, 1);
         setenv("HACMAN_PREVIOUS", old_mark ? old_mark : "", 1);
-        if (have_response) setenv("HACMAN_RESPONSE", response_path, 1);
+        if (have_response) {
+            setenv("HACMAN_RESPONSE", response_path, 1);
+        } else {
+            unsetenv("HACMAN_RESPONSE");
+        }
+        /* A nested hacman inherits its caller's setup variables. Drop those
+         * that do not describe this project, so a script never mistakes a
+         * parent's response file or work directory for its own. */
+        unsetenv("HACMAN_WORKDIR");
 
         /* Sandboxed scripts naturally create relative and temporary output in
          * their one writable tree. The absolute script and response paths stay
@@ -581,6 +589,13 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
         }
         setenv("HACMAN_NAME", name, 1);
         setenv("HACMAN_WORKDIR", workdir, 1);
+        /* Commands have no URL check. Drop url-project variables inherited
+         * from a parent hacman setup so they cannot be mistaken for ours. */
+        unsetenv("HACMAN_URL");
+        unsetenv("HACMAN_CHECK");
+        unsetenv("HACMAN_VERSION");
+        unsetenv("HACMAN_PREVIOUS");
+        unsetenv("HACMAN_RESPONSE");
         if (p->sandboxed) {
             /* Keep generic temporary-file users inside the only writable
              * hierarchy even when the configured cwd is read-only. */
