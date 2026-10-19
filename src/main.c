@@ -496,11 +496,13 @@ static int run_command_project(const hm_project *p, hm_opts *o, long now, const 
     if (!o->adopt) {
         if (o->verbose) hm_out("run      %S\n", p->name);
         hm_out_flush();
-        if (p->file_count > 0) {
-            /* A non-matching or absent record means this stable workspace may
-             * contain outputs from different inputs or an interrupted build. */
-            if (!cache.known && hm_workdir_reset(cache.workdir) != 0) return HM_EXIT_FAILED;
-            if (hm_materialize_files(p, cache.workdir) != 0) return HM_EXIT_FAILED;
+        /* A non-matching or absent record means this workspace may contain
+         * outputs from different inputs or an interrupted run, so it starts
+         * over empty. A merely due run keeps it: the command itself decides
+         * what to refresh, e.g. an updater reusing its downloaded state. */
+        if (!cache.known && hm_workdir_reset(cache.workdir) != 0) return HM_EXIT_FAILED;
+        if (p->file_count > 0 && hm_materialize_files(p, cache.workdir) != 0) {
+            return HM_EXIT_FAILED;
         }
         if (hm_command_run(p, cache.workdir, cache_dir, o->trace) != 0) {
             /* Nothing is written: the last run stays whatever it was, so the
@@ -686,6 +688,13 @@ int main(int argc, char **argv)
     if (!o.adopt) {
         /* --- slow path ----------------------------------------------- */
         hm_out_flush(); /* Preserve status ordering before setup starts. */
+        /* Reaching an install means the record is invalid: a new mark, no
+         * matching record, or a missing executable. Leftovers from earlier
+         * or interrupted installs must not pile up, so every install starts
+         * in an empty work directory. */
+        if (hm_workdir_reset(cache.workdir) != 0) {
+            return finish_locked(p, &o, lock_fd, HM_EXIT_FAILED);
+        }
         if (hm_install(p, old_mark, res.mark, &res, cache.workdir, cache_dir, o.trace) != 0) {
             /* Nothing is written, so the next run repeats check and install. */
             return finish_locked(p, &o, lock_fd, HM_EXIT_FAILED);

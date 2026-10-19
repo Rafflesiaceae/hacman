@@ -1243,7 +1243,8 @@ check: hash
 schedule: weekly
 bin-path: cached-tool
 install: |
-  echo installed >> installs.log
+  # Counted beside the work directory, which every install empties first.
+  echo installed >> "$HACMAN_CACHE/installs.log"
   cat > cached-tool <<'SCRIPT'
   #!/bin/sh
   printf 'cached:%s\\n' "$1"
@@ -1275,7 +1276,8 @@ install: |
         )
         self.check(
             "missing cached relative bin-path was rebuilt",
-            self.line_count(cached_workdir / "installs.log") == 2,
+            self.line_count(cached_workdir.parent / "installs.log") == 2
+            and (cached_workdir / "cached-tool").exists(),
         )
 
         redirect = self.temp / "sandbox-symlink-target"
@@ -1294,6 +1296,28 @@ schedule: always
         redirected_workdir = Path(match.group(1)) if match else Path()
         redirect_cache.mkdir()
         if match:
+            redirected_workdir.symlink_to(redirect, target_is_directory=True)
+        # Without a record the work directory is reset first: the symlink
+        # itself is removed rather than followed into its target.
+        self.expect_hacman(
+            "an unrecorded symlinked workdir is replaced",
+            0,
+            "--cache",
+            redirect_cache,
+            redirect_project,
+        )
+        self.check(
+            "the reset removed the symlink without touching its target",
+            match is not None
+            and not redirected_workdir.is_symlink()
+            and redirected_workdir.is_dir()
+            and redirect.is_dir()
+            and not (redirect / "escaped").exists(),
+        )
+        # With a valid record nothing is reset, so the sandbox itself must
+        # refuse a work directory that was swapped for a symlink.
+        if match:
+            shutil.rmtree(redirected_workdir)
             redirected_workdir.symlink_to(redirect, target_is_directory=True)
         self.expect_hacman(
             "sandbox rejects a symlinked writable workdir",
@@ -1619,12 +1643,20 @@ install: |
             "install script ran", "install name=demo prev=none" in install_output
         )
         self.check("response file is passed", "body=version 1.0.0" in install_output)
+        # Leftovers of an interrupted install, e.g. a half-extracted archive.
+        stale = install_log.parent / "stale-staging"
+        stale.mkdir()
+        (stale / "partial").write_text("partial\n", encoding="utf-8")
         self.expect_hacman("unchanged run is quiet", 0, "--cache", cache, project)
         self.missing("no install on unchanged", "install name=demo")
         self.expect_hacman(
             "unchanged run is verbose on demand", 0, "-v", "--cache", cache, project
         )
         self.contains("verbose reports ok", "ok       demo")
+        self.check(
+            "an unchanged check keeps the work directory",
+            stale.is_dir() and install_log.exists(),
+        )
         payload.write_text("version 1.0.1\n", encoding="utf-8")
         self.expect_hacman("changed run installs again", 0, "--cache", cache, project)
         self.contains("change is reported with both marks", "changed  demo")
@@ -1636,10 +1668,14 @@ install: |
         ]
         self.check(
             "previous mark reaches the script",
-            len(install_lines) == 2
-            and install_lines[0] == "install name=demo prev=none"
-            and install_lines[1] != "install name=demo prev=none",
+            len(install_lines) == 1
+            and install_lines[0] != "install name=demo prev=none"
+            and "body=version 1.0.1" in install_output,
             install_output,
+        )
+        self.check(
+            "a changed install starts in an emptied work directory",
+            not stale.exists() and "body=version 1.0.0" not in install_output,
         )
 
         self.schedule_tests(payload)
@@ -1962,6 +1998,27 @@ schedule: 6h
             self.line_count(marker) == 3
             and len(other_workdirs) == 1
             and marker_lines[-1] == f"ran in {other_workdirs[0]}",
+        )
+
+        # A due rerun keeps the work directory so commands can reuse state
+        # they downloaded before; only a missing or non-matching record
+        # starts it over empty.
+        kept = workdirs[0] / "kept-state"
+        kept.write_text("state\n", encoding="utf-8")
+        self.expect_hacman(
+            "a due command reruns", 0, "-f", "--cache", cache, first, env=env
+        )
+        self.check(
+            "a due rerun keeps the command's work directory",
+            self.line_count(marker) == 4 and kept.exists(),
+        )
+        (cache / workdirs[0].name.removesuffix(".work")).unlink()
+        self.expect_hacman(
+            "a command without a record runs again", 0, "--cache", cache, first, env=env
+        )
+        self.check(
+            "a missing record empties the command's work directory",
+            self.line_count(marker) == 5 and workdirs[0].is_dir() and not kept.exists(),
         )
 
         failed_marker = self.temp / "ran.log.fail"

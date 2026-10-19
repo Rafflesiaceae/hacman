@@ -247,8 +247,9 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *cache_d
 /* Creates a cache work directory without changing or clearing its contents. */
 int hm_workdir_ensure(const char *workdir);
 
-/* Removes an embedded work directory without following symlinks. A missing
- * directory is already clean. */
+/* Removes a project's cache work directory without following symlinks, so
+ * setup after an invalidated record starts empty. A missing directory is
+ * already clean. */
 int hm_workdir_reset(const char *workdir);
 
 /* Writes every embedded file below `workdir`, creating directories as needed.

@@ -364,8 +364,15 @@ See [`examples/`](examples/) for one file per check scheme.
 | `sandbox-write-dirs` | no | `[]` | additional absolute directory templates that a sandboxed install script may write below |
 
 For a sandboxed URL project, a safe relative `bin-path` resolves inside its
-cache work directory. This lets an install script atomically replace a cached
-tool without writing to `~/.local/bin` or another host directory.
+cache work directory. This lets an install script keep a cached tool without
+writing to `~/.local/bin` or another host directory.
+
+The install script always runs in the project's `<cache>/url-….work`
+directory, sandboxed or not, and that directory is emptied before every
+install: an install only happens when the record is invalid (a new marker, no
+matching record, or a missing `bin-path`), so nothing from an earlier or
+interrupted install is carried over. The flip side is that the previous tool
+is gone until the next install succeeds.
 
 ### command projects
 
@@ -391,6 +398,10 @@ Every command runs in a project-specific `<cache>/cmd-….work` directory that
 hacman owns, whether sandboxed or not; a `.siml` file cannot choose another
 working directory. The directory is exported as `HACMAN_WORKDIR`, and a command
 that needs host files reads them by absolute path, as `nixcfg-pull` does above.
+The directory persists across scheduled reruns, so a command such as an
+updater can reuse what it downloaded before. hacman empties it only when the
+project has no matching record: on its first run, after its inputs changed, or
+after the record was removed.
 
 `bin-path` supports `{{VAR}}` templating against the environment:
 `{{HOME}}/.cargo/bin/cargo`. An unset variable is an error rather than an empty
