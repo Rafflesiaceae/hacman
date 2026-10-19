@@ -67,14 +67,15 @@ class Suite:
         stdin: str | None = None,
         stderr_to_stdout: bool = True,
         timeout: float = 15,
+        cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Run a command from the repository root and capture its text output."""
+        """Run a command (from the repository root by default) and capture output."""
         command = [str(arg) for arg in argv]
         if self.debug:
             print(f"[dbg][tests.py] run: {command!r}", file=sys.stderr)
         result = subprocess.run(
             command,
-            cwd=self.root,
+            cwd=cwd or self.root,
             env=env or self.base_env,
             input=stdin,
             stdout=subprocess.PIPE,
@@ -1292,6 +1293,31 @@ schedule: always
             match is not None and not (redirect / "escaped").exists(),
         )
 
+    def nested_tests(self) -> None:
+        """Verify hacman keeps working when a setup step runs hacman again."""
+        relative_project = self.temp / "nested-relative-cache.siml"
+        self.write(
+            relative_project,
+            """name: nested-relative-cache
+command: printf ok > "$TMPDIR/relative-cache"
+schedule: always
+""",
+        )
+        result = self.run(
+            [self.binary, "--cache", "cache-relative", relative_project],
+            env=self.command_env(remove=("HACMAN_CACHE",)),
+            cwd=self.temp,
+        )
+        self.check(
+            "relative cache dir works for a sandboxed setup",
+            result.returncode == 0,
+            f"exit code {result.returncode}\n{result.stdout}",
+        )
+        self.check(
+            "relative cache dir is anchored at the starting cwd",
+            any((self.temp / "cache-relative").glob("*.work/relative-cache")),
+        )
+
     def url_pipeline_tests(self) -> tuple[Path, Path]:
         """Exercise URL checks, schedules, modes, and failures."""
         payload = self.temp / "payload.txt"
@@ -1960,6 +1986,7 @@ schedule: always
             self.trace_tests()
             self.embedded_tests()
             self.sandbox_tests()
+            self.nested_tests()
             self.url_pipeline_tests()
             self.command_tests()
             self.shim_tests()

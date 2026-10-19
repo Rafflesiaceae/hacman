@@ -91,17 +91,41 @@ static size_t append_long(char *dst, size_t o, size_t cap, long v)
     return o;
 }
 
+/* Anchors a relative cache directory at the current directory.
+ *
+ * Setup children chdir() into their work directory before the sandbox opens
+ * its writable paths, and nested hacman runs start from wherever the setup
+ * happens to be, so every cache-derived path must stay valid regardless of
+ * the cwd. Absolute paths, the normal case, are returned untouched without a
+ * syscall. If the cwd cannot be determined the relative path is kept. */
+static const char *absolute_cache_dir(const char *dir)
+{
+    static char abs_buf[HM_PATH_MAX + 1];
+    char        cwd[HM_PATH_MAX + 1];
+    size_t      o;
+
+    if (dir[0] == '/') return dir;
+    if (getcwd(cwd, sizeof(cwd)) == NULL) return dir;
+    if (strlen(cwd) + 1 + strlen(dir) > HM_PATH_MAX) return dir;
+
+    o          = append_str(abs_buf, 0, sizeof(abs_buf), cwd);
+    o          = append_str(abs_buf, o, sizeof(abs_buf), "/");
+    o          = append_str(abs_buf, o, sizeof(abs_buf), dir);
+    abs_buf[o] = '\0';
+    return abs_buf;
+}
+
 const char *hm_cache_dir(const char *override)
 {
     const hm_env *startup;
     const char   *env;
     size_t        o = 0;
 
-    if (override != NULL && override[0] != '\0') return override;
+    if (override != NULL && override[0] != '\0') return absolute_cache_dir(override);
 
     startup = hm_env_get();
     env = startup->cache;
-    if (env != NULL && env[0] != '\0') return env;
+    if (env != NULL && env[0] != '\0') return absolute_cache_dir(env);
 
     /* Keep every default cache artifact under one predictable user-owned
      * tree. Falling back to the caller's cwd would leak cache directories
@@ -111,7 +135,7 @@ const char *hm_cache_dir(const char *override)
     o                = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), env);
     o                = append_str(cache_dir_buf, o, sizeof(cache_dir_buf), "/.cache/hacman");
     cache_dir_buf[o] = '\0';
-    return cache_dir_buf;
+    return absolute_cache_dir(cache_dir_buf);
 }
 
 /* Builds the identity string: everything that makes this record *this* record,
