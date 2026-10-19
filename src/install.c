@@ -484,6 +484,9 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
                 _exit(126);
             }
             setenv("TMPDIR", sandbox_workdir, 1);
+            /* A nested hacman must use the one cache the sandbox leaves
+             * writable, not its own default; see hm_sandbox_enter(). */
+            setenv("HACMAN_CACHE", cache_dir, 1);
             if (hm_sandbox_enter(p, sandbox_workdir, cache_dir) != 0) _exit(126);
         }
 
@@ -600,6 +603,9 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
             /* Keep generic temporary-file users inside the only writable
              * hierarchy even when the configured cwd is read-only. */
             setenv("TMPDIR", sandbox_workdir, 1);
+            /* A nested hacman must use the one cache the sandbox leaves
+             * writable, not its own default; see hm_sandbox_enter(). */
+            setenv("HACMAN_CACHE", cache_dir, 1);
             if (hm_sandbox_enter(p, sandbox_workdir, cache_dir) != 0) _exit(126);
         }
 

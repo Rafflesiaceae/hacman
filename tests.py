@@ -1363,6 +1363,31 @@ schedule: always
             "nested-inner: command failed with exit code 3",
         )
 
+        # Started with --cache, the outer sandbox only allows that cache. An
+        # inner hacman without --cache must not fall back to $HOME's cache.
+        cache_home = self.temp / "nested-cache-home"
+        cache_home.mkdir()
+        bare_outer = self.temp / "nested-outer-bare.siml"
+        self.write(
+            bare_outer,
+            f"""name: nested-outer-bare
+command: '{self.binary}' '{inner}'
+schedule: always
+""",
+        )
+        self.expect_hacman(
+            "nested hacman inherits the sandboxed --cache",
+            0,
+            "--cache",
+            nested_cache,
+            bare_outer,
+            env=self.command_env({"HOME": str(cache_home)}, ("HACMAN_CACHE",)),
+        )
+        self.check(
+            "nested hacman did not use the default cache",
+            not (cache_home / ".cache").exists(),
+        )
+
         # An inherited $TMPDIR may name a directory that no longer exists;
         # temporary files then fall back to /tmp instead of failing setup.
         stale_env = self.command_env(

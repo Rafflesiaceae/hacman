@@ -561,6 +561,12 @@ exception. Network access is unchanged. For sandboxed install scripts, that
 writable directory is also the current directory; `TMPDIR` points to it for
 both scripts and commands.
 
+Setup code may run other hacman-managed tools, e.g. a build that calls a
+`meson` shim. The whole cache directory therefore stays writable as well, and
+`HACMAN_CACHE` is exported to sandboxed setup code so such a nested hacman
+uses the very cache the sandbox allows, even when the outer run was started
+with `--cache`.
+
 Projects can grant setup code write access to a small set of additional host
 directories without disabling the rest of the sandbox. Each directory must
 already exist, expand to an absolute path, and may use the same `{{VAR}}`
