@@ -1183,6 +1183,7 @@ url: {payload.as_uri()}
 check: hash
 schedule: always
 install: |
+  pwd > install-cwd
   cat "$HACMAN_RESPONSE" > "$TMPDIR/response-copy"
   printf blocked > "$SANDBOX_OUTSIDE"
 """,
@@ -1211,6 +1212,7 @@ install: |
             ),
             encoding="utf-8",
         )
+        (script_workdir / "install-cwd").unlink()
         self.expect_hacman(
             "sandboxed false lets an install script write outside its cache",
             0,
@@ -1222,6 +1224,14 @@ install: |
         self.check(
             "unsandboxed install-script external write is visible",
             outside.read_text(encoding="utf-8") == "blocked",
+        )
+        # Dropping the sandbox must not move the script into the caller's
+        # current directory: it still starts in its cache work directory.
+        install_cwd = script_workdir / "install-cwd"
+        self.check(
+            "unsandboxed install script runs in its cache work directory",
+            install_cwd.exists()
+            and install_cwd.read_text(encoding="utf-8").strip() == str(script_workdir),
         )
 
         cached_program = self.temp / "sandbox-cached-bin.siml"

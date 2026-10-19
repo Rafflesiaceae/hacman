@@ -229,13 +229,13 @@ int hm_check(const hm_project *p, int timeout_secs, hm_check_result *res);
 
 /* --- install.c ---------------------------------------------------------- */
 
-/* Slow path: runs the project's install script. Clarity beats speed here.
+/* Slow path: runs the project's install script in the project's cache work
+ * directory `workdir`, sandboxed or not. Clarity beats speed here.
  * `cache_dir` is passed through to the sandbox so a script that invokes
  * another hacman-managed tool can still update that tool's own cache record.
  * Returns 0 on success, -1 if the script failed or could not be run. */
 int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
-               const hm_check_result *res, const char *sandbox_workdir, const char *cache_dir,
-               int trace);
+               const hm_check_result *res, const char *workdir, const char *cache_dir, int trace);
 
 /* Slow path for HM_KIND_COMMAND: runs `command` with the shell, in the
  * project's cache work directory `workdir`, which is also the sandbox's

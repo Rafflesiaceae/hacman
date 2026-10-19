@@ -501,8 +501,7 @@ static int write_response(const hm_check_result *res, char *path_out, size_t cap
 }
 
 int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
-               const hm_check_result *res, const char *sandbox_workdir, const char *cache_dir,
-               int trace)
+               const hm_check_result *res, const char *workdir, const char *cache_dir, int trace)
 {
     char  script_path[HM_TEMP_PATH_MAX];
     char  response_path[HM_TEMP_PATH_MAX];
@@ -525,7 +524,9 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         return 0;
     }
 
-    if (p->sandboxed && hm_workdir_ensure(sandbox_workdir) != 0) return -1;
+    /* Every install script runs in its cache work directory, sandboxed or
+     * not, never in the caller's current directory. */
+    if (hm_workdir_ensure(workdir) != 0) return -1;
 
     fp = temp_file("install", script_path, sizeof(script_path));
     if (fp == NULL) return -1;
@@ -590,20 +591,22 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
          * parent's response file or work directory for its own. */
         unsetenv("HACMAN_WORKDIR");
 
-        /* Sandboxed scripts naturally create relative and temporary output in
-         * their one writable tree. The absolute script and response paths stay
-         * readable through the global read-only rule. */
+        /* Scripts create relative output in their cache work directory,
+         * whether sandboxed or not. The absolute script and response paths
+         * stay readable through the sandbox's global read-only rule. */
+        if (chdir(workdir) != 0) {
+            fprintf(stderr, "hacman: %s: cannot enter work directory %s: %s\n", name, workdir,
+                    strerror(errno));
+            _exit(126);
+        }
+        /* Sandboxed scripts also keep temporary output in their one writable
+         * tree. */
         if (p->sandboxed) {
-            if (chdir(sandbox_workdir) != 0) {
-                fprintf(stderr, "hacman: %s: cannot enter sandbox work directory %s: %s\n", name,
-                        sandbox_workdir, strerror(errno));
-                _exit(126);
-            }
-            setenv("TMPDIR", sandbox_workdir, 1);
+            setenv("TMPDIR", workdir, 1);
             /* A nested hacman must use the one cache the sandbox leaves
              * writable, not its own default; see hm_sandbox_enter(). */
             setenv("HACMAN_CACHE", cache_dir, 1);
-            if (hm_sandbox_enter(p, sandbox_workdir, cache_dir) != 0) _exit(126);
+            if (hm_sandbox_enter(p, workdir, cache_dir) != 0) _exit(126);
         }
 
         execv(HM_SHELL, trace ? trace_argv : plain_argv);
