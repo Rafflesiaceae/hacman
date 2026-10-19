@@ -1,0 +1,122 @@
+#!/usr/bin/env hacman
+# Bootstrap rustup, then forward commands such as `./examples/rustup.siml show`
+# to it.
+# Read the version off the public releases Atom feed rather than the GitHub
+# API: the API's unauthenticated rate limit (60 requests/hour, shared by
+# every project on this machine that polls it) is easy to exhaust, while the
+# feed is served without that limit. The feed lists releases newest first and
+# rustup tags are bare versions (1.29.1), so the first tag link is the
+# current version.
+# rustup updates itself, so hacman only provides the first copy: the install
+# block fetches a verified rustup-init and a small entrypoint shim. The shim
+# copies that binary to ${CARGO_HOME:-$HOME/.cargo}/bin/rustup unless a rustup
+# is already there and then execs it from that location, so later self-updates
+# are not overwritten. It also recreates the `env` file next to it, which the
+# official installer normally writes and shell startup files source. The schedule is `never` for the same reason: the cached
+# download is only fetched when it is missing (or with --force).
+# No toolchains are managed here; see cargo-shim.siml for that.
+name: rustup
+url: https://github.com/rust-lang/rustup/releases.atom
+check: version
+version-prefix: https://github.com/rust-lang/rustup/releases/tag/
+version-suffix: "
+schedule: never
+bin-path: rustup
+install: |
+  set -eu
+  echo "installing rustup $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  # rustup publishes a separate rustup-init per Linux architecture.
+  case "$(uname -m)" in
+    x86_64|amd64) target=x86_64-unknown-linux-gnu ;;
+    aarch64|arm64) target=aarch64-unknown-linux-gnu ;;
+    *)
+      echo "rustup: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  base="https://static.rust-lang.org/rustup/archive/$HACMAN_VERSION/$target"
+
+  # The .sha256 file reads "<hash> *./rustup-init"; keep only the hash.
+  expected="$(curl -fsSL "$base/rustup-init.sha256" | cut -d' ' -f1)"
+  if [ -z "$expected" ]; then
+    echo "rustup: no checksum published for $target $HACMAN_VERSION" >&2
+    exit 1
+  fi
+
+  curl -fsSL "$base/rustup-init" -o rustup-init.next
+  actual="$(sha256sum rustup-init.next | cut -d' ' -f1)"
+  if [ "$actual" != "$expected" ]; then
+    rm -f rustup-init.next
+    echo "rustup: checksum mismatch for $target $HACMAN_VERSION" >&2
+    exit 1
+  fi
+  chmod 755 rustup-init.next
+
+  # rustup-init is the rustup binary itself and dispatches on its file name,
+  # so it behaves as rustup once renamed. Keep the cached download only
+  # after the new release runs successfully.
+  ./rustup-init.next --version >/dev/null 2>&1 || {
+    rm -f rustup-init.next
+    echo "rustup: downloaded binary does not run" >&2
+    exit 1
+  }
+  mv rustup-init.next rustup-init
+
+  # The entrypoint hacman execs. It runs outside the install sandbox, so it
+  # may write to CARGO_HOME. The quoted delimiter keeps every expansion for
+  # run time.
+  cat >rustup.next <<'SHIM'
+  #!/bin/sh
+  set -eu
+  here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+  cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+  target="$cargo_home/bin/rustup"
+  env_file="$cargo_home/env"
+
+  # Seed rustup only if absent; an existing (possibly self-updated) copy wins.
+  if [ ! -e "$target" ]; then
+    mkdir -p "$(dirname -- "$target")"
+    # Copy beside the target and rename so a concurrent run never sees a
+    # partial binary.
+    tmp="$target.tmp.$$"
+    trap 'rm -f "$tmp"' EXIT
+    cp "$here/rustup-init" "$tmp"
+    chmod 755 "$tmp"
+    mv "$tmp" "$target"
+  fi
+
+  # Recreate the PATH setup script that the official installer writes and
+  # shell startup files source, also only if absent.
+  if [ ! -e "$env_file" ]; then
+    mkdir -p "$cargo_home"
+    # Like the installer, spell the default location as $HOME/.cargo/bin so
+    # the file stays valid if the home directory moves.
+    if [ -z "${CARGO_HOME:-}" ]; then
+      bin_dir='$HOME/.cargo/bin'
+    else
+      bin_dir="$cargo_home/bin"
+    fi
+    tmp="$env_file.tmp.$$"
+    trap 'rm -f "$tmp"' EXIT
+    # Unquoted delimiter: only $bin_dir expands, the rest is escaped.
+    cat >"$tmp" <<ENV
+  #!/bin/sh
+  # rustup shell setup
+  # affix colons on either side of \$PATH to simplify matching
+  case ":\${PATH}:" in
+      *:"$bin_dir":*)
+          ;;
+      *)
+          # Prepending path in case a system-installed rustc needs to be overridden
+          export PATH="$bin_dir:\$PATH"
+          ;;
+  esac
+  ENV
+    mv "$tmp" "$env_file"
+  fi
+  exec "$target" "$@"
+  SHIM
+  chmod 755 rustup.next
+  mv rustup.next rustup
