@@ -22,50 +22,68 @@
 
 #include "config.h"
 
+/* Room for a $TMPDIR as long as a sandbox work directory plus a file name.
+ * Inside a sandboxed setup $TMPDIR is that work directory, so a nested
+ * hacman's temporary paths are as long as the cache paths themselves. */
+#define HM_TEMP_PATH_MAX (HM_PATH_MAX * 2 + 64)
+
 static const char *tmpdir(void)
 {
     const char *dir = getenv("TMPDIR");
     return (dir != NULL && dir[0] != '\0') ? dir : "/tmp";
 }
 
+/* Creates a unique hacman-<what>-XXXXXX file and returns its descriptor,
+ * storing the path in `path_out`.
+ *
+ * $TMPDIR comes first: inside a sandboxed setup it is the only writable
+ * place, while /tmp is read-only, so a nested hacman must honor it. An
+ * inherited $TMPDIR can also be unusable, e.g. naming a directory that no
+ * longer exists; /tmp is tried next rather than failing outright. Only the
+ * $TMPDIR error is reported, as that is where the file was meant to go. */
+static int make_temp(const char *what, char *path_out, size_t cap)
+{
+    const char *dirs[2] = {tmpdir(), "/tmp"};
+    int         first_errno = 0;
+    int         fd          = -1;
+    size_t      i;
+
+    for (i = 0; i < 2; ++i) {
+        if (i == 1 && strcmp(dirs[0], dirs[1]) == 0) break;
+        if ((size_t)snprintf(path_out, cap, "%s/hacman-%s-XXXXXX", dirs[i], what) >= cap) {
+            errno = ENAMETOOLONG;
+        } else {
+            fd = mkstemp(path_out);
+            if (fd >= 0) return fd;
+        }
+        if (i == 0) first_errno = errno;
+    }
+    fprintf(stderr, "hacman: cannot create temporary %s file in %s: %s\n", what, dirs[0],
+            strerror(first_errno));
+    return -1;
+}
+
 /* Successful setup is silent by default. A seekable anonymous file avoids
  * pipe backpressure for noisy builds and lets failures replay every diagnostic
  * to stderr after the child exits. Trace mode keeps output live instead.
- *
- * The file is created below $TMPDIR and unlinked right away rather than via
- * tmpfile(), which always uses /tmp: a nested hacman run inside a sandboxed
- * setup only has write access to the directory $TMPDIR points at, and /tmp
- * is read-only there. If $TMPDIR is unusable (e.g. it names a directory that
- * no longer exists), tmpfile() is still tried so such an environment keeps
- * working as it did before. */
+ * The file is unlinked right away, so it never outlives this process. */
 static FILE *capture_file(int trace)
 {
-    char  path[HM_PATH_MAX * 2 + 64];
-    FILE *fp = NULL;
-    int   fd = -1;
-    int   saved_errno;
+    char  path[HM_TEMP_PATH_MAX];
+    FILE *fp;
+    int   fd;
 
     if (trace) return NULL;
 
-    if ((size_t)snprintf(path, sizeof(path), "%s/hacman-capture-XXXXXX", tmpdir()) <
-        sizeof(path)) {
-        fd = mkstemp(path);
-    } else {
-        errno = ENAMETOOLONG;
-    }
-    if (fd >= 0) {
-        /* The open descriptor keeps the data alive; nothing is left behind. */
-        unlink(path);
-        fp = fdopen(fd, "w+");
-        if (fp == NULL) close(fd);
-    }
-    if (fp != NULL) return fp;
+    fd = make_temp("capture", path, sizeof(path));
+    if (fd < 0) return NULL;
+    /* The open descriptor keeps the data alive; nothing is left behind. */
+    unlink(path);
 
-    saved_errno = errno;
-    fp = tmpfile();
+    fp = fdopen(fd, "w+");
     if (fp == NULL) {
-        fprintf(stderr, "hacman: cannot create setup-output capture in %s: %s\n", tmpdir(),
-                strerror(saved_errno));
+        fprintf(stderr, "hacman: cannot create setup-output capture: %s\n", strerror(errno));
+        close(fd);
     }
     return fp;
 }
@@ -310,27 +328,20 @@ int hm_materialize_files(const hm_project *p, const char *workdir)
     return 0;
 }
 
-/* Creates $TMPDIR/hacman-<what>-XXXXXX and returns its FILE*, storing the
- * final path in `path_out`. */
+/* Creates a hacman-<what>-XXXXXX file (see make_temp()) and returns its
+ * FILE*, storing the final path in `path_out`. */
 static FILE *temp_file(const char *what, char *path_out, size_t cap)
 {
     int   fd;
     FILE *fp;
 
-    if ((size_t)snprintf(path_out, cap, "%s/hacman-%s-XXXXXX", tmpdir(), what) >= cap) {
-        fprintf(stderr, "hacman: temporary path too long\n");
-        return NULL;
-    }
-    fd = mkstemp(path_out);
-    if (fd < 0) {
-        fprintf(stderr, "hacman: %s: cannot create temporary file: %s\n", path_out,
-                strerror(errno));
-        return NULL;
-    }
+    fd = make_temp(what, path_out, cap);
+    if (fd < 0) return NULL;
     fp = fdopen(fd, "w");
     if (fp == NULL) {
         fprintf(stderr, "hacman: %s: fdopen failed\n", path_out);
         close(fd);
+        unlink(path_out);
         return NULL;
     }
     return fp;
@@ -382,8 +393,8 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
                const hm_check_result *res, const char *sandbox_workdir, const char *cache_dir,
                int trace)
 {
-    char  script_path[512];
-    char  response_path[512];
+    char  script_path[HM_TEMP_PATH_MAX];
+    char  response_path[HM_TEMP_PATH_MAX];
     int   have_response;
     FILE *fp;
     pid_t pid;
