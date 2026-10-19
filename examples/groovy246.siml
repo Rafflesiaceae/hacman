@@ -7,11 +7,15 @@
 # the download only happens on the first run, or with --force.
 # Groovy runs on the JVM, so a Java runtime must be on PATH (or JAVA_HOME
 # set) when the entrypoint is used; nothing here installs one.
+# Groovy's launcher scripts trust an inherited GROOVY_HOME (SDKMAN exports one)
+# over their own location, which then loads another installation's jars and
+# fails with a missing GroovyStarter class. So the entrypoint is a small
+# wrapper that drops GROOVY_HOME before starting the private copy.
 name: groovy-2.4.6
 url: https://archive.apache.org/dist/groovy/2.4.6/distribution/apache-groovy-binary-2.4.6.zip
 check: etag
 schedule: never
-bin-path: groovy/bin/groovy
+bin-path: groovy-entry
 install: |
   set -eu
   echo "installing groovy 2.4.6 (was: ${HACMAN_PREVIOUS:-none})"
@@ -46,7 +50,8 @@ install: |
   mv "$stage/groovy-2.4.6" "$stage/groovy"
   # unzip does not reliably keep the executable bit on the launcher scripts.
   chmod 755 "$stage/groovy/bin/"*
-  "$stage/groovy/bin/groovy" --version >/dev/null
+  # Ignore any inherited GROOVY_HOME so the staged copy is the one tested.
+  env -u GROOVY_HOME "$stage/groovy/bin/groovy" --version >/dev/null
 
   # Rotate only after the downloaded runtime proves executable.
   if [ -d "$PWD/groovy" ]; then
@@ -60,3 +65,15 @@ install: |
     fi
     exit 1
   fi
+
+  # The entrypoint hacman execs. The quoted delimiter keeps every expansion
+  # for run time. It is written after the runtime is in place and renamed
+  # into position so a launch never sees a half-written file.
+  cat >groovy-entry.next <<'SHIM'
+  #!/bin/sh
+  # A foreign GROOVY_HOME would override this copy's own location.
+  unset GROOVY_HOME
+  exec "$(dirname "$0")/groovy/bin/groovy" "$@"
+  SHIM
+  chmod 755 groovy-entry.next
+  mv groovy-entry.next groovy-entry
