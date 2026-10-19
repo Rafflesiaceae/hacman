@@ -1318,6 +1318,142 @@ schedule: always
             any((self.temp / "cache-relative").glob("*.work/relative-cache")),
         )
 
+        # A sandboxed outer setup runs an inner hacman. Inside the sandbox
+        # only $TMPDIR (the outer work directory) and the cache are writable,
+        # so the inner run must put its setup-output capture there.
+        nested_cache = self.temp / "cache-nested"
+        nested_env = self.command_env(remove=("HACMAN_CACHE",))
+        inner = self.temp / "nested-inner.siml"
+        self.write(
+            inner,
+            """name: nested-inner
+command: echo inner-stdout; echo inner-stderr >&2; exit "${NESTED_INNER_EXIT:-0}"
+schedule: always
+""",
+        )
+        outer = self.temp / "nested-outer.siml"
+        self.write(
+            outer,
+            f"""name: nested-outer
+command: '{self.binary}' --cache '{nested_cache}' '{inner}'
+schedule: always
+""",
+        )
+        self.expect_hacman(
+            "nested hacman setup succeeds inside a sandboxed setup",
+            0,
+            "--cache",
+            nested_cache,
+            outer,
+            env=nested_env,
+        )
+        self.missing("nested setup-output capture is writable", "capture")
+        self.expect_hacman(
+            "failing nested hacman setup fails the outer setup",
+            2,
+            "--cache",
+            nested_cache,
+            outer,
+            env=self.command_env({"NESTED_INNER_EXIT": "3"}, ("HACMAN_CACHE",)),
+        )
+        self.contains("nested failure replays inner stdout", "inner-stdout")
+        self.contains("nested failure replays inner stderr", "inner-stderr")
+        self.contains(
+            "nested failure names the inner project",
+            "nested-inner: command failed with exit code 3",
+        )
+
+        # An inherited $TMPDIR may name a directory that no longer exists;
+        # temporary files then fall back to /tmp instead of failing setup.
+        stale_env = self.command_env(
+            {"TMPDIR": str(self.temp / "removed-tmpdir")}, ("HACMAN_CACHE",)
+        )
+        payload = self.temp / "nested-stale-payload"
+        payload.write_text("stale\n", encoding="utf-8")
+        stale_url = self.temp / "nested-stale-tmpdir-url.siml"
+        self.write(
+            stale_url,
+            f"""name: stale-tmpdir-url
+url: {payload.as_uri()}
+check: hash
+schedule: always
+sandboxed: false
+install: |
+  test -s "$HACMAN_RESPONSE"
+""",
+        )
+        self.expect_hacman(
+            "url project installs under a stale TMPDIR",
+            0,
+            "--cache",
+            self.temp / "cache-stale-tmpdir",
+            stale_url,
+            env=stale_env,
+        )
+        stale_command = self.temp / "nested-stale-tmpdir-command.siml"
+        self.write(
+            stale_command,
+            """name: stale-tmpdir-command
+command: true
+schedule: always
+sandboxed: false
+""",
+        )
+        self.expect_hacman(
+            "command project runs under a stale TMPDIR",
+            0,
+            "--cache",
+            self.temp / "cache-stale-tmpdir",
+            stale_command,
+            env=stale_env,
+        )
+
+        # Setup variables of an outer project must not leak into a nested
+        # project they do not describe.
+        report = self.temp / "nested-env-report"
+        env_inner = self.temp / "nested-env-inner.siml"
+        self.write(
+            env_inner,
+            f"""name: nested-env-inner
+command: env | grep '^HACMAN_' | sort > '{report}'
+schedule: always
+sandboxed: false
+""",
+        )
+        env_outer = self.temp / "nested-env-outer.siml"
+        self.write(
+            env_outer,
+            f"""name: nested-env-outer
+url: {payload.as_uri()}
+check: hash
+schedule: always
+sandboxed: false
+install: |
+  '{self.binary}' --cache '{nested_cache}' '{env_inner}'
+""",
+        )
+        self.expect_hacman(
+            "nested command inside an install script runs",
+            0,
+            "--cache",
+            nested_cache,
+            env_outer,
+            env=nested_env,
+        )
+        leaked = report.read_text(encoding="utf-8") if report.exists() else ""
+        self.check(
+            "nested command sees its own HACMAN_NAME",
+            "HACMAN_NAME=nested-env-inner\n" in leaked,
+            leaked,
+        )
+        self.check(
+            "nested command does not inherit url-project variables",
+            not re.search(
+                r"^HACMAN_(URL|CHECK|VERSION|PREVIOUS|RESPONSE)=", leaked, re.M
+            ),
+            leaked,
+        )
+
     def url_pipeline_tests(self) -> tuple[Path, Path]:
         """Exercise URL checks, schedules, modes, and failures."""
         payload = self.temp / "payload.txt"
