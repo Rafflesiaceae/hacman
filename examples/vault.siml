@@ -13,13 +13,6 @@ bin-path: vault/vault
 install: |
   set -eu
 
-  # Recover the last good runtime if a previous replacement was interrupted.
-  previous="$PWD/.vault-previous"
-  if [ ! -d "$PWD/vault" ] && [ -d "$previous" ]; then
-    mv "$previous" "$PWD/vault"
-  fi
-  rm -rf "$previous"
-
   # HashiCorp publishes separate archives for the supported Linux architectures.
   case "$(uname -m)" in
     x86_64|amd64) release_arch=amd64 ;;
@@ -30,36 +23,23 @@ install: |
       ;;
   esac
 
-  # Stage the archive and check it against HashiCorp's published checksums.
-  stage="$(mktemp -d "$PWD/.vault-update.XXXXXX")"
-  trap 'rm -rf "$stage"' EXIT
+  # hacman empties this work directory before every install, so the archive
+  # can be staged right here without leaking anything from interrupted runs.
   base="https://releases.hashicorp.com/vault/$HACMAN_VERSION"
   archive="vault_${HACMAN_VERSION}_linux_${release_arch}.zip"
-  curl -fsSL "$base/$archive" -o "$stage/$archive"
-  curl -fsSL "$base/vault_${HACMAN_VERSION}_SHA256SUMS" -o "$stage/SHA256SUMS"
-  expected="$(awk -v f="$archive" '$2 == f { print $1 }' "$stage/SHA256SUMS")"
+  curl -fsSL "$base/$archive" -o "$archive"
+  curl -fsSL "$base/vault_${HACMAN_VERSION}_SHA256SUMS" -o SHA256SUMS
+  expected="$(awk -v f="$archive" '$2 == f { print $1 }' SHA256SUMS)"
   if [ -z "$expected" ]; then
     echo "vault-cli: no checksum entry for $archive" >&2
     exit 1
   fi
-  actual="$(sha256sum "$stage/$archive" | cut -d' ' -f1)"
+  actual="$(sha256sum "$archive" | cut -d' ' -f1)"
   if [ "$actual" != "$expected" ]; then
     echo "vault-cli: checksum mismatch for $archive" >&2
     exit 1
   fi
-  mkdir "$stage/vault"
-  unzip -q "$stage/$archive" -d "$stage/vault"
-  "$stage/vault/vault" --version >/dev/null
-
-  # Rotate only after the downloaded runtime proves executable.
-  if [ -d "$PWD/vault" ]; then
-    mv "$PWD/vault" "$previous"
-  fi
-  if mv "$stage/vault" "$PWD/vault"; then
-    rm -rf "$previous"
-  else
-    if [ -d "$previous" ]; then
-      mv "$previous" "$PWD/vault"
-    fi
-    exit 1
-  fi
+  mkdir vault
+  unzip -q "$archive" -d vault
+  rm -f "$archive" SHA256SUMS
+  ./vault/vault --version >/dev/null
