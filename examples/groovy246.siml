@@ -1,0 +1,62 @@
+#!/usr/bin/env hacman
+# Keep a private Groovy 2.4.6 around, then forward commands such as
+# `./examples/groovy24.siml --version` to it. The version is pinned on
+# purpose (some old scripts and builds need exactly the 2.4 series), so the
+# project watches the one archive on archive.apache.org instead of a release
+# feed. Released files there never change, which makes the schedule `never`:
+# the download only happens on the first run, or with --force.
+# Groovy runs on the JVM, so a Java runtime must be on PATH (or JAVA_HOME
+# set) when the entrypoint is used; nothing here installs one.
+name: groovy-2.4.6
+url: https://archive.apache.org/dist/groovy/2.4.6/distribution/apache-groovy-binary-2.4.6.zip
+check: etag
+schedule: never
+bin-path: groovy/bin/groovy
+install: |
+  set -eu
+  echo "installing groovy 2.4.6 (was: ${HACMAN_PREVIOUS:-none})"
+
+  # Recover the last good runtime if a previous replacement was interrupted.
+  previous="$PWD/.groovy-previous"
+  if [ ! -d "$PWD/groovy" ] && [ -d "$previous" ]; then
+    mv "$previous" "$PWD/groovy"
+  fi
+  rm -rf "$previous"
+
+  # Stage the archive and check it against the MD5 Apache publishes next to
+  # it (the only checksum this old release has besides the PGP signature).
+  stage="$(mktemp -d "$PWD/.groovy-update.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  archive="apache-groovy-binary-2.4.6.zip"
+  curl -fsSL "$HACMAN_URL" -o "$stage/$archive"
+  curl -fsSL "$HACMAN_URL.md5" -o "$stage/$archive.md5"
+  expected="$(awk '{ print $1; exit }' "$stage/$archive.md5")"
+  if [ -z "$expected" ]; then
+    echo "groovy-2.4.6: no checksum entry for $archive" >&2
+    exit 1
+  fi
+  actual="$(md5sum "$stage/$archive" | cut -d' ' -f1)"
+  if [ "$actual" != "$expected" ]; then
+    echo "groovy-2.4.6: checksum mismatch for $archive" >&2
+    exit 1
+  fi
+
+  # The archive unpacks to a single groovy-2.4.6 directory.
+  unzip -q "$stage/$archive" -d "$stage"
+  mv "$stage/groovy-2.4.6" "$stage/groovy"
+  # unzip does not reliably keep the executable bit on the launcher scripts.
+  chmod 755 "$stage/groovy/bin/"*
+  "$stage/groovy/bin/groovy" --version >/dev/null
+
+  # Rotate only after the downloaded runtime proves executable.
+  if [ -d "$PWD/groovy" ]; then
+    mv "$PWD/groovy" "$previous"
+  fi
+  if mv "$stage/groovy" "$PWD/groovy"; then
+    rm -rf "$previous"
+  else
+    if [ -d "$previous" ]; then
+      mv "$previous" "$PWD/groovy"
+    fi
+    exit 1
+  fi
