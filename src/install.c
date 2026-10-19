@@ -30,15 +30,42 @@ static const char *tmpdir(void)
 
 /* Successful setup is silent by default. A seekable anonymous file avoids
  * pipe backpressure for noisy builds and lets failures replay every diagnostic
- * to stderr after the child exits. Trace mode keeps output live instead. */
+ * to stderr after the child exits. Trace mode keeps output live instead.
+ *
+ * The file is created below $TMPDIR and unlinked right away rather than via
+ * tmpfile(), which always uses /tmp: a nested hacman run inside a sandboxed
+ * setup only has write access to the directory $TMPDIR points at, and /tmp
+ * is read-only there. If $TMPDIR is unusable (e.g. it names a directory that
+ * no longer exists), tmpfile() is still tried so such an environment keeps
+ * working as it did before. */
 static FILE *capture_file(int trace)
 {
-    FILE *fp;
+    char  path[HM_PATH_MAX * 2 + 64];
+    FILE *fp = NULL;
+    int   fd = -1;
+    int   saved_errno;
 
     if (trace) return NULL;
+
+    if ((size_t)snprintf(path, sizeof(path), "%s/hacman-capture-XXXXXX", tmpdir()) <
+        sizeof(path)) {
+        fd = mkstemp(path);
+    } else {
+        errno = ENAMETOOLONG;
+    }
+    if (fd >= 0) {
+        /* The open descriptor keeps the data alive; nothing is left behind. */
+        unlink(path);
+        fp = fdopen(fd, "w+");
+        if (fp == NULL) close(fd);
+    }
+    if (fp != NULL) return fp;
+
+    saved_errno = errno;
     fp = tmpfile();
     if (fp == NULL) {
-        fprintf(stderr, "hacman: cannot create setup-output capture: %s\n", strerror(errno));
+        fprintf(stderr, "hacman: cannot create setup-output capture in %s: %s\n", tmpdir(),
+                strerror(saved_errno));
     }
     return fp;
 }
