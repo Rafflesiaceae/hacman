@@ -1,4 +1,4 @@
-# Without a workdir the command runs in {{HOME}}.
+# A command runs in its generated cache work directory.
 name: prune-journal
 command: journalctl --vacuum-time=30d
 schedule: weekly

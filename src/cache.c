@@ -141,8 +141,8 @@ const char *hm_cache_dir(const char *override)
 /* Builds the identity string: everything that makes this record *this* record,
  * and deliberately nothing else. `name` is display text and is left out. For
  * embedded commands, the source path and a digest of every embedded path and
- * content replace the normal workdir: this both avoids an identity/workdir
- * cycle and makes edits rebuild. */
+ * content join the command: the source path gives each input its own work
+ * directory, and the digest makes edits rebuild. */
 static void build_identity(const hm_project *p, const char *source_path, char *out, size_t cap)
 {
     static const char version[] = " hacman:" HM_VERSION;
@@ -166,10 +166,9 @@ static void build_identity(const hm_project *p, const char *source_path, char *o
             embedded_hash(p, files_hash);
             o = append_str(out, o, cap, "files:");
             o = append_str(out, o, cap, files_hash);
-        } else {
-            o = append_str(out, o, cap, p->workdir_path);
+            o = append_str(out, o, cap, " ");
         }
-        o = append_str(out, o, cap, " $ ");
+        o = append_str(out, o, cap, "$ ");
         o = append_clean(out, o, cap, p->command.ptr, p->command.len);
     } else {
         o = append_str(out, o, cap, "url ");

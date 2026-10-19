@@ -121,7 +121,7 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
     }
     if (p->kind == HM_KIND_COMMAND) {
         hm_out("command: %S\n", p->command);
-        hm_out("workdir: %s\n", (p->file_count > 0) ? c->workdir : p->workdir_path);
+        hm_out("workdir: %s\n", c->workdir);
         hm_out("run: %s -c <command>, in workdir\n", HM_SHELL);
         hm_out("record-when: the command exits 0\n");
         print_files(p, c);

@@ -18,10 +18,10 @@ cargo build --release   # updates the toolchain at most once a week,
 script when it changed, or simply run a command.
 
 ```
-url: https://go.dev/VERSION?m=text      command: cp tool "$TMPDIR/tool"
-check: hash                             workdir: {{HOME}}/src/tool
-schedule: daily                         bin-path: tool
-install: |                              schedule: weekly
+url: https://go.dev/VERSION?m=text      command: cp ~/src/tool/tool tool
+check: hash                             bin-path: tool
+schedule: daily                         schedule: weekly
+install: |
   ...
 ```
 
@@ -242,7 +242,7 @@ environment read by hacman:
 
 environment exported to setup code:
   HACMAN_NAME         project name (commands and install scripts)
-  HACMAN_WORKDIR      command working directory
+  HACMAN_WORKDIR      command working directory (its cache work directory)
   HACMAN_URL          checked URL
   HACMAN_CHECK        etag, hash or version
   HACMAN_VERSION      newly observed marker
@@ -373,15 +373,13 @@ Run a command, but no more often than the schedule allows:
 
 ```
 name: nixcfg-pull
-command: test -d "$TMPDIR/nixcfg/.git" || cp -a . "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
-workdir: {{HOME}}/workspace/nixcfg
+command: test -d "$TMPDIR/nixcfg/.git" || cp -a "$HOME/workspace/nixcfg" "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
 schedule: 12h
 ```
 
 | key | required | default | meaning |
 |---|---|---|---|
-| `command` | yes | — | passed to `sh -c`, run inside `workdir` |
-| `workdir` | no | `{{HOME}}` | working directory; must expand to an absolute path; incompatible with `files` |
+| `command` | yes | — | passed to `sh -c`, run inside the project's cache `.work` directory |
 | `files` | no | — | files to materialize in a cache work directory before running the command |
 | `name` | no | the `command` | label used in output |
 | `schedule` | no | `daily` | when the command may run (below) |
@@ -389,21 +387,26 @@ schedule: 12h
 | `sandboxed` | no | `true` | confine command writes to the project's cache `.work` directory |
 | `sandbox-write-dirs` | no | `[]` | additional absolute directory templates that a sandboxed command may write below |
 
-`workdir` and `bin-path` support `{{VAR}}` templating against the environment:
-`{{HOME}}/workspace/nixcfg`. An unset variable is an error rather than an empty
-string, so a typo cannot silently point the command at `/workspace/nixcfg`.
-`workdir` must expand to an absolute path. A sandboxed project's `bin-path` may
-instead be a safe relative path beneath the generated work directory, such as
-`build/tool`; an unsandboxed project's `bin-path` must be absolute.
+Every command runs in a project-specific `<cache>/cmd-….work` directory that
+hacman owns, whether sandboxed or not; a `.siml` file cannot choose another
+working directory. The directory is exported as `HACMAN_WORKDIR`, and a command
+that needs host files reads them by absolute path, as `nixcfg-pull` does above.
+
+`bin-path` supports `{{VAR}}` templating against the environment:
+`{{HOME}}/.cargo/bin/cargo`. An unset variable is an error rather than an empty
+string, so a typo cannot silently point the shim at `/.cargo/bin/cargo`. A
+sandboxed project's `bin-path` may instead be a safe relative path beneath the
+generated work directory, such as `build/tool`; an unsandboxed project's
+`bin-path` must be absolute.
 
 There is no `install` and no `check`: the command *is* the work, and its exit
 status is the whole verdict. hacman records the run **only if the command
 succeeded**, so a failure is retried on the next invocation instead of waiting
 out the schedule.
 
-The record is keyed by the pair (command, working directory) — see
-[Cache](#cache) — so the same command in the same directory shares one
-last-run across every file that mentions it, whatever those files are called.
+The record and its work directory are keyed by the command text — see
+[Cache](#cache) — so the same command shares one last-run across every file
+that mentions it, whatever those files are called.
 
 #### Embedded files
 
@@ -437,10 +440,8 @@ missing, or when `--force` is used.
 
 `files` is a mapping from a filename to a literal block scalar. Filenames use
 SIML's mapping-key syntax (`[a-zA-Z_][a-zA-Z0-9_.-]*`); values must use `|`, so
-their bytes and line breaks are unambiguous. A project with `files` cannot set
-`workdir`: hacman derives a project-specific `<cache>/cmd-….work` directory,
-writes every embedded file there, then runs the command there. The directory
-is also exported as `HACMAN_WORKDIR`.
+their bytes and line breaks are unambiguous. hacman writes every embedded file
+into the project's `<cache>/cmd-….work` directory, then runs the command there.
 
 Materialization happens only immediately before a real command execution:
 cache hits, `--plan`, `--check-only`, `--dry-run`, and `--adopt` do not touch
@@ -470,15 +471,15 @@ clock, nor the network, so the same input always plans to the same bytes:
 $ hacman --plan examples/nixcfg-pull.siml
 name: nixcfg-pull
 sandboxed: true
-sandbox-write-dir: /home/you/.cache/hacman/cmd-497da11b49895aa7.work
-command: test -d "$TMPDIR/nixcfg/.git" || cp -a . "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
-workdir: /home/you/workspace/nixcfg
+sandbox-write-dir: /home/you/.cache/hacman/cmd-c6cdf236f31c2010.work
+command: test -d "$TMPDIR/nixcfg/.git" || cp -a "$HOME/workspace/nixcfg" "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
+workdir: /home/you/.cache/hacman/cmd-c6cdf236f31c2010.work
 run: /bin/sh -c <command>, in workdir
 record-when: the command exits 0
 schedule: 12h
 check-when: 43200 seconds after the last run
-cache-identity: cmd /home/you/workspace/nixcfg $ test -d "$TMPDIR/nixcfg/.git" || cp -a . "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
-cache-file: /home/you/.cache/hacman/cmd-497da11b49895aa7
+cache-identity: cmd $ test -d "$TMPDIR/nixcfg/.git" || cp -a "$HOME/workspace/nixcfg" "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
+cache-file: /home/you/.cache/hacman/cmd-c6cdf236f31c2010
 ```
 
 The plan is itself SIML, and its `install:` block is exactly what the installer
@@ -578,7 +579,7 @@ instead of waiting forever on its own update lock.
 Projects can grant setup code write access to a small set of additional host
 directories without disabling the rest of the sandbox. Each directory must
 already exist, expand to an absolute path, and may use the same `{{VAR}}`
-environment templates as `workdir`:
+environment templates as `bin-path`:
 
 ```siml
 sandbox-write-dirs:
@@ -599,8 +600,7 @@ Projects that intentionally modify the host can opt out explicitly:
 ```siml
 name: nixcfg-pull
 sandboxed: false
-command: git pull --ff-only && nix flake update
-workdir: {{HOME}}/workspace/nixcfg
+command: git -C ~/workspace/nixcfg pull --ff-only && nix flake update --flake ~/workspace/nixcfg
 ```
 
 Sandbox setup fails closed: hacman does not run project-controlled code if its
@@ -645,7 +645,7 @@ What the identity is made of decides what shares a record:
 
 | project | cache address and identity | consequence |
 |---|---|---|
-| command | command and working directory | the same command in the same directory shares one last-run across every file that names it |
+| command | command | the same command shares one last-run and one work directory across every file that names it |
 | command with `files` | canonical input path; identity also includes that path, the command and a digest of embedded paths and contents | each input owns one work directory; an edit clears and rebuilds it |
 | url | URL, check scheme and version anchors | two files watching the same URL the same way share one history |
 

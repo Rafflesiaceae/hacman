@@ -389,7 +389,7 @@ class Suite:
             "environment scan distinguishes empty settings and name prefixes",
             0,
             "--plan",
-            "tests/command_default_workdir.siml",
+            "tests/command_bin_path.siml",
             env=env,
         )
         self.contains(
@@ -397,8 +397,8 @@ class Suite:
             "cache-file: /home/environment-scan/.cache/hacman/",
         )
         self.contains(
-            "default workdir reuses the exact HOME value",
-            "workdir: /home/environment-scan",
+            "{{HOME}} expansion reuses the exact HOME value",
+            "bin-path: /home/environment-scan/.cargo/bin/cargo",
         )
 
         env = self.command_env(
@@ -439,14 +439,17 @@ raise OSError(ctypes.get_errno(), 'execve failed')
                 "-c",
                 raw_environment,
                 self.binary,
-                "tests/command_default_workdir.siml",
+                "tests/command_bin_path.siml",
             ],
         )
         self.contains(
             "first empty cache value still uses the first HOME",
             "cache-file: /home/first-match/.cache/hacman/",
         )
-        self.contains("first HOME is used for expansion", "workdir: /home/first-match")
+        self.contains(
+            "first HOME is used for expansion",
+            "bin-path: /home/first-match/.cargo/bin/cargo",
+        )
 
         env = self.command_env(remove=("HOME", "HACMAN_CACHE"))
         self.expect_hacman(
@@ -1856,7 +1859,6 @@ install: |
             f"""name: first-file
 sandboxed: false
 command: echo "ran in $(pwd)" >>"{marker}"
-workdir: {{{{TMPDIR_FOR_TEST}}}}
 schedule: 6h
 """,
         )
@@ -1871,10 +1873,12 @@ schedule: 6h
             "command project runs", 0, "--cache", cache, "-v", first, env=env
         )
         self.contains("verbose announces the run", "run      first-file")
+        workdirs = list(cache.glob("cmd-*.work"))
         self.check(
-            "the command ran in its workdir",
+            "the command ran in its cache work directory",
             self.line_count(marker) == 1
-            and f"ran in {self.temp}" in marker.read_text(encoding="utf-8"),
+            and len(workdirs) == 1
+            and f"ran in {workdirs[0]}\n" == marker.read_text(encoding="utf-8"),
         )
         self.expect_hacman(
             "command respects its schedule", 0, "--cache", cache, "-v", first, env=env
@@ -1922,30 +1926,32 @@ schedule: 6h
             "--force ran the command a second time", self.line_count(marker) == 2
         )
 
-        other = self.temp / "other"
-        other.mkdir()
+        # The record and work directory belong to the command text, so any
+        # other command gets its own schedule and its own work directory.
         third = self.temp / "cmd-c.siml"
         third.write_text(
-            re.sub(
-                r"^workdir: .*$",
-                f"workdir: {other}",
-                first.read_text(encoding="utf-8"),
-                flags=re.MULTILINE,
+            first.read_text(encoding="utf-8").replace(
+                f'>>"{marker}"', f'>>"{marker}"; true'
             ),
             encoding="utf-8",
         )
         self.expect_hacman(
-            "a different workdir is a different record",
+            "a different command is a different record",
             0,
             "--cache",
             cache,
             third,
             env=env,
         )
-        marker_text = marker.read_text(encoding="utf-8")
+        other_workdirs = [
+            path for path in cache.glob("cmd-*.work") if path not in workdirs
+        ]
+        marker_lines = marker.read_text(encoding="utf-8").splitlines()
         self.check(
-            "the same command elsewhere ran on its own schedule",
-            self.line_count(marker) == 3 and f"ran in {other}" in marker_text,
+            "the other command ran on its own schedule in its own work directory",
+            self.line_count(marker) == 3
+            and len(other_workdirs) == 1
+            and marker_lines[-1] == f"ran in {other_workdirs[0]}",
         )
 
         failed_marker = self.temp / "ran.log.fail"
@@ -1956,7 +1962,6 @@ schedule: 6h
             f"""name: failing-command
 sandboxed: false
 command: echo attempt >>"{failed_marker}"; exit 7
-workdir: {{{{TMPDIR_FOR_TEST}}}}
 schedule: 6h
 """,
         )
@@ -2025,16 +2030,20 @@ schedule: always
         home_env = env.copy()
         home_env["HOME"] = str(fake_home)
         self.expect_hacman(
-            "a command without workdir runs in HOME",
+            "an unsandboxed command project runs",
             0,
             "--cache",
             cache,
             at_home,
             env=home_env,
         )
+        ran_in = Path(home_marker.read_text(encoding="utf-8").strip())
         self.check(
-            "the default workdir is {{HOME}}",
-            home_marker.read_text(encoding="utf-8").strip() == str(fake_home),
+            "an unsandboxed command still runs in its cache work directory",
+            ran_in != fake_home
+            and ran_in.parent == cache
+            and ran_in.name.startswith("cmd-")
+            and ran_in.name.endswith(".work"),
         )
 
     def shim_tests(self) -> None:
@@ -2060,7 +2069,6 @@ for arg in "$@"; do echo "arg:$arg"; done
             f"""name: shimmed
 sandboxed: false
 command: echo setup >>"{setup_log}"
-workdir: {{{{TMPDIR_FOR_TEST}}}}
 bin-path: {program}
 schedule: 6h
 """,
@@ -2133,7 +2141,6 @@ printf 'program output\n'
             f"""name: stderr-shim
 sandboxed: false
 command: :
-workdir: {{{{TMPDIR_FOR_TEST}}}}
 bin-path: {stderr_program}
 schedule: always
 """,
@@ -2197,7 +2204,6 @@ schedule: always
             f"""name: bad-setup
 sandboxed: false
 command: exit 5
-workdir: {{{{TMPDIR_FOR_TEST}}}}
 bin-path: {program}
 schedule: always
 """,

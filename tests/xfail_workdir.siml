@@ -1,0 +1,4 @@
+# The working directory is always the cache work directory; .siml files
+# cannot point a project at another directory.
+command: echo hi
+workdir: {{HOME}}

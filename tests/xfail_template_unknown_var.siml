@@ -1,0 +1,2 @@
+command: echo hi
+bin-path: {{HACMAN_TEST_UNSET}}/x

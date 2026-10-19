@@ -76,10 +76,6 @@ typedef struct {
     hm_str          name;    /* display only; defaults to url/command */
     hm_str          url;     /* HM_KIND_URL                           */
     hm_str          command; /* HM_KIND_COMMAND                       */
-    hm_str          workdir; /* HM_KIND_COMMAND: raw {{VAR}} template */
-    /* The one value that is not a slice of the input: expanding {{VAR}} has
-     * to write somewhere. Defaults to the expansion of "{{HOME}}". */
-    char          workdir_path[HM_PATH_MAX + 1];
     hm_check_kind check;
     hm_sched_kind sched_kind;
     long          sched_interval;    /* seconds, for HM_SCHED_EVERY       */
@@ -241,11 +237,12 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
                const hm_check_result *res, const char *sandbox_workdir, const char *cache_dir,
                int trace);
 
-/* Slow path for HM_KIND_COMMAND: runs `command` with the shell, in `workdir`.
- * `cache_dir` is passed through to the sandbox; see hm_install() above.
- * Returns 0 on success, -1 if the command failed or could not be run. */
-int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir,
-                   const char *cache_dir, int trace);
+/* Slow path for HM_KIND_COMMAND: runs `command` with the shell, in the
+ * project's cache work directory `workdir`, which is also the sandbox's
+ * writable tree. `cache_dir` is passed through to the sandbox; see
+ * hm_install() above. Returns 0 on success, -1 if the command failed or could
+ * not be run. */
+int hm_command_run(const hm_project *p, const char *workdir, const char *cache_dir, int trace);
 
 /* Creates a cache work directory without changing or clearing its contents. */
 int hm_workdir_ensure(const char *workdir);

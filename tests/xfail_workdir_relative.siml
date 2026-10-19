@@ -1,2 +1,0 @@
-command: echo hi
-workdir: relative/path

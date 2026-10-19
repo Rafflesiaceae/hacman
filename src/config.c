@@ -71,7 +71,6 @@ typedef struct {
     int               seen_check; /* keys that are only valid for one kind  */
     int               seen_version;
     int               seen_install;
-    int               seen_workdir;
     int               seen_files;
     int               seen_sandbox_write_dirs;
     int               pending_files; /* saw the header-only `files:` entry     */
@@ -250,13 +249,6 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
             return -1;
         }
         p->bin = value;
-    } else if (hm_str_eq(key, "workdir")) {
-        if (value.len > HM_PATH_MAX) {
-            cfg_err(c, line, "workdir is too long");
-            return -1;
-        }
-        c->seen_workdir = 1;
-        p->workdir      = value;
     } else if (hm_str_eq(key, "check")) {
         c->seen_check = 1;
         if (parse_check(p, value) != 0) {
@@ -407,8 +399,8 @@ static int begin_project(hm_cfg *c, long line)
 /* Expands {{VAR}} references from the environment.
  *
  * This is the one place a config value is not simply borrowed from the input
- * buffer: a working directory has to be a real path before it can be entered,
- * and before it can identify a cache record. */
+ * buffer: a path has to be real before hacman can exec it or grant the
+ * sandbox write access to it. */
 static int expand_template(hm_cfg *c, hm_str tpl, const char *what, char *out, size_t cap,
                            long line, int require_absolute)
 {
@@ -432,8 +424,8 @@ static int expand_template(hm_cfg *c, hm_str tpl, const char *what, char *out, s
             }
             i += 2;
 
-            /* The usual default workdir reuses the startup HOME lookup. Other
-             * template variables keep the general environment lookup path. */
+            /* {{HOME}} reuses the startup HOME lookup. Other template
+             * variables keep the general environment lookup path. */
             value = strcmp(name, "HOME") == 0 ? hm_env_get()->home : getenv(name);
             if (value == NULL || value[0] == '\0') {
                 hm_err("hacman: %s:%d: %s refers to {{%s}}, which is not set "
@@ -505,29 +497,9 @@ static int finish_project(hm_cfg *c)
             cfg_err(c, p->line, "a 'command' project has no 'install': the command is the work");
             return -1;
         }
-        if (c->seen_files && c->seen_workdir) {
-            cfg_err(c, p->line,
-                    "'workdir' cannot be used with 'files': embedded files run in the cache");
-            return -1;
-        }
         if (p->name.len == 0) p->name = default_name(p->command);
-
-        /* Embedded projects get a cache work directory after their source path
-         * is known. Other command projects default to where the user lives. */
-        if (p->file_count == 0 && p->workdir.len == 0) {
-            p->workdir.ptr = "{{HOME}}";
-            p->workdir.len = 8;
-        }
-        if (p->file_count == 0 && expand_template(c, p->workdir, "workdir", p->workdir_path,
-                                                  sizeof(p->workdir_path), p->line, 1) != 0) {
-            return -1;
-        }
     } else {
         p->kind = HM_KIND_URL;
-        if (c->seen_workdir) {
-            cfg_err(c, p->line, "'workdir' only applies to a 'command'");
-            return -1;
-        }
         if (c->seen_files) {
             cfg_err(c, p->line, "'files' only applies to a 'command'");
             return -1;

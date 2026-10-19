@@ -487,8 +487,6 @@ static void release_source_path(char *path)
 /* A command project: run it, and remember that only if it succeeded. */
 static int run_command_project(const hm_project *p, hm_opts *o, long now, const char *cache_dir)
 {
-    const char *workdir = (p->file_count > 0) ? cache.workdir : p->workdir_path;
-
     if (o->check_only || o->dry_run) {
         hm_out("due      %S\n", p->name);
         hm_out_flush();
@@ -501,10 +499,10 @@ static int run_command_project(const hm_project *p, hm_opts *o, long now, const 
         if (p->file_count > 0) {
             /* A non-matching or absent record means this stable workspace may
              * contain outputs from different inputs or an interrupted build. */
-            if (!cache.known && hm_workdir_reset(workdir) != 0) return HM_EXIT_FAILED;
-            if (hm_materialize_files(p, workdir) != 0) return HM_EXIT_FAILED;
+            if (!cache.known && hm_workdir_reset(cache.workdir) != 0) return HM_EXIT_FAILED;
+            if (hm_materialize_files(p, cache.workdir) != 0) return HM_EXIT_FAILED;
         }
-        if (hm_command_run(p, workdir, cache.workdir, cache_dir, o->trace) != 0) {
+        if (hm_command_run(p, cache.workdir, cache_dir, o->trace) != 0) {
             /* Nothing is written: the last run stays whatever it was, so the
              * next invocation tries again. */
             return HM_EXIT_FAILED;

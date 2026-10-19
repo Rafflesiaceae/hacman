@@ -676,8 +676,7 @@ cleanup:
  * No temporary file and no script: a single command is already the simplest
  * thing a shell can be handed. The caller records the run only if this
  * returns 0, so a failing command is retried on the next run. */
-int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox_workdir,
-                   const char *cache_dir, int trace)
+int hm_command_run(const hm_project *p, const char *workdir, const char *cache_dir, int trace)
 {
     char  command[HM_COMMAND_MAX + 1];
     char  name[HM_NAME_MAX + 1];
@@ -690,7 +689,8 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
     hm_str_copy(command, sizeof(command), p->command);
     hm_str_copy(name, sizeof(name), p->name);
 
-    if (p->sandboxed && hm_workdir_ensure(sandbox_workdir) != 0) return -1;
+    /* Every command runs in its cache work directory, sandboxed or not. */
+    if (hm_workdir_ensure(workdir) != 0) return -1;
 
     fflush(stdout);
     capture = capture_file(trace);
@@ -737,12 +737,12 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
         unsetenv("HACMAN_RESPONSE");
         if (p->sandboxed) {
             /* Keep generic temporary-file users inside the only writable
-             * hierarchy even when the configured cwd is read-only. */
-            setenv("TMPDIR", sandbox_workdir, 1);
+             * hierarchy. */
+            setenv("TMPDIR", workdir, 1);
             /* A nested hacman must use the one cache the sandbox leaves
              * writable, not its own default; see hm_sandbox_enter(). */
             setenv("HACMAN_CACHE", cache_dir, 1);
-            if (hm_sandbox_enter(p, sandbox_workdir, cache_dir) != 0) _exit(126);
+            if (hm_sandbox_enter(p, workdir, cache_dir) != 0) _exit(126);
         }
 
         if (trace) {

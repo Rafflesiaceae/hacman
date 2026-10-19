@@ -2,10 +2,10 @@ name: cargo install-update -a
 sandboxed: true
 sandbox-write-dir: /home/hacman-test/.cache/hacman/cmd-<identity-hash>.work
 command: cargo install-update -a
-workdir: /home/hacman-test
+workdir: /home/hacman-test/.cache/hacman/cmd-<identity-hash>.work
 run: /bin/sh -c <command>, in workdir
 record-when: the command exits 0
 schedule: 1d
 check-when: 86400 seconds after the last run
-cache-identity: cmd /home/hacman-test $ cargo install-update -a hacman:<version>
+cache-identity: cmd $ cargo install-update -a hacman:<version>
 cache-file: /home/hacman-test/.cache/hacman/cmd-<identity-hash>
