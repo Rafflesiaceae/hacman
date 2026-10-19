@@ -270,7 +270,7 @@ int hm_cache_load(hm_cache *c)
     if (fd < 0) {
         /* No record yet is the normal state of a fresh cache. */
         if (errno == ENOENT) return 0;
-        hm_err("hacman: %s: cannot read cache record\n", c->path);
+        hm_err("hacman: %s: cannot read cache record: %s\n", c->path, strerror(errno));
         return -1;
     }
 
@@ -278,7 +278,7 @@ int hm_cache_load(hm_cache *c)
         ssize_t n = read(fd, record_buf + total, sizeof(record_buf) - total - 1);
         if (n < 0) {
             if (errno == EINTR) continue;
-            hm_err("hacman: %s: read failed\n", c->path);
+            hm_err("hacman: %s: read failed: %s\n", c->path, strerror(errno));
             close(fd);
             return -1;
         }
@@ -392,7 +392,7 @@ int hm_cache_lock(const hm_cache *c)
         fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     }
     if (fd < 0) {
-        hm_err("hacman: %s: cannot open update lock\n", lock_path);
+        hm_err("hacman: %s: cannot open update lock: %s\n", lock_path, strerror(errno));
         return -1;
     }
 
@@ -401,7 +401,7 @@ int hm_cache_lock(const hm_cache *c)
     lock.l_whence = SEEK_SET;
     while (fcntl(fd, F_SETLKW, &lock) != 0) {
         if (errno == EINTR) continue;
-        hm_err("hacman: %s: cannot acquire update lock\n", lock_path);
+        hm_err("hacman: %s: cannot acquire update lock: %s\n", lock_path, strerror(errno));
         close(fd);
         return -1;
     }
@@ -445,7 +445,7 @@ int hm_cache_save(const hm_cache *c)
 
     fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) {
-        hm_err("hacman: %s: cannot write cache record\n", tmp_path);
+        hm_err("hacman: %s: cannot write cache record: %s\n", tmp_path, strerror(errno));
         return -1;
     }
     {
@@ -454,7 +454,7 @@ int hm_cache_save(const hm_cache *c)
             ssize_t w = write(fd, record_buf + written, o - written);
             if (w < 0) {
                 if (errno == EINTR) continue;
-                hm_err("hacman: %s: write failed\n", tmp_path);
+                hm_err("hacman: %s: write failed: %s\n", tmp_path, strerror(errno));
                 close(fd);
                 (void)unlink(tmp_path);
                 return -1;
@@ -465,7 +465,7 @@ int hm_cache_save(const hm_cache *c)
     close(fd);
 
     if (rename(tmp_path, c->path) != 0) {
-        hm_err("hacman: %s: cannot replace cache record\n", c->path);
+        hm_err("hacman: %s: cannot replace cache record: %s\n", c->path, strerror(errno));
         (void)unlink(tmp_path);
         return -1;
     }
