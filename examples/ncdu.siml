@@ -1,0 +1,60 @@
+#!/usr/bin/env hacman
+# ncdu is published only on its author's site, not on GitHub. The version is
+# read off the project page's static-binary download links rather than the
+# source tarball link: the static Linux builds lag behind the source releases
+# (the source can already be a patch release ahead), so following the source
+# version would point the download at an archive that does not exist yet.
+# The links are listed x86 first, so the first match is the current static
+# build; its name is `ncdu-<version>-linux-<arch>.tar.gz`, hence the
+# `-linux-` suffix. The archive holds just the statically linked `ncdu`
+# executable.
+name: ncdu
+url: https://dev.yorhel.nl/ncdu
+check: version
+version-prefix: href="/download/ncdu-
+version-suffix: -linux-
+schedule: daily
+bin-path: ncdu
+install: |
+  set -eu
+  echo "installing ncdu $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=x86_64 ;;
+    aarch64|arm64) release_arch=aarch64 ;;
+    *)
+      echo "ncdu: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  archive="ncdu-$HACMAN_VERSION-linux-$release_arch.tar.gz"
+  curl -fsSL "https://dev.yorhel.nl/download/$archive" -o "$tmp/$archive"
+
+  # The download page lists a SHA256 per file: the row after the `SHA256`
+  # label, below the entry whose anchor id is the archive name. It comes from
+  # the same host as the archive, so this catches a truncated or corrupted
+  # download rather than a compromised server.
+  curl -fsSL https://dev.yorhel.nl/download -o "$tmp/download.html"
+  expected="$(awk -v id="id=\"$archive\"" '
+    index($0, id) { found = 1 }
+    found && /^SHA256$/ { want = 1; next }
+    found && want && /^[0-9a-f]+$/ { print; exit }
+  ' "$tmp/download.html")"
+  if [ -z "$expected" ]; then
+    echo "ncdu: no checksum entry for $archive" >&2
+    exit 1
+  fi
+  actual="$(sha256sum "$tmp/$archive" | cut -d' ' -f1)"
+  if [ "$actual" != "$expected" ]; then
+    echo "ncdu: checksum mismatch for $archive" >&2
+    exit 1
+  fi
+
+  tar -xzf "$tmp/$archive" -C "$tmp" ncdu
+  # Make sure the binary runs before it replaces the cached executable.
+  "$tmp/ncdu" --version >/dev/null
+  install -m755 "$tmp/ncdu" ncdu.next
+  mv ncdu.next ncdu
