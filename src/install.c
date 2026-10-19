@@ -13,11 +13,15 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <unistd.h>
 
 #include "config.h"
@@ -117,10 +121,117 @@ static void relay_setup_stderr(int fd)
     char    buf[8192];
     ssize_t count;
 
-    while ((count = read(fd, buf, sizeof(buf))) > 0) {
+    /* A forwarded termination signal interrupts read(); keep relaying until
+     * the child, which received that signal too, closes its end. */
+    while ((count = read(fd, buf, sizeof(buf))) != 0) {
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
         hm_err_bytes(buf, (size_t)count);
     }
     hm_err_stream_end();
+}
+
+/* Termination requests that arrive while setup runs.
+ *
+ * If hacman simply died, its update lock would be released while the setup
+ * child carried on unsupervised: the next invocation could start a second
+ * setup in the same work directory, and the temporary script and response
+ * files would leak. Instead such signals are passed on to the child, hacman
+ * waits for it, cleans up, and only then dies from the same signal. */
+static const int        forwarded_signals[] = {SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+static struct sigaction saved_actions[sizeof(forwarded_signals) / sizeof(forwarded_signals[0])];
+static unsigned char    forwarding[sizeof(forwarded_signals) / sizeof(forwarded_signals[0])];
+static volatile pid_t   setup_child;
+static volatile sig_atomic_t setup_signal;
+
+static void forward_signal(int sig, siginfo_t *info, void *context)
+{
+    (void)context;
+    setup_signal = sig;
+    /* A terminal's Ctrl-C or hangup already reached the whole foreground
+     * process group, setup included. Only relay signals sent to hacman
+     * alone, so a script's own trap handler does not run twice. */
+    if (setup_child > 0 && (info->si_code == SI_USER || info->si_code == SI_QUEUE)) {
+        kill(setup_child, sig);
+    }
+}
+
+/* Installs the forwarding handlers before fork(), so no signal can kill
+ * hacman between starting the child and supervising it. A signal ignored at
+ * startup, e.g. SIGHUP under nohup, stays ignored for hacman and setup. */
+static void forward_signals_begin(void)
+{
+    struct sigaction action;
+    size_t           i;
+
+    setup_child  = 0;
+    setup_signal = 0;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = forward_signal;
+    action.sa_flags     = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    for (i = 0; i < sizeof(forwarded_signals) / sizeof(forwarded_signals[0]); ++i) {
+        forwarding[i] = 0;
+        if (sigaction(forwarded_signals[i], NULL, &saved_actions[i]) != 0) continue;
+        if (saved_actions[i].sa_handler == SIG_IGN) continue;
+        if (sigaction(forwarded_signals[i], &action, NULL) == 0) forwarding[i] = 1;
+    }
+}
+
+/* Restores the original dispositions. The forked child calls this as well,
+ * before exec, so setup code starts with hacman's inherited behavior. */
+static void forward_signals_end(void)
+{
+    size_t i;
+
+    setup_child = 0;
+    for (i = 0; i < sizeof(forwarded_signals) / sizeof(forwarded_signals[0]); ++i) {
+        if (forwarding[i]) sigaction(forwarded_signals[i], &saved_actions[i], NULL);
+        forwarding[i] = 0;
+    }
+}
+
+/* Once setup is cleaned up, dies from a termination signal received during
+ * it, so callers such as timeout(1) or a shell see the usual signal status.
+ * Returns only when no such signal arrived. */
+static void forward_signals_reraise(void)
+{
+    int sig = (int)setup_signal;
+
+    if (sig == 0) return;
+    fflush(stderr);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+/* Called by the parent right after fork(): from here on termination signals
+ * reach the child. One that arrived in between is passed on now. */
+static void forward_signals_to(pid_t child)
+{
+    setup_child = child;
+    if (setup_signal != 0) kill(child, (int)setup_signal);
+}
+
+/* First thing in the forked child: restores hacman's inherited signal
+ * dispositions before exec, and lets the child die with hacman even when
+ * hacman itself is SIGKILLed and cannot forward anything. Returns -1 if
+ * hacman is already gone. */
+static int child_signals_init(pid_t parent)
+{
+    forward_signals_end();
+    /* A signal forwarded before the handlers were reset was only recorded
+     * by the inherited handler; deliver it for real now. */
+    if (setup_signal != 0) raise((int)setup_signal);
+#ifdef __linux__
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) return 0;
+    /* The parent may have died before the request took effect. */
+    if (getppid() != parent) return -1;
+#else
+    (void)parent;
+#endif
+    return 0;
 }
 
 static int mkdir_p(const char *path)
@@ -398,6 +509,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
     int   have_response;
     FILE *fp;
     pid_t pid;
+    pid_t parent;
     int   status = 0;
     int   rc     = 0;
     FILE *capture;
@@ -436,9 +548,12 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         goto cleanup;
     }
 
+    parent = getpid();
+    forward_signals_begin();
     pid = fork();
     if (pid < 0) {
         fprintf(stderr, "hacman: fork() failed: %s\n", strerror(errno));
+        forward_signals_end();
         if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
         if (stderr_pipe[1] >= 0) close(stderr_pipe[1]);
         rc = -1;
@@ -449,6 +564,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         char *const trace_argv[] = {(char *)HM_SHELL, (char *)"-e", (char *)"-x", script_path,
                                     NULL};
 
+        if (child_signals_init(parent) != 0) _exit(126);
         if (trace) {
             close(stderr_pipe[0]);
             if (dup2(stderr_pipe[1], STDERR_FILENO) < 0) _exit(126);
@@ -495,6 +611,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
         _exit(127);
     }
 
+    forward_signals_to(pid);
     if (trace) {
         close(stderr_pipe[1]);
         relay_setup_stderr(stderr_pipe[0]);
@@ -509,7 +626,17 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
             goto cleanup;
         }
     }
+    forward_signals_end();
 
+    if (setup_signal != 0) {
+        /* Interrupted rather than failed: nothing to debug in the script, so
+         * clean up as usual and then die from the same signal. */
+        if (capture != NULL) replay_capture(capture);
+        fprintf(stderr, "hacman: %s: install interrupted by signal %d\n", name,
+                (int)setup_signal);
+        rc = -1;
+        goto cleanup;
+    }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         if (capture != NULL) replay_capture(capture);
         if (WIFSIGNALED(status)) {
@@ -528,6 +655,7 @@ int hm_install(const hm_project *p, const char *old_mark, const char *new_mark,
     }
 
 cleanup:
+    forward_signals_end();
     if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
     if (stderr_pipe[1] >= 0) close(stderr_pipe[1]);
     if (capture != NULL) fclose(capture);
@@ -537,6 +665,9 @@ cleanup:
     } else {
         fprintf(stderr, "hacman: %s: kept %s\n", name, script_path);
     }
+    /* Even a setup that finished despite the signal is not recorded: hacman
+     * was asked to stop, and the next run simply repeats the setup. */
+    forward_signals_reraise();
     return rc;
 }
 
@@ -551,6 +682,7 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
     char  command[HM_COMMAND_MAX + 1];
     char  name[HM_NAME_MAX + 1];
     pid_t pid;
+    pid_t parent;
     int   status = 0;
     FILE *capture;
     int   stderr_pipe[2] = {-1, -1};
@@ -568,15 +700,19 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
         return -1;
     }
 
+    parent = getpid();
+    forward_signals_begin();
     pid = fork();
     if (pid < 0) {
         fprintf(stderr, "hacman: fork() failed: %s\n", strerror(errno));
+        forward_signals_end();
         if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
         if (stderr_pipe[1] >= 0) close(stderr_pipe[1]);
         if (capture != NULL) fclose(capture);
         return -1;
     }
     if (pid == 0) {
+        if (child_signals_init(parent) != 0) _exit(126);
         if (trace) {
             close(stderr_pipe[0]);
             if (dup2(stderr_pipe[1], STDERR_FILENO) < 0) _exit(126);
@@ -618,6 +754,7 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
         _exit(127);
     }
 
+    forward_signals_to(pid);
     if (trace) {
         close(stderr_pipe[1]);
         relay_setup_stderr(stderr_pipe[0]);
@@ -628,9 +765,22 @@ int hm_command_run(const hm_project *p, const char *workdir, const char *sandbox
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) {
             fprintf(stderr, "hacman: waitpid() failed: %s\n", strerror(errno));
+            forward_signals_end();
             if (capture != NULL) fclose(capture);
             return -1;
         }
+    }
+    forward_signals_end();
+
+    if (setup_signal != 0) {
+        /* Interrupted rather than failed: report, release the capture and
+         * die from the same signal. The run is not recorded. */
+        if (capture != NULL) replay_capture(capture);
+        fprintf(stderr, "hacman: %s: command interrupted by signal %d\n", name,
+                (int)setup_signal);
+        if (capture != NULL) fclose(capture);
+        forward_signals_reraise();
+        return -1;
     }
 
     if (WIFSIGNALED(status)) {

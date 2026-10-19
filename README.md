@@ -548,6 +548,12 @@ to stderr when it fails. Pass `-x` to stream it live and invoke the script as
 `/bin/sh -e -x`. `HACMAN_KEEP_TEMP=1` keeps the generated script and response
 file for debugging.
 
+A setup never outlives the hacman that started it. A `SIGTERM`, `SIGINT`,
+`SIGHUP` or `SIGQUIT` sent to hacman while it waits for setup is passed on to
+the setup shell; hacman then cleans up its temporary files, records nothing,
+and exits from the same signal, so the next run repeats the setup. Should
+hacman be killed outright, the setup shell receives `SIGTERM` as well.
+
 This is where hacman deliberately stops being clever: an update is whatever
 `sh` can do, written inline next to the URL it belongs to.
 

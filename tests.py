@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1516,6 +1517,67 @@ install: |
             leaked,
         )
 
+    def signal_tests(self) -> None:
+        """Verify that terminating hacman mid-setup also stops the setup."""
+        signal_tmp = self.temp / "signal-tmp"
+        signal_tmp.mkdir()
+        log = self.temp / "signal-log"
+        payload = self.temp / "signal-payload"
+        payload.write_text("signal\n", encoding="utf-8")
+        project = self.temp / "signal-install.siml"
+        self.write(
+            project,
+            f"""name: signal-install
+url: {payload.as_uri()}
+check: hash
+sandboxed: false
+install: |
+  trap 'echo trapped >> "{log}"; exit 1' TERM
+  echo started >> "{log}"
+  sleep 1 & wait
+  echo finished >> "{log}"
+""",
+        )
+        env = self.command_env(
+            {"TMPDIR": str(signal_tmp)}, ("HACMAN_CACHE", "HACMAN_KEEP_TEMP")
+        )
+        proc = subprocess.Popen(
+            [str(self.binary), "--cache", str(self.temp / "cache-signal"), project],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + 10
+        while not log.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        proc.send_signal(signal.SIGTERM)
+        status = proc.wait(timeout=15)
+        # Give an unsupervised setup the chance to finish, as it used to.
+        time.sleep(1.5)
+        lines = log.read_text(encoding="utf-8").split() if log.exists() else []
+        self.check(
+            "SIGTERM during setup terminates hacman with SIGTERM",
+            status == -signal.SIGTERM,
+            f"status {status}",
+        )
+        self.check(
+            "SIGTERM during setup is forwarded to the setup exactly once",
+            lines == ["started", "trapped"],
+            f"log {lines}",
+        )
+        self.check(
+            "interrupted setup leaves no temporary files",
+            not any(signal_tmp.iterdir()),
+            str(sorted(signal_tmp.iterdir())),
+        )
+        self.check(
+            "interrupted setup is not recorded",
+            not any(
+                path.is_file() and "." not in path.name
+                for path in (self.temp / "cache-signal").iterdir()
+            ),
+        )
+
     def url_pipeline_tests(self) -> tuple[Path, Path]:
         """Exercise URL checks, schedules, modes, and failures."""
         payload = self.temp / "payload.txt"
@@ -2185,6 +2247,7 @@ schedule: always
             self.embedded_tests()
             self.sandbox_tests()
             self.nested_tests()
+            self.signal_tests()
             self.url_pipeline_tests()
             self.command_tests()
             self.shim_tests()
