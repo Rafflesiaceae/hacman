@@ -2241,6 +2241,9 @@ schedule: always
 
         with tempfile.TemporaryDirectory() as directory:
             self.temp = Path(directory)
+            # Scripts kept after deliberately failing setups would otherwise
+            # pile up in the real /tmp on every run.
+            self.base_env["TMPDIR"] = directory
             self.input_tests()
             self.cache_version_tests()
             self.trace_tests()
