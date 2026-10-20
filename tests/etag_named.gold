@@ -7,7 +7,7 @@ request: HEAD https://channels.nixos.org/nixpkgs-unstable/git-revision
 compare: the ETag header, or Last-Modified when absent
 schedule: always
 check-when: on every invocation
-cache-identity: url etag https://channels.nixos.org/nixpkgs-unstable/git-revision hacman:<version>
+cache-identity: siml:<hash> hacman:<version>
 cache-file: /home/hacman-test/.cache/hacman/url-<identity-hash>
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS]

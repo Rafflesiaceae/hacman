@@ -7,5 +7,5 @@ run: /bin/sh -c <command>, in workdir
 record-when: the command exits 0
 schedule: never
 check-when: only with --force
-cache-identity: cmd $ printf shebang-supported hacman:<version>
+cache-identity: siml:<hash> hacman:<version>
 cache-file: /home/hacman-test/.cache/hacman/cmd-<identity-hash>

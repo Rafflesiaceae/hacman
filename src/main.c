@@ -336,7 +336,7 @@ static int is_due(const hm_project *p, const hm_cache *c, long now, const hm_opt
     if (check_bin && p->bin_cached && access(p->bin_path, X_OK) != 0) return 1;
 
     /* An embedded project's record has a stable path but an identity that
-     * changes with the command, file paths, or file contents. Changed inputs
+     * changes with every edit of the project file. Changed inputs
      * and a missing executable always require setup. Otherwise embedded
      * commands remain content-driven unless their file explicitly opts into
      * periodic runs with `schedule`. */
@@ -522,6 +522,7 @@ int main(int argc, char **argv)
     const hm_project *p = &project;
     const char       *cache_dir;
     char             *source_path = NULL;
+    char              identity[HM_IDENTITY_MAX + 1];
     hm_check_result   res;
     char              old_mark[HM_MARK_MAX + 1];
     long              len, now, wait = 0;
@@ -589,7 +590,8 @@ int main(int argc, char **argv)
         hm_err("hacman: HOME is not set; use --cache or HACMAN_CACHE\n");
         return HM_EXIT_USAGE;
     }
-    hm_cache_init(&cache, p, cache_dir, source_path);
+    hm_identity_build(config_buf, (size_t)len, identity, sizeof(identity));
+    hm_cache_init(&cache, p, cache_dir, source_path, identity);
     release_source_path(source_path);
     if (resolve_cached_bin(&project, &cache, o.file) != 0) {
         return HM_EXIT_USAGE;

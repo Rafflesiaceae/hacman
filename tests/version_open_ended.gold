@@ -8,7 +8,7 @@ request: GET https://go.dev/VERSION?m=text
 compare: the text from version-prefix to the end of that line
 schedule: 1h
 check-when: 3600 seconds after the last run
-cache-identity: url version https://go.dev/VERSION?m=text [go..] hacman:<version>
+cache-identity: siml:<hash> hacman:<version>
 cache-file: /home/hacman-test/.cache/hacman/url-<identity-hash>
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]

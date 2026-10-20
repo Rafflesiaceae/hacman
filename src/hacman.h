@@ -18,7 +18,7 @@
 #define HM_COMMAND_MAX            2047
 #define HM_PATH_MAX               1023 /* working directory, cache dir */
 #define HM_KEY_MAX                31   /* cache file name             */
-#define HM_IDENTITY_MAX           4095 /* what a cache key stands for  */
+#define HM_IDENTITY_MAX           127  /* what a cache key stands for  */
 #define HM_FILES_MAX              64   /* files embedded in one project */
 #define HM_FILE_PATH_MAX          128  /* SIML mapping-key limit       */
 #define HM_SANDBOX_WRITE_DIRS_MAX 16   /* extra writable host directories */
@@ -171,6 +171,13 @@ struct hm_cache_s;
  * a golden file. */
 void hm_plan_print(const hm_project *p, const struct hm_cache_s *c);
 
+/* --- identity.c --------------------------------------------------------- */
+
+/* Writes the project identity for the `len` bytes of project file `siml` into
+ * `out` (at least HM_IDENTITY_MAX + 1 bytes): a digest of those bytes plus the
+ * running hacman version. See identity.c for what that means. */
+void hm_identity_build(const char *siml, size_t len, char *out, size_t cap);
+
 /* --- cache.c ------------------------------------------------------------ */
 
 /* The cache is a directory of tiny records, one per watched thing, below
@@ -179,10 +186,9 @@ void hm_plan_print(const hm_project *p, const struct hm_cache_s *c);
  * started in parallel - one per project file - cannot lose each other's
  * updates.
  *
- * URL and ordinary command records are addressed by what they stand for. An
+ * URL and ordinary command records are addressed by their identity. An
  * embedded command instead uses its input file path as a stable address while
- * retaining the command and embedded-file digest as the identity stored in
- * that record. */
+ * its identity is stored in the record. */
 typedef struct hm_cache_s {
     char key[HM_KEY_MAX + 1];           /* file name within the cache dir  */
     char identity[HM_IDENTITY_MAX + 1]; /* what that name stands for       */
@@ -198,10 +204,11 @@ typedef struct hm_cache_s {
  * when no override is provided and HOME is unavailable. */
 const char *hm_cache_dir(const char *override);
 
-/* Derives identity, key and file path. `source_path` is the canonical input
- * filename for an embedded project, or NULL for standard input. Touches no
- * files. */
-void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir, const char *source_path);
+/* Derives key and file path from `identity` (hm_identity_build). `source_path`
+ * is the canonical input filename for an embedded project, or NULL for
+ * standard input. Touches no files. */
+void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir, const char *source_path,
+                   const char *identity);
 
 /* Reads the record, if any. Returns 0 on success (also when absent, with
  * known == 0), -1 on an unreadable file. */

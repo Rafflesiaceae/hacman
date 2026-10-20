@@ -415,9 +415,9 @@ status is the whole verdict. hacman records the run **only if the command
 succeeded**, so a failure is retried on the next invocation instead of waiting
 out the schedule.
 
-The record and its work directory are keyed by the command text — see
-[Cache](#cache) — so the same command shares one last-run across every file
-that mentions it, whatever those files are called.
+The record and its work directory belong to the project file's exact
+contents — see [Cache](#cache) — so editing the file, even a comment, starts
+the project over, while a byte-identical copy of it shares the record.
 
 #### Embedded files
 
@@ -461,11 +461,10 @@ default. Setting `schedule` explicitly also reruns their command at that
 interval, which is useful for cached download shims that need periodic update
 checks while retaining their executable in the generated work directory.
 The canonical absolute `.siml` path selects a stable cache record and work
-directory. That source path, the embedded paths and contents, and the command
-form the identity stored in that record; when the inputs change, hacman clears
-and reuses the work directory before the next normal build. Inputs read from
-standard input have no stable path and retain a content-addressed work
-directory.
+directory. The identity stored in that record covers the whole file, embedded
+files included; when the file is edited, hacman clears and reuses the work
+directory before the next normal build. Inputs read from standard input have
+no stable path and retain a content-addressed work directory.
 
 Unknown keys, a missing `url` and anything that would introduce a second
 project are hard errors, reported with a line number. Use `hacman --plan` to
@@ -489,7 +488,7 @@ run: /bin/sh -c <command>, in workdir
 record-when: the command exits 0
 schedule: 12h
 check-when: 43200 seconds after the last run
-cache-identity: cmd $ test -d "$TMPDIR/nixcfg/.git" || cp -a "$HOME/workspace/nixcfg" "$TMPDIR/nixcfg"; git -C "$TMPDIR/nixcfg" pull --ff-only && XDG_CACHE_HOME="$TMPDIR/xdg-cache" XDG_STATE_HOME="$TMPDIR/xdg-state" nix flake update --flake "$TMPDIR/nixcfg"
+cache-identity: siml:fb69132bdb7443ab hacman:f2d8969
 cache-file: /home/you/.cache/hacman/cmd-c6cdf236f31c2010
 ```
 
@@ -514,7 +513,7 @@ The default is `daily`, i.e. a full 24h: nothing hacman watches is worth asking
 about more often than that unless the file says so explicitly.
 Command projects with embedded `files` are the exception: their inputs provide
 the invalidation signal, so without an explicit `schedule` they build once per
-content identity. An explicit schedule adds time-based command runs without
+identity. An explicit schedule adds time-based command runs without
 giving up input-based invalidation.
 
 ### Check schemes — *how* change is decided
@@ -631,7 +630,7 @@ relocate the entire tree. It contains one tiny record per watched thing:
 
 ```
 $ cat ~/.cache/hacman/cmd-e1afb450457ef858
-#hacman-cache 1 cmd /home/you/workspace/nixcfg $ git pull --ff-only
+#hacman-cache 1 siml:fb69132bdb7443ab hacman:f2d8969
 1786527549	1786527549
 ```
 
@@ -639,12 +638,16 @@ The first line is the record's **identity**, the second is last check, last
 change and the recorded marker. Ordinary record names hash that identity;
 embedded projects instead hash the canonical input path so edits reuse one
 record and work directory. A record whose identity does not match is ignored
-rather than trusted, so changed embedded inputs rebuild instead of inheriting
-the prior successful state.
+rather than trusted, so a changed project rebuilds instead of inheriting the
+prior successful state.
 
-Every identity also includes the running hacman version. Changing hacman
-versions invalidates prior setup state, so projects rebuild on their next
-eligible invocation even when their own inputs have not changed.
+The identity is a digest of every byte of the project file plus the version of
+the hacman running it (`src/identity.c`). Nothing is parsed or left out:
+comments, `name`, `install` and every other key count, so any edit starts the
+project's setup over and no key can be forgotten when one is added. A new
+hacman build likewise never inherits setup state from an older one, even for an
+unchanged file. Things outside the file, such as the environment, the network
+or files a command reads, are what `schedule` and `check` are for.
 
 When work is due, hacman takes a per-project advisory lock beside the cache
 record before checking or updating. A concurrent invocation blocks in the
@@ -652,16 +655,11 @@ kernel, reloads the record after acquiring the lock, and skips duplicate work
 when the first invocation succeeded. The ordinary not-due path takes no lock,
 so serialization adds no syscall to cached shim launches.
 
-What the identity is made of decides what shares a record:
-
-| project | cache address and identity | consequence |
-|---|---|---|
-| command | command | the same command shares one last-run and one work directory across every file that names it |
-| command with `files` | canonical input path; identity also includes that path, the command and a digest of embedded paths and contents | each input owns one work directory; an edit clears and rebuilds it |
-| url | URL, check scheme and version anchors | two files watching the same URL the same way share one history |
-
-`name` is deliberately *not* part of it: renaming a project keeps its history,
-and two people naming the same thing differently still agree on it.
+What shares a record follows from that: a byte-identical copy of a project
+file (or the same bytes on standard input) shares one last-run and one work
+directory, while files that differ in any byte, even only in `name`, never do.
+Embedded projects are the exception in the other direction: each input path
+owns one record and work directory, whatever its contents.
 
 One file per record rather than one shared table means the fast path reads
 exactly the bytes it needs, and several hacman runs started in parallel — one
@@ -700,7 +698,8 @@ src/main.c                fast path: args, schedule decision, orchestration
 src/env.c                 one scan for borrowed startup environment settings
 src/config.c              SIML -> one hm_project, zero-copy
 src/plan.c                --plan serialisation
-src/cache.c               cache records: identity, load, atomic save
+src/identity.c            the project identity: file digest + hacman version
+src/cache.c               cache records: key, load, atomic save
 src/check.c               HTTP via curl + the three check schemes
 src/install.c             slow path: embedded files, install scripts, commands, exec
 src/sandbox.c             Landlock filesystem confinement for setup code

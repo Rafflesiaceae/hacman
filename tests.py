@@ -193,14 +193,13 @@ class Suite:
 
     @staticmethod
     def normalize_plan(output: str) -> str:
-        """Replace cache identifiers that depend on the source path or version."""
+        """Replace cache identifiers that depend on the file bytes, path or version."""
         if "files-dir: " in output:
             output = re.sub(r"cmd-[0-9a-f]{16}", "cmd-<source-path-hash>", output)
-            output = re.sub(r"source:.* files:", "source:<input-path> files:", output)
         output = re.sub(r"(cmd|url)-[0-9a-f]{16}", r"\1-<identity-hash>", output)
         output = re.sub(
-            r"^(cache-identity: .* hacman:)\S+$",
-            r"\1<version>",
+            r"^cache-identity: siml:[0-9a-f]{16} hacman:\S+$",
+            "cache-identity: siml:<hash> hacman:<version>",
             output,
             flags=re.MULTILINE,
         )
@@ -525,6 +524,24 @@ raise OSError(ctypes.get_errno(), 'execve failed')
             self.check(
                 f"{kind} rebuild records the current version",
                 record.read_text(encoding="utf-8").split("\n", 1)[0] == identity,
+            )
+
+            # The identity covers every byte of the file, so even an edit that
+            # changes no field (a comment) invalidates setup.
+            self.check(
+                f"{kind} identity is a digest of the file plus the version",
+                re.fullmatch(r"#hacman-cache 1 siml:[0-9a-f]{16} hacman:\S+", identity)
+                is not None,
+                identity,
+            )
+            self.write(project, content + "# a comment changes no field\n")
+            self.expect_hacman(
+                f"{kind} comment-only edit requires setup",
+                10,
+                "-c",
+                "--cache",
+                cache,
+                project,
             )
 
     def trace_tests(self) -> None:
@@ -1932,8 +1949,11 @@ schedule: 6h
         self.contains(
             "second invocation is skipped", "skip     first-file (next run in"
         )
+        # The identity is the whole file, so a copy that differs only in its
+        # name is a different project: it runs on its own and has its own
+        # record and work directory.
         self.expect_hacman(
-            "another file with the same command shares the record",
+            "a renamed copy of the file is a different project",
             0,
             "--cache",
             cache,
@@ -1941,23 +1961,21 @@ schedule: 6h
             second,
             env=env,
         )
-        self.contains(
-            "the shared record skips the second file",
-            "skip     second-file (next run in",
-        )
-        self.check(
-            "the shared record prevented a second run", self.line_count(marker) == 1
-        )
+        self.contains("the renamed copy runs", "run      second-file")
+        self.check("the renamed copy ran the command", self.line_count(marker) == 2)
         records = [
             path
             for path in cache.rglob("*")
             if path.is_file() and path.suffix != ".lock"
         ]
         self.check(
-            "both files use one cache record",
-            len(records) == 1,
+            "each file has its own cache record",
+            len(records) == 2,
             "\n".join(map(str, records)),
         )
+        second_workdirs = [
+            path for path in cache.glob("cmd-*.work") if path not in workdirs
+        ]
 
         self.expect_hacman(
             "--force runs a scheduled command again",
@@ -1969,11 +1987,11 @@ schedule: 6h
             env=env,
         )
         self.check(
-            "--force ran the command a second time", self.line_count(marker) == 2
+            "--force ran the command again", self.line_count(marker) == 3
         )
 
-        # The record and work directory belong to the command text, so any
-        # other command gets its own schedule and its own work directory.
+        # The record and work directory belong to the file's bytes, so any
+        # other file gets its own schedule and its own work directory.
         third = self.temp / "cmd-c.siml"
         third.write_text(
             first.read_text(encoding="utf-8").replace(
@@ -1990,12 +2008,14 @@ schedule: 6h
             env=env,
         )
         other_workdirs = [
-            path for path in cache.glob("cmd-*.work") if path not in workdirs
+            path
+            for path in cache.glob("cmd-*.work")
+            if path not in workdirs + second_workdirs
         ]
         marker_lines = marker.read_text(encoding="utf-8").splitlines()
         self.check(
             "the other command ran on its own schedule in its own work directory",
-            self.line_count(marker) == 3
+            self.line_count(marker) == 4
             and len(other_workdirs) == 1
             and marker_lines[-1] == f"ran in {other_workdirs[0]}",
         )
@@ -2010,7 +2030,7 @@ schedule: 6h
         )
         self.check(
             "a due rerun keeps the command's work directory",
-            self.line_count(marker) == 4 and kept.exists(),
+            self.line_count(marker) == 5 and kept.exists(),
         )
         (cache / workdirs[0].name.removesuffix(".work")).unlink()
         self.expect_hacman(
@@ -2018,7 +2038,7 @@ schedule: 6h
         )
         self.check(
             "a missing record empties the command's work directory",
-            self.line_count(marker) == 5 and workdirs[0].is_dir() and not kept.exists(),
+            self.line_count(marker) == 6 and workdirs[0].is_dir() and not kept.exists(),
         )
 
         failed_marker = self.temp / "ran.log.fail"

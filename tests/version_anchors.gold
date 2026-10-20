@@ -9,7 +9,7 @@ request: GET https://api.github.com/repos/BurntSushi/ripgrep/releases/latest
 compare: the text between version-prefix and version-suffix
 schedule: 1d
 check-when: 86400 seconds after the last run
-cache-identity: url version https://api.github.com/repos/BurntSushi/ripgrep/releases/latest ["tag_name": ".."] hacman:<version>
+cache-identity: siml:<hash> hacman:<version>
 cache-file: /home/hacman-test/.cache/hacman/url-<identity-hash>
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]

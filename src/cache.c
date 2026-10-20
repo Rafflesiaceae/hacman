@@ -6,10 +6,9 @@
  *   <last_check>\t<last_change>\t<mark>
  *
  * The identity line protects every cache lookup: a record whose identity does
- * not match is ignored rather than trusted, so a hash collision can never make
- * two different things share a last-run. Most file names hash that identity;
- * embedded projects instead hash their input path so edits reuse one record
- * and work directory. The identity still doubles as a readable label.
+ * not match is ignored rather than trusted (identity.c defines what it is made
+ * of). Most file names hash that identity; embedded projects instead hash their
+ * input path so edits reuse one record and work directory.
  *
  * One file per record keeps the fast path down to a single small read. Slow
  * paths additionally take a per-record lock, so unrelated projects proceed
@@ -25,39 +24,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "version.h"
-
-#define XXH_STATIC_LINKING_ONLY
-#include "xxhash.h"
-
 #define HM_CACHE_MAGIC "#hacman-cache 1 "
 
 static char record_buf[HM_RECORD_MAX];
 static char cache_dir_buf[HM_PATH_MAX + 1];
-
-static void embedded_hash(const hm_project *p, char out17[17])
-{
-    static const char hex[] = "0123456789abcdef";
-    XXH3_state_t      state;
-    XXH64_hash_t      hash;
-    size_t            i;
-
-    /* The explicit separators prevent a path/content boundary from hashing
-     * like the same bytes split at a different position. */
-    XXH3_INITSTATE(&state);
-    (void)XXH3_64bits_reset(&state);
-    for (i = 0; i < p->file_count; ++i) {
-        const hm_embedded_file *f         = &p->files[i];
-        const char              separator = '\0';
-        (void)XXH3_64bits_update(&state, f->path.ptr, f->path.len);
-        (void)XXH3_64bits_update(&state, &separator, 1);
-        (void)XXH3_64bits_update(&state, f->content.ptr, f->content.len);
-        (void)XXH3_64bits_update(&state, &separator, 1);
-    }
-    hash = XXH3_64bits_digest(&state);
-    for (i = 0; i < 16; ++i) out17[i] = hex[(hash >> (60 - 4 * i)) & 0xF];
-    out17[16] = '\0';
-}
 
 /* Appends `s`, replacing anything that would break the record layout. */
 static size_t append_clean(char *dst, size_t o, size_t cap, const char *s, size_t len)
@@ -138,58 +108,8 @@ const char *hm_cache_dir(const char *override)
     return absolute_cache_dir(cache_dir_buf);
 }
 
-/* Builds the identity string: everything that makes this record *this* record,
- * and deliberately nothing else. `name` is display text and is left out. For
- * embedded commands, the source path and a digest of every embedded path and
- * content join the command: the source path gives each input its own work
- * directory, and the digest makes edits rebuild. */
-static void build_identity(const hm_project *p, const char *source_path, char *out, size_t cap)
-{
-    static const char version[] = " hacman:" HM_VERSION;
-    const size_t      full_cap  = cap;
-    size_t            o         = 0;
-
-    /* Reserve the version suffix even for a truncated project identity so
-     * every hacman upgrade invalidates prior successful setup state. */
-    cap -= sizeof(version) - 1;
-
-    if (p->kind == HM_KIND_COMMAND) {
-        o = append_str(out, o, cap, "cmd ");
-        if (p->file_count > 0) {
-            char files_hash[17];
-
-            if (source_path != NULL) {
-                o = append_str(out, o, cap, "source:");
-                o = append_clean(out, o, cap, source_path, strlen(source_path));
-                o = append_str(out, o, cap, " ");
-            }
-            embedded_hash(p, files_hash);
-            o = append_str(out, o, cap, "files:");
-            o = append_str(out, o, cap, files_hash);
-            o = append_str(out, o, cap, " ");
-        }
-        o = append_str(out, o, cap, "$ ");
-        o = append_clean(out, o, cap, p->command.ptr, p->command.len);
-    } else {
-        o = append_str(out, o, cap, "url ");
-        o = append_str(out, o, cap, hm_check_name(p->check));
-        o = append_str(out, o, cap, " ");
-        o = append_clean(out, o, cap, p->url.ptr, p->url.len);
-        if (p->check == HM_CHECK_VERSION) {
-            /* Different anchors extract different versions, so they are a
-             * different thing to remember. */
-            o = append_str(out, o, cap, " [");
-            o = append_clean(out, o, cap, p->version_prefix.ptr, p->version_prefix.len);
-            o = append_str(out, o, cap, "..");
-            o = append_clean(out, o, cap, p->version_suffix.ptr, p->version_suffix.len);
-            o = append_str(out, o, cap, "]");
-        }
-    }
-    o      = append_str(out, o, full_cap, version);
-    out[o] = '\0';
-}
-
-void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir, const char *source_path)
+void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir, const char *source_path,
+                   const char *identity)
 {
     char   hash[17];
     size_t o = 0;
@@ -200,10 +120,12 @@ void hm_cache_init(hm_cache *c, const hm_project *p, const char *dir, const char
     c->known       = 0;
     c->workdir[0]  = '\0';
 
-    build_identity(p, source_path, c->identity, sizeof(c->identity));
+    o              = append_str(c->identity, 0, sizeof(c->identity), identity);
+    c->identity[o] = '\0';
+    o              = 0;
     /* A file-backed embedded project owns one stable cache location. Its
-     * changing content identity remains inside that record and invalidates it
-     * on the next load. Standard input has no stable path, so it keeps the
+     * changing identity remains inside that record and invalidates it on the
+     * next load. Standard input has no stable path, so it keeps the
      * content-addressed fallback. */
     if (p->file_count > 0 && source_path != NULL) {
         hm_hash_hex(source_path, strlen(source_path), hash);

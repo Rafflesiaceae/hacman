@@ -7,7 +7,7 @@ request: GET https://example.com/manual
 compare: an XXH3 hash of the whole response body
 schedule: never
 check-when: only with --force
-cache-identity: url hash https://example.com/manual hacman:<version>
+cache-identity: siml:<hash> hacman:<version>
 cache-file: /home/hacman-test/.cache/hacman/url-<identity-hash>
 install-shell: /bin/sh -e <script>
 install-env: [HACMAN_NAME,HACMAN_URL,HACMAN_CHECK,HACMAN_VERSION,HACMAN_PREVIOUS,HACMAN_RESPONSE]
