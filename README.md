@@ -688,8 +688,9 @@ project's setup over and no key can be forgotten when one is added. The version
 includes a digest of the hacman binary (see
 [Version and reproducible builds](#version-and-reproducible-builds)), so a build
 that differs in any byte never inherits setup state from another one, even for
-an unchanged file, while a rebuild that reproduces the same binary keeps it. Things outside the file, such as the environment, the network
-or files a command reads, are what `schedule` and `check` are for.
+an unchanged file, while a rebuild that reproduces the same binary keeps it.
+Things outside the file, such as the environment, the network or files a
+command reads, are what `schedule` and `check` are for.
 
 When work is due, hacman takes a per-project advisory lock beside the cache
 record before checking or updating. A concurrent invocation blocks in the
