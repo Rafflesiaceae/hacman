@@ -509,6 +509,115 @@ raise OSError(ctypes.get_errno(), 'execve failed')
                 result.stdout,
             )
 
+    def repro_build(
+        self, name: str, src: Path, out: Path, umask: int, env: dict[str, str]
+    ) -> bool:
+        """Build `src` into `out` with build.sh; report the log on failure."""
+        result = subprocess.run(
+            [str(src / "build.sh")],
+            cwd=src,
+            env={**env, "BUILD_DIR": str(out)},
+            umask=umask,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        return self.check(
+            f"reproducible build {name} succeeds", result.returncode == 0, result.stdout
+        )
+
+    def repro_tests(self) -> None:
+        """Two differently set up builds of the working tree must be identical.
+
+        Both copies are built with build.sh, the same toolchain and the same
+        configuration; they differ in source path and depth, a build directory
+        inside vs. outside the tree, a Git checkout with its own commit vs. a
+        plain copy, umask, TZ and locale. CFLAGS, CPPFLAGS and LDFLAGS are
+        removed for both: Meson honours them on purpose, so they are
+        configuration rather than noise. The tested binary itself plays no
+        part: this checks the source tree. REPRO=0 skips it, since it takes two
+        full builds."""
+        if os.environ.get("REPRO") == "0":
+            print("[test] SKIP reproducible build: REPRO=0")
+            return
+        # Tracked plus untracked, non-ignored files, so uncommitted changes
+        # are covered. Without Git (a source archive) there is no file list.
+        listing = subprocess.run(
+            ["git", "-C", str(self.root), "ls-files", "-z"]
+            + ["--cached", "--others", "--exclude-standard"],
+            capture_output=True,
+            check=False,
+        )
+        if listing.returncode != 0:
+            print("[test] SKIP reproducible build: not a Git checkout")
+            return
+        paths = [
+            path
+            for path in listing.stdout.decode().split("\0")
+            # Tracked files deleted in the working tree are not part of it.
+            if path and os.path.lexists(self.root / path)
+        ]
+
+        def copy_tree(dest: Path) -> None:
+            for path in paths:
+                target = dest / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(self.root / path, target, follow_symlinks=False)
+
+        # Kept on failure, so the two builds can be compared with diffoscope.
+        work = Path(tempfile.mkdtemp(prefix="hacman-repro-"))
+        # Configuration Meson honours; both builds drop it (see docstring).
+        flags = ("CFLAGS", "CPPFLAGS", "LDFLAGS")
+
+        # Build A: a Git checkout with a commit of its own, build dir inside.
+        src_a = work / "a" / "src"
+        out_a = src_a / "build"
+        copy_tree(src_a)
+        git = ["git", "-C", str(src_a), "-c", "user.name=repro"]
+        git += ["-c", "user.email=repro@invalid"]
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "snapshot"]):
+            subprocess.run(git + args, check=True)
+        env_a = self.command_env({"TZ": "UTC", "LC_ALL": "C"}, flags)
+        built = self.repro_build("A", src_a, out_a, 0o022, env_a)
+
+        # Build B: no Git, a longer path, build dir outside the tree, and the
+        # opposite environment.
+        src_b = work / "b" / "a-much" / "longer" / "source-path"
+        out_b = work / "b" / "out-of-tree-build"
+        copy_tree(src_b)
+        env_b = self.command_env(
+            {"TZ": "Pacific/Kiritimati", "LC_ALL": "C.UTF-8"}, flags
+        )
+        built = self.repro_build("B", src_b, out_b, 0o077, env_b) and built
+
+        identical = False
+        if built:
+            for name, out in (("A", out_a), ("B", out_b)):
+                result = self.run([out / "hm-stamp", "--check", out / "hacman"])
+                self.check(
+                    f"reproducible build {name} has a valid self digest",
+                    result.returncode == 0,
+                    result.stdout,
+                )
+            first = (out_a / "hacman").read_bytes()
+            second = (out_b / "hacman").read_bytes()
+            identical = first == second
+            # Name the first differing offsets to start an investigation.
+            offsets = [
+                f"0x{i:x}" for i, (x, y) in enumerate(zip(first, second)) if x != y
+            ][:10]
+            self.check(
+                "reproducible builds are identical",
+                identical,
+                f"sizes {len(first)} and {len(second)}, first differences at "
+                f"{', '.join(offsets) or 'the end'}\nkept in {work}",
+            )
+        if identical:
+            shutil.rmtree(work)
+        else:
+            print(f"[test] reproducible build trees kept in {work}", file=sys.stderr)
+
     def cache_version_tests(self) -> None:
         """Reject successful setup state recorded by another hacman version."""
         version = self.hacman("--version").stdout.strip().removeprefix("hacman ")
@@ -2370,6 +2479,7 @@ schedule: always
         if self.golden_tests():
             return 0
         self.example_plans()
+        self.repro_tests()
 
         if shutil.which("curl") is None:
             print(
