@@ -188,6 +188,14 @@ build/hm-stamp --check build/hacman   # prints the digest, or fails
 Tools that rewrite the binary afterwards (`strip`, packers, signing) keep the
 stored version but make `--check` fail on the rewritten copy.
 
+`./repro-check.sh` guards the property: it copies the working tree twice and
+builds each copy with `build.sh` under different conditions (source path and
+depth, build directory inside vs. outside the tree, a Git checkout vs. a plain
+copy, umask, `TZ` and locale), then fails unless both binaries are identical
+and pass `hm-stamp --check`. Both builds use the same configuration; builds
+made with other options, flags, compiler or musl version are expected to
+differ, and their version says so.
+
 Tests need no network (see [Tests](#tests)):
 
 ```sh
@@ -724,6 +732,7 @@ Comments (`# text`, with the space) are allowed, `#` alone is not.
 
 ```
 build.sh                  static-musl build wrapper
+repro-check.sh            builds twice under different conditions, compares bytes
 meson.build               build definition
 tests.py                  test suite (also `meson test`)
 tests/*.siml, *.gold      golden-file fixtures for `hacman --plan`
@@ -749,6 +758,7 @@ vendor/siml/              vendored SIML parser (see vendor.py)
 ```sh
 ./tests.py              # golden plans + the offline pipeline
 GOLD=update ./tests.py  # rewrite tests/*.gold after an intended change
+./repro-check.sh        # two differently set up builds must be identical
 ```
 
 Every `tests/<name>.siml` is resolved with `hacman --plan` and diffed against
