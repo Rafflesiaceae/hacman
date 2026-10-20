@@ -463,6 +463,52 @@ raise OSError(ctypes.get_errno(), 'execve failed')
             "HOME is not set; use --cache or HACMAN_CACHE",
         )
 
+    def self_hash_tests(self) -> None:
+        """The version ends in the binary's own digest, stamped after linking."""
+        version = self.hacman("--version").stdout.strip()
+        match = re.fullmatch(r"hacman \S+\+([0-9a-f]{16})", version)
+        self.check("version carries a 16-digit self digest", match is not None, version)
+        if match is None:
+            return
+        digest = match.group(1)
+        self.check("version digest is stamped", digest != "0" * 16, version)
+
+        # The stamp tool and the unstamped link output only exist next to a
+        # Meson-built binary; a binary passed in from elsewhere skips these.
+        stamp = self.binary.parent / "hm-stamp"
+        unstamped = self.binary.parent / "hacman-unstamped"
+        if not stamp.is_file():
+            print("[test] SKIP self-hash checks: no hm-stamp beside the binary")
+            return
+
+        result = self.run([stamp, "--check", self.binary])
+        self.check(
+            "stored digest matches the binary",
+            result.returncode == 0 and result.stdout.strip() == digest,
+            result.stdout,
+        )
+        tampered = self.temp / "hacman-tampered"
+        tampered.write_bytes(self.binary.read_bytes() + b"\0")
+        self.check(
+            "a modified binary fails the digest check",
+            self.run([stamp, "--check", tampered]).returncode == 1,
+        )
+        self.check(
+            "an already stamped binary is not stamped again",
+            self.run([stamp, self.binary, self.temp / "restamped"]).returncode == 1,
+        )
+        if unstamped.is_file():
+            # The stamp step is a pure function of the linked file.
+            again = self.temp / "hacman-stamped-again"
+            result = self.run([stamp, unstamped, again])
+            self.check(
+                "stamping the link output again reproduces the binary",
+                result.returncode == 0
+                and again.read_bytes() == self.binary.read_bytes()
+                and os.access(again, os.X_OK),
+                result.stdout,
+            )
+
     def cache_version_tests(self) -> None:
         """Reject successful setup state recorded by another hacman version."""
         version = self.hacman("--version").stdout.strip().removeprefix("hacman ")
@@ -2337,6 +2383,7 @@ schedule: always
             # Scripts kept after deliberately failing setups would otherwise
             # pile up in the real /tmp on every run.
             self.base_env["TMPDIR"] = directory
+            self.self_hash_tests()
             self.input_tests()
             self.cache_version_tests()
             self.trace_tests()

@@ -18,7 +18,7 @@ fi
 # The default covers maintained sources while explicit paths select a formatter
 # by extension, which keeps targeted editor and hook invocations convenient.
 if [ "$#" -eq 0 ]; then
-    clang-format --style=file -i src/*.c src/*.h
+    clang-format --style=file -i src/*.c src/*.h tools/*.c
     black --quiet tests.py vendor.py
     exit 0
 fi

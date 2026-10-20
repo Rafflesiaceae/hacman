@@ -1,2 +1,0 @@
-/* Generated at build time so incremental builds report the current revision. */
-#define HM_VERSION "@VCS_TAG@"

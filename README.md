@@ -156,6 +156,38 @@ meson test -C build
 Meson options: `-Dstatic=`, `-Dcurl=` (HTTP client, default `curl`),
 `-Dshell=` (install-script interpreter, default `/bin/sh`).
 
+### Version and reproducible builds
+
+The build is deterministic: the same source built with the same toolchain is
+the same file byte for byte, whatever the checkout path, build directory, time
+or Git history. Nothing from Git, the clock or the build machine is embedded.
+
+The version names the program itself rather than a commit:
+
+```
+$ build/hacman --version
+hacman 0.1.0+ca1874dad561cb2d
+```
+
+`0.1.0` is the `version:` in `meson.build`; the suffix is an XXH3 digest of the
+binary. Meson links `hacman-unstamped` with an all-zero 8-byte slot in the
+`.hm_selfhash` section, then `hm-stamp` (`tools/stamp.c`) hashes that file and
+writes the digest into the slot to produce `build/hacman`. Anything that
+changes the program, including the compiler, flags or Meson options, therefore
+changes the version, and a rebuild that reproduces the same bytes keeps it. The
+version is part of every [cache identity](#cache), so such a rebuild also keeps
+the cache. A release bumps `version:` in `meson.build`; tagging alone changes
+nothing.
+
+To verify a binary, zero the slot and hash the file again:
+
+```sh
+build/hm-stamp --check build/hacman   # prints the digest, or fails
+```
+
+Tools that rewrite the binary afterwards (`strip`, packers, signing) keep the
+stored version but make `--check` fail on the rewritten copy.
+
 Tests need no network (see [Tests](#tests)):
 
 ```sh
@@ -630,7 +662,7 @@ relocate the entire tree. It contains one tiny record per watched thing:
 
 ```
 $ cat ~/.cache/hacman/cmd-e1afb450457ef858
-#hacman-cache 1 siml:fb69132bdb7443ab hacman:f2d8969
+#hacman-cache 1 siml:fb69132bdb7443ab hacman:0.1.0+ca1874dad561cb2d
 1786527549	1786527549
 ```
 
@@ -644,9 +676,11 @@ prior successful state.
 The identity is a digest of every byte of the project file plus the version of
 the hacman running it (`src/identity.c`). Nothing is parsed or left out:
 comments, `name`, `install` and every other key count, so any edit starts the
-project's setup over and no key can be forgotten when one is added. A new
-hacman build likewise never inherits setup state from an older one, even for an
-unchanged file. Things outside the file, such as the environment, the network
+project's setup over and no key can be forgotten when one is added. The version
+includes a digest of the hacman binary (see
+[Version and reproducible builds](#version-and-reproducible-builds)), so a build
+that differs in any byte never inherits setup state from another one, even for
+an unchanged file, while a rebuild that reproduces the same binary keeps it. Things outside the file, such as the environment, the network
 or files a command reads, are what `schedule` and `check` are for.
 
 When work is due, hacman takes a per-project advisory lock beside the cache
@@ -699,11 +733,14 @@ src/env.c                 one scan for borrowed startup environment settings
 src/config.c              SIML -> one hm_project, zero-copy
 src/plan.c                --plan serialisation
 src/identity.c            the project identity: file digest + hacman version
+src/version.c             the version: project version + the binary's own digest
+src/selfhash.h            the self-digest slot shared with tools/stamp.c
 src/cache.c               cache records: key, load, atomic save
 src/check.c               HTTP via curl + the three check schemes
 src/install.c             slow path: embedded files, install scripts, commands, exec
 src/sandbox.c             Landlock filesystem confinement for setup code
 src/util.c                write(2)-based output, string and file helpers
+tools/stamp.c             hm-stamp: writes the self digest into the linked binary
 vendor/siml/              vendored SIML parser (see vendor.py)
 ```
 

@@ -26,7 +26,6 @@
 #include <unistd.h>
 
 #include "config.h"
-#include "version.h"
 
 /* Exit codes */
 #define HM_EXIT_OK         0
@@ -257,7 +256,7 @@ static int parse_arg_list(int argc, char **argv, int first, int env_only, hm_opt
             hm_out_flush();
             return 1;
         } else if (opt_is(a, "-V", "--version")) {
-            hm_out("hacman %s\n", HM_VERSION);
+            hm_out("hacman %s\n", hm_version());
             hm_out_flush();
             return 1;
         } else if (strcmp(a, "--cache") == 0) {

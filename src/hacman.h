@@ -178,6 +178,13 @@ void hm_plan_print(const hm_project *p, const struct hm_cache_s *c);
  * running hacman version. See identity.c for what that means. */
 void hm_identity_build(const char *siml, size_t len, char *out, size_t cap);
 
+/* --- version.c ---------------------------------------------------------- */
+
+/* The running hacman's version, `<project version>+<16 hex digits>`: the
+ * Meson project version plus an XXH3 digest of the binary itself, written
+ * into it after linking. See version.c. */
+const char *hm_version(void);
+
 /* --- cache.c ------------------------------------------------------------ */
 
 /* The cache is a directory of tiny records, one per watched thing, below

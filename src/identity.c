@@ -16,9 +16,11 @@
  *   Deliberately cheap edits (a comment, a rename) cost one re-setup; that is
  *   the price of never running stale setup.
  *
- * - The version of the hacman that executes it (HM_VERSION). Setup is the
- *   product of both the project and the program interpreting it, so a new
- *   build never inherits state from an older one, even for an unchanged file.
+ * - The version of the hacman that executes it (hm_version(), which includes
+ *   a digest of the binary itself). Setup is the product of both the project
+ *   and the program interpreting it, so a build that differs in any byte never
+ *   inherits state from another one, even for an unchanged file, while a
+ *   rebuild that reproduces the same binary keeps it.
  *
  * What is not part of it: the file's path (the cache address in cache.c
  * covers that), its timestamps, and anything outside the file such as the
@@ -35,12 +37,12 @@
 
 #include <string.h>
 
-#include "version.h"
-
 void hm_identity_build(const char *siml, size_t len, char *out, size_t cap)
 {
     static const char prefix[]  = "siml:";
-    static const char version[] = " hacman:" HM_VERSION;
+    static const char infix[]   = " hacman:";
+    const char       *version   = hm_version();
+    size_t            version_n = strlen(version);
     char              hash[17];
     size_t            o = 0;
 
@@ -50,7 +52,7 @@ void hm_identity_build(const char *siml, size_t len, char *out, size_t cap)
      * HM_IDENTITY_MAX always fits them; the guard keeps a smaller `cap` from
      * overrunning rather than silently producing a shorter, ambiguous string
      * (a truncated identity could compare equal for two different projects). */
-    if (cap < sizeof(prefix) - 1 + 16 + sizeof(version)) {
+    if (cap < sizeof(prefix) - 1 + 16 + sizeof(infix) - 1 + version_n + 1) {
         out[0] = '\0';
         return;
     }
@@ -58,5 +60,7 @@ void hm_identity_build(const char *siml, size_t len, char *out, size_t cap)
     o += sizeof(prefix) - 1;
     memcpy(out + o, hash, 16);
     o += 16;
-    memcpy(out + o, version, sizeof(version)); /* includes the NUL */
+    memcpy(out + o, infix, sizeof(infix) - 1);
+    o += sizeof(infix) - 1;
+    memcpy(out + o, version, version_n + 1); /* includes the NUL */
 }
