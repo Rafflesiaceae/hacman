@@ -1,0 +1,83 @@
+#!/usr/bin/env hacman
+# Keep the current Open Watcom v2 snapshot, then run tools such as
+# `./examples/openwatcomv2.siml wcc source.c` or
+# `./examples/openwatcomv2.siml wlink @link.lnk` with its environment set.
+# The Current-build tag rolls forward, so watch the snapshot archive itself
+# and refresh when its ETag changes.
+name: openwatcomv2
+url: https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz
+check: etag
+schedule: daily
+bin-path: run-watcom
+install: |
+  set -eu
+  echo "installing Open Watcom v2 snapshot (was: ${HACMAN_PREVIOUS:-none})"
+
+  # Restore the last complete toolchain if an earlier replacement was interrupted.
+  previous="$PWD/.openwatcomv2-previous"
+  if [ ! -d "$PWD/open-watcom" ] && [ -d "$previous" ]; then
+    mv "$previous" "$PWD/open-watcom"
+  fi
+  rm -rf "$previous"
+
+  # Stage the large rolling snapshot without touching the active installation.
+  stage="$(mktemp -d "$PWD/.openwatcomv2-update.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  archive="ow-snapshot.tar.xz"
+  curl -fsSL "$HACMAN_URL" -o "$stage/$archive"
+  mkdir "$stage/open-watcom"
+  tar -xJf "$stage/$archive" -C "$stage/open-watcom"
+
+  # Select the compiler built for this Linux host before replacing a good copy.
+  case "$(uname -m)" in
+    x86_64|amd64) host_bin=binl64 ;;
+    i?86) host_bin=binl ;;
+    *)
+      echo "openwatcomv2: unsupported host architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -x "$stage/open-watcom/$host_bin/wcc" ]; then
+    echo "openwatcomv2: snapshot has no executable $host_bin/wcc" >&2
+    exit 1
+  fi
+
+  # Rotate only after the downloaded archive extracts to a usable toolchain.
+  if [ -d "$PWD/open-watcom" ]; then
+    mv "$PWD/open-watcom" "$previous"
+  fi
+  if mv "$stage/open-watcom" "$PWD/open-watcom"; then
+    rm -rf "$previous"
+  else
+    if [ -d "$previous" ]; then
+      mv "$previous" "$PWD/open-watcom"
+    fi
+    exit 1
+  fi
+
+  # Dispatch any requested tool with the environment expected by Open Watcom.
+  cat >run-watcom.next <<'SHIM'
+  #!/bin/sh
+  set -eu
+  if [ "$#" -eq 0 ]; then
+    echo "usage: openwatcomv2.siml <Open Watcom command> [arguments...]" >&2
+    exit 2
+  fi
+  here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+  export WATCOM="$here/open-watcom"
+  export EDPATH="$WATCOM/eddat"
+  export WIPFC="$WATCOM/wipfc"
+  export INCLUDE="$WATCOM/h"
+  case "$(uname -m)" in
+    x86_64|amd64) host_bin=binl64 ;;
+    i?86) host_bin=binl ;;
+    *)
+      echo "openwatcomv2: unsupported host architecture: $(uname -m)" >&2
+      exit 2
+      ;;
+  esac
+  export PATH="$WATCOM/$host_bin:$WATCOM/binw:$PATH"
+  exec "$@"
+  SHIM
+  chmod 755 run-watcom.next
+  mv run-watcom.next run-watcom
