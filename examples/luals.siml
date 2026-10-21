@@ -1,0 +1,53 @@
+#!/usr/bin/env hacman
+# Keep a private Lua Language Server current, then forward arguments such as
+# `./examples/luals.siml --version` to it.
+# Read version tags from the public feed without using the GitHub API.
+name: luals
+url: https://github.com/LuaLS/lua-language-server/releases.atom
+check: version
+version-prefix: https://github.com/LuaLS/lua-language-server/releases/tag/
+version-suffix: "
+schedule: daily
+bin-path: luals/bin/lua-language-server
+install: |
+  set -eu
+  echo "installing LuaLS $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  # Recover the last good release if a previous replacement was interrupted.
+  previous="$PWD/.luals-previous"
+  if [ ! -d "$PWD/luals" ] && [ -d "$previous" ]; then
+    mv "$previous" "$PWD/luals"
+  fi
+  rm -rf "$previous"
+
+  # LuaLS publishes separate Linux archives for x64 and ARM64.
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=x64 ;;
+    aarch64|arm64) release_arch=arm64 ;;
+    *)
+      echo "luals: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  # Keep the full archive: the executable loads Lua scripts beside bin/.
+  archive="lua-language-server-$HACMAN_VERSION-linux-$release_arch.tar.gz"
+  stage="$(mktemp -d "$PWD/.luals-update.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  curl -fsSL "https://github.com/LuaLS/lua-language-server/releases/download/$HACMAN_VERSION/$archive" -o "$stage/$archive"
+  mkdir "$stage/luals"
+  tar -xzf "$stage/$archive" -C "$stage/luals"
+  "$stage/luals/bin/lua-language-server" --version >/dev/null
+
+  # Rotate only after the downloaded server proves executable.
+  if [ -d "$PWD/luals" ]; then
+    mv "$PWD/luals" "$previous"
+  fi
+  if mv "$stage/luals" "$PWD/luals"; then
+    rm -rf "$previous"
+  else
+    if [ -d "$previous" ]; then
+      mv "$previous" "$PWD/luals"
+    fi
+    exit 1
+  fi
