@@ -1,0 +1,32 @@
+#!/usr/bin/env hacman
+# Keep a private Gersemi current, then format CMake files with commands such as
+# `./examples/gersemi.siml --check CMakeLists.txt`.
+# Read plain version tags from the public feed without using the GitHub API.
+name: gersemi
+url: https://github.com/BlankSpruce/gersemi/releases.atom
+check: version
+version-prefix: https://github.com/BlankSpruce/gersemi/releases/tag/
+version-suffix: "
+schedule: daily
+bin-path: gersemi
+install: |
+  set -eu
+  echo "installing gersemi $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  # Release assets are standalone binaries with a separate ARM64 build.
+  case "$(uname -m)" in
+    x86_64|amd64) asset=gersemi-linux ;;
+    aarch64|arm64) asset=gersemi-linux-arm ;;
+    *)
+      echo "gersemi: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  url="https://github.com/BlankSpruce/gersemi/releases/download/$HACMAN_VERSION/$asset"
+  curl -fsSL "$url" -o gersemi.next
+  chmod 755 gersemi.next
+  ./gersemi.next --version >/dev/null
+
+  # Replace the cached executable only after the new release runs successfully.
+  mv gersemi.next gersemi
