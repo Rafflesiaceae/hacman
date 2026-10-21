@@ -59,8 +59,27 @@ install: |
   cat >run-watcom.next <<'SHIM'
   #!/bin/sh
   set -eu
+  # Handle dispatcher help before preparing the toolchain environment.
+  show_help() {
+    cat <<'HELP'
+  Usage: ./examples/openwatcomv2.siml <Open Watcom command> [arguments...]
+
+  Run an Open Watcom tool from the current snapshot. Examples:
+    ./examples/openwatcomv2.siml wcc source.c
+    ./examples/openwatcomv2.siml wlink @link.lnk
+
+  Options:
+    -h, --help  Show this help and exit
+
+  The snapshot is cached and checked daily for updates. The dispatcher sets
+  WATCOM, INCLUDE, EDPATH, WIPFC, and PATH for the requested command.
+  HELP
+  }
+  case "${1:-}" in
+    -h|--help) show_help; exit 0 ;;
+  esac
   if [ "$#" -eq 0 ]; then
-    echo "usage: openwatcomv2.siml <Open Watcom command> [arguments...]" >&2
+    show_help >&2
     exit 2
   fi
   here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
