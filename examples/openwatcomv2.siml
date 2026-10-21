@@ -59,7 +59,23 @@ install: |
   cat >run-watcom.next <<'SHIM'
   #!/bin/sh
   set -eu
-  # Handle dispatcher help before preparing the toolchain environment.
+  here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+  export WATCOM="$here/open-watcom"
+  export EDPATH="$WATCOM/eddat"
+  export WIPFC="$WATCOM/wipfc"
+  export INCLUDE="$WATCOM/h"
+  case "$(uname -m)" in
+    x86_64|amd64) host_bin=binl64 ;;
+    i?86) host_bin=binl ;;
+    *)
+      echo "openwatcomv2: unsupported host architecture: $(uname -m)" >&2
+      exit 2
+      ;;
+  esac
+  export PATH="$WATCOM/$host_bin:$WATCOM/binw:$PATH"
+
+  # List commands from this host-specific directory so help stays current
+  # with each snapshot.
   show_help() {
     cat <<'HELP'
   Usage: ./examples/openwatcomv2.siml <Open Watcom command> [arguments...]
@@ -67,6 +83,14 @@ install: |
   Run an Open Watcom tool from the current snapshot. Examples:
     ./examples/openwatcomv2.siml wcc source.c
     ./examples/openwatcomv2.siml wlink @link.lnk
+
+  Available tools:
+  HELP
+    for tool in "$WATCOM/$host_bin"/*; do
+      [ -f "$tool" ] && [ -x "$tool" ] || continue
+      printf '    %s\n' "${tool##*/}"
+    done
+    cat <<'HELP'
 
   Options:
     -h, --help  Show this help and exit
@@ -82,20 +106,6 @@ install: |
     show_help >&2
     exit 2
   fi
-  here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-  export WATCOM="$here/open-watcom"
-  export EDPATH="$WATCOM/eddat"
-  export WIPFC="$WATCOM/wipfc"
-  export INCLUDE="$WATCOM/h"
-  case "$(uname -m)" in
-    x86_64|amd64) host_bin=binl64 ;;
-    i?86) host_bin=binl ;;
-    *)
-      echo "openwatcomv2: unsupported host architecture: $(uname -m)" >&2
-      exit 2
-      ;;
-  esac
-  export PATH="$WATCOM/$host_bin:$WATCOM/binw:$PATH"
   exec "$@"
   SHIM
   chmod 755 run-watcom.next
