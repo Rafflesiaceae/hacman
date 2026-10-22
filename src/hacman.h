@@ -149,8 +149,10 @@ long hm_read_all(const char *path, char *buf, size_t cap, int *source_fd, int *c
 /* Parses `len` bytes of SIML describing exactly one project into `out`.
  * Value slices point into `buf`, which must stay alive for as long as the
  * project is used; transient embedded-file keys are copied. Returns 0, or -1
- * on error (message already printed). */
-int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project *out);
+ * on error (message already printed). Unpacking passes resolve_paths = 0 to
+ * leave runtime environment templates untouched. */
+int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project *out,
+                    int resolve_paths);
 
 const char *hm_check_name(hm_check_kind k);
 void        hm_sched_describe(const hm_project *p, char *out, size_t cap);
@@ -278,5 +280,11 @@ int hm_materialize_files(const hm_project *p, const char *workdir);
  * Returns -1 without weakening the process when Landlock is unavailable or
  * policy setup fails. */
 int hm_sandbox_enter(const hm_project *p, const char *workdir, const char *cache_dir);
+
+/* --- unpack.c ----------------------------------------------------------- */
+
+/* Extracts embedded files and shell scripts without running the project.
+ * Creates target and its parents; refuses existing files and nested symlinks. */
+int hm_unpack(const hm_project *p, const char *target);
 
 #endif /* HACMAN_H_INCLUDED */

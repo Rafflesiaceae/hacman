@@ -70,6 +70,7 @@ typedef struct {
     hm_project       *cur;        /* non-NULL while inside that mapping     */
     int               seen_check; /* keys that are only valid for one kind  */
     int               seen_version;
+    int               resolve_paths; /* unpacking does not need runtime paths */
     int               seen_install;
     int               seen_files;
     int               seen_sandbox_write_dirs;
@@ -517,15 +518,16 @@ static int finish_project(hm_cfg *c)
     }
     for (i = 0; i < p->sandbox_write_dir_count; ++i) {
         hm_sandbox_write_dir *dir = &p->sandbox_write_dirs[i];
-        if (expand_template(c, dir->source, "sandbox-write-dirs entry", dir->path,
-                            sizeof(dir->path), dir->line, 1) != 0) {
+        if (c->resolve_paths && expand_template(c, dir->source, "sandbox-write-dirs entry",
+                                                dir->path, sizeof(dir->path), dir->line, 1) != 0) {
             return -1;
         }
     }
 
     /* The program this project sets up, if it names one. */
-    if (p->bin.len > 0 && expand_template(c, p->bin, "bin-path", p->bin_path, sizeof(p->bin_path),
-                                          p->line, p->file_count == 0 && !p->sandboxed) != 0) {
+    if (c->resolve_paths && p->bin.len > 0 &&
+        expand_template(c, p->bin, "bin-path", p->bin_path, sizeof(p->bin_path), p->line,
+                        p->file_count == 0 && !p->sandboxed) != 0) {
         return -1;
     }
     if (p->bin_path[0] != '\0' && p->bin_path[0] != '/') {
@@ -564,7 +566,8 @@ static void block_line(hm_cfg *c, const siml_event *ev)
     c->block_end = ev->value.ptr + ev->value.len;
 }
 
-int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project *out)
+int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project *out,
+                    int resolve_paths)
 {
     hm_line_reader reader;
     siml_parser    parser;
@@ -572,9 +575,10 @@ int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project 
     hm_cfg         c;
 
     memset(&c, 0, sizeof(c));
-    c.buf    = buf;
-    c.origin = origin;
-    c.out    = out;
+    c.buf           = buf;
+    c.origin        = origin;
+    c.out           = out;
+    c.resolve_paths = resolve_paths;
 
     reader.buf = buf;
     reader.len = len;

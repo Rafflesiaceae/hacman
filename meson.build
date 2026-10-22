@@ -89,6 +89,7 @@ hacman_sources = files(
   'src/identity.c',
   'src/check.c',
   'src/install.c',
+  'src/unpack.c',
   'src/sandbox.c',
   'src/version.c',
 )

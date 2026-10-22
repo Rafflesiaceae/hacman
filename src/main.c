@@ -51,6 +51,7 @@ typedef struct {
     int         force;
     int         adopt;
     int         plan;
+    int         unpack;
     int         verbose;
     int         trace;
     int         timeout;
@@ -58,6 +59,7 @@ typedef struct {
 
 static const char usage_text[] =
     "usage: hacman [OPTIONS] FILE [ARGS...]\n"
+    "       hacman --unpack FILE TARGET\n"
     "\n"
     "Checks the URL described by a SIML project file and runs its install script\n"
     "when that URL changed, or - for a file that describes a command instead -\n"
@@ -74,6 +76,7 @@ static const char usage_text[] =
     "  -f, --force         ignore the schedule and act now\n"
     "  -a, --adopt         record the current state without installing or running\n"
     "  -p, --plan          print what FILE resolves to, as SIML, and exit\n"
+    "      --unpack        extract embedded files and scripts into TARGET\n"
     "      --cache DIR     cache directory (default: ~/.cache/hacman)\n"
     "  -t, --timeout SECS  per-request timeout (default: 15)\n"
     "  -v, --verbose       report an unchanged or skipped project too\n"
@@ -247,6 +250,8 @@ static int parse_arg_list(int argc, char **argv, int first, int env_only, hm_opt
             o->adopt = 1;
         } else if (opt_is(a, "-p", "--plan")) {
             o->plan = 1;
+        } else if (strcmp(a, "--unpack") == 0) {
+            o->unpack = 1;
         } else if (opt_is(a, "-v", "--verbose")) {
             o->verbose = 1;
         } else if (opt_is(a, "-x", "--trace")) {
@@ -536,15 +541,33 @@ int main(int argc, char **argv)
         return HM_EXIT_USAGE;
     }
 
+    /* Unpacking consumes one destination instead of program arguments. Reject
+     * other action modes before creating any output. */
+    if (o.unpack) {
+        if (o.prog_argv[1] == NULL || o.prog_argv[2] != NULL || o.prog_argv[1][0] == '\0') {
+            hm_err("hacman: --unpack needs FILE and exactly one target directory\n");
+            return HM_EXIT_USAGE;
+        }
+        if (o.plan || o.check_only || o.dry_run || o.adopt || o.force) {
+            hm_err("hacman: --unpack cannot be combined with other action modes\n");
+            return HM_EXIT_USAGE;
+        }
+    }
+
     /* Startup usage stays plain; project diagnostics need line prefixes. */
     hm_err_prefix();
     len = hm_read_all(o.file, config_buf, sizeof(config_buf), &source_fd, &source_canonical);
     if (len < 0) return HM_EXIT_USAGE;
 
     if (hm_config_parse(config_buf, (size_t)len, (strcmp(o.file, "-") != 0) ? o.file : "<stdin>",
-                        &project) != 0) {
+                        &project, !o.unpack) != 0) {
         if (source_fd >= 0) close(source_fd);
         return HM_EXIT_USAGE;
+    }
+
+    if (o.unpack) {
+        if (source_fd >= 0) close(source_fd);
+        return hm_unpack(p, o.prog_argv[1]) == 0 ? HM_EXIT_OK : HM_EXIT_FAILED;
     }
 
     if (project.bin_path[0] != '\0') {

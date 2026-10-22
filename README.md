@@ -261,12 +261,14 @@ actually due.
 
 ```
 usage: hacman [OPTIONS] FILE [ARGS...]
+       hacman --unpack FILE TARGET
 
   -c, --check-only    check only, never install or run (exit 10 if due)
   -n, --dry-run       report what would happen, change nothing
   -f, --force         ignore the schedule and act now
   -a, --adopt         record the current state without installing or running
   -p, --plan          print what FILE resolves to, as SIML, and exit
+      --unpack        extract embedded files and scripts into TARGET
       --cache DIR     cache directory (default: ~/.cache/hacman)
   -t, --timeout SECS  per-request timeout (default: 15)
   -v, --verbose       report an unchanged or skipped project too
@@ -300,6 +302,24 @@ build.sh environment:
 ```sh
 generate-project | hacman -
 ```
+
+`hacman --unpack FILE TARGET` creates the target directory and its parents,
+then extracts the project's `files:` entries at their relative paths. An
+`install:` section becomes `install.sh`, and a `command:` becomes `command.sh`.
+These shell scripts are executable and get a shell shebang if they do not
+already have one. Block contents are de-indented as they are for execution.
+
+```sh
+hacman --unpack examples/koca.siml ./kocha/
+# Produces kocha/update-koca.sh and kocha/command.sh.
+```
+
+Unpacking also accepts `-` for standard input. It does not run scripts, fetch
+URLs, update the cache, or execute `bin-path`. Runtime path templates do not
+need their environment variables set. Existing files and symlinks inside the
+target are refused; use a fresh target to extract again. Embedded paths that
+collide with the generated script name are rejected. If extraction fails,
+files already extracted remain in the target.
 
 For executable `.siml` files, `HACMAN` supplies options before the implicit
 file argument added by the shebang:
@@ -747,6 +767,7 @@ src/selfhash.h            the self-digest slot shared with tools/stamp.c
 src/cache.c               cache records: key, load, atomic save
 src/check.c               HTTP via curl + the three check schemes
 src/install.c             slow path: embedded files, install scripts, commands, exec
+src/unpack.c              extract embedded files and shell scripts into a directory
 src/sandbox.c             Landlock filesystem confinement for setup code
 src/util.c                write(2)-based output, string and file helpers
 tools/stamp.c             hm-stamp: writes the self digest into the linked binary

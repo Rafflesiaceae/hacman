@@ -879,6 +879,167 @@ schedule: always
             f"stdout:\n{failed.stdout}\nstderr:\n{failed.stderr}",
         )
 
+    def unpack_tests(self) -> None:
+        """Extract sources without setup side effects or unsafe target writes."""
+        cache = self.temp / "unpack-cache"
+        env = self.command_env({"HACMAN_CACHE": str(cache)})
+        target = self.temp / "unpack" / "nested" / "kocha"
+        if self.expect_hacman(
+            "unpack creates target parents for the Koca example",
+            0,
+            "--unpack",
+            "examples/koca.siml",
+            f"{target}/",
+            env=env,
+        ):
+            self.check(
+                "Koca extraction contains its source and command script",
+                {path.name for path in target.iterdir()} == {"update-koca.sh", "command.sh"},
+            )
+            self.check(
+                "Koca command is an executable shell script",
+                (target / "command.sh").read_text().splitlines()[1:] == ["sh update-koca.sh"]
+                and os.access(target / "command.sh", os.X_OK),
+            )
+            self.check(
+                "Koca embedded script keeps its shebang and indentation",
+                (target / "update-koca.sh").read_text().startswith("#!/bin/sh\nset -eu\n\n")
+                and '  x86_64|amd64) release_arch=x64 ;;' in (target / "update-koca.sh").read_text(),
+            )
+        self.check("unpack does not create a cache", not cache.exists())
+
+        # Runtime-only paths and environment values must not gate extraction.
+        marker = self.temp / "unpack-must-not-run"
+        source = self.temp / "unpack-source.siml"
+        self.write(
+            source,
+            f"""command: touch '{marker}'
+bin-path: {{{{HACMAN_UNPACK_UNSET}}}}/program
+sandbox-write-dirs:
+  - {{{{HACMAN_UNPACK_UNSET}}}}
+files:
+  nested/message.txt: |
+    first
+      indented
+
+    last $SHELL {{{{HACMAN_UNPACK_UNSET}}}}
+""",
+        )
+        env = self.command_env(
+            {"HACMAN_CACHE": str(cache)}, ("HOME", "HACMAN_UNPACK_UNSET")
+        )
+        extracted = self.temp / "unpack-content"
+        if self.expect_hacman(
+            "unpack leaves runtime environment templates unresolved",
+            0,
+            "--unpack",
+            source,
+            extracted,
+            env=env,
+        ):
+            self.check(
+                "unpack preserves nested file contents and shell variables",
+                (extracted / "nested/message.txt").read_text()
+                == "first\n  indented\n\nlast $SHELL {{HACMAN_UNPACK_UNSET}}\n",
+            )
+        self.check("unpack does not run the command or bin-path", not marker.exists())
+
+        result = self.run(
+            [self.binary, "--unpack", "-", "unpack relative/child/"],
+            stdin="command: echo plain\n",
+            env=env,
+            cwd=self.temp,
+        )
+        self.check(
+            "unpack accepts a relative target for a plain command",
+            result.returncode == 0
+            and (self.temp / "unpack relative/child/command.sh").is_file(),
+            result.stdout,
+        )
+
+        for label, install, expected in (
+            ("inline", "install: echo inline\n", ["echo inline"]),
+            (
+                "block",
+                "install: |\n  echo first\n    echo indented\n",
+                ["echo first", "  echo indented"],
+            ),
+            ("shebang", "install: |\n  #!/bin/sh\n  echo kept\n", ["echo kept"]),
+        ):
+            output_dir = self.temp / f"unpack-install-{label}"
+            if self.expect_hacman(
+                f"unpack extracts {label} install from stdin",
+                0,
+                "--unpack",
+                "-",
+                output_dir,
+                stdin="url: https://example.invalid/no-network\n" + install,
+                env=env,
+            ):
+                script = output_dir / "install.sh"
+                lines = script.read_text().splitlines()
+                self.check(
+                    f"{label} install has the expected executable script contents",
+                    lines[0].startswith("#!")
+                    and lines[1:] == expected
+                    and os.access(script, os.X_OK),
+                )
+
+        # Refusal must leave an existing file and every symlink target intact.
+        self.expect_hacman(
+            "unpack refuses existing output files", 2, "--unpack", source, extracted, env=env
+        )
+        self.check(
+            "existing output file remains unchanged",
+            (extracted / "nested/message.txt").is_file()
+            and (extracted / "nested/message.txt").read_text().startswith("first\n  indented\n"),
+        )
+        outside = self.temp / "unpack-outside"
+        outside.mkdir()
+        outside_file = outside / "message.txt"
+        self.write(outside_file, "untouched\n")
+        for label in ("directory", "file"):
+            output_dir = self.temp / f"unpack-symlink-{label}"
+            output_dir.mkdir()
+            if label == "directory":
+                (output_dir / "nested").symlink_to(outside, target_is_directory=True)
+            else:
+                (output_dir / "nested").mkdir()
+                (output_dir / "nested/message.txt").symlink_to(outside_file)
+            self.expect_hacman(
+                f"unpack refuses a {label} symlink", 2, "--unpack", source, output_dir, env=env
+            )
+            self.check(
+                f"{label} symlink target is untouched", outside_file.read_text() == "untouched\n"
+            )
+
+        for path, status in (("command.sh", 2), ("command.sh/child", 2), ("../escape", 1)):
+            output_dir = self.temp / f"unpack-collision-{status}-{len(path)}"
+            self.expect_hacman(
+                f"unpack rejects conflicting or unsafe embedded path {path}",
+                status,
+                "--unpack",
+                "-",
+                output_dir,
+                stdin=f"command: :\nfiles:\n  {path}: |\n    content\n",
+                env=env,
+            )
+            self.check(f"invalid path {path} creates no target", not output_dir.exists())
+
+        # Argument mistakes and conflicting modes must fail before any write.
+        invalid_target = self.temp / "unpack-invalid-target"
+        for args in (
+            ("--unpack",),
+            ("--unpack", str(source)),
+            ("--unpack", str(source), str(invalid_target), "extra"),
+            ("--unpack", str(source), ""),
+            ("--unpack", "--plan", str(source), str(invalid_target)),
+            ("--unpack", "--dry-run", str(source), str(invalid_target)),
+        ):
+            self.expect_hacman(f"unpack rejects invalid arguments {args!r}", 1, *args, env=env)
+        self.check("invalid unpack arguments create no target", not invalid_target.exists())
+        self.check("all unpack operations leave the cache absent", not cache.exists())
+
     def embedded_tests(self) -> None:
         """Exercise embedded files, scheduled rebuilds, and serialization."""
         embedded_cache = self.temp / "cache-embedded"
@@ -2497,6 +2658,7 @@ schedule: always
             self.input_tests()
             self.cache_version_tests()
             self.trace_tests()
+            self.unpack_tests()
             self.embedded_tests()
             self.sandbox_tests()
             self.nested_tests()
