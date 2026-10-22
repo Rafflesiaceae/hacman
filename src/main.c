@@ -536,6 +536,8 @@ int main(int argc, char **argv)
         return HM_EXIT_USAGE;
     }
 
+    /* Startup usage stays plain; project diagnostics need line prefixes. */
+    hm_err_prefix();
     len = hm_read_all(o.file, config_buf, sizeof(config_buf), &source_fd, &source_canonical);
     if (len < 0) return HM_EXIT_USAGE;
 

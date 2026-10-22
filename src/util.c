@@ -29,6 +29,7 @@ static char   out_buf[HM_OUT_CAP];
 static size_t out_len;
 static int    out_fd = 1;
 static int    out_prefix_stderr;
+static int    err_prefix_lines;
 static int    stderr_line_start = 1;
 static const char stderr_prefix[] = "hacman: ";
 
@@ -123,7 +124,7 @@ void hm_out_target(int fd)
 }
 
 /* Prefixes stderr lines while allowing messages that already carry hacman's
- * marker to pass through once. This also handles multi-line usage text. */
+ * marker to pass through once. */
 static void hm_write_prefixed_stderr(const char *s, size_t len, int keep_existing_prefix)
 {
     size_t offset = 0;
@@ -160,6 +161,11 @@ void hm_err_stream_end(void)
         hm_write_all(STDERR_FILENO, "\n", 1);
         stderr_line_start = 1;
     }
+}
+
+void hm_err_prefix(void)
+{
+    err_prefix_lines = 1;
 }
 
 void hm_out_flush(void)
@@ -209,10 +215,14 @@ void hm_err(const char *fmt, ...)
     n = hm_vformat(line, sizeof(line), fmt, ap);
     va_end(ap);
 
-    /* A previous streamed diagnostic may have ended without a newline. Keep
-     * the next hacman message on its own clearly marked line. */
-    hm_err_stream_end();
-    hm_write_prefixed_stderr(line, n, 1);
+    if (err_prefix_lines) {
+        /* A previous streamed diagnostic may have ended without a newline.
+         * Keep the next hacman message on its own clearly marked line. */
+        hm_err_stream_end();
+        hm_write_prefixed_stderr(line, n, 1);
+    } else {
+        hm_write_all(STDERR_FILENO, line, n);
+    }
 }
 
 int hm_str_eq(hm_str a, const char *lit)
