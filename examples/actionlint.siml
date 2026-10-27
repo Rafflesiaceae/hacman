@@ -1,0 +1,58 @@
+#!/usr/bin/env hacman
+# Keep a private actionlint current, then forward commands such as
+# `./examples/actionlint.siml .github/workflows/ci.yml` to it.
+# Read the version off the public releases Atom feed rather than the GitHub
+# API, whose unauthenticated rate limit is easy to exhaust. The feed lists
+# releases newest first, so the first tag link is the current version.
+name: actionlint
+url: https://github.com/rhysd/actionlint/releases.atom
+check: version
+version-prefix: https://github.com/rhysd/actionlint/releases/tag/
+version-suffix: "
+schedule: daily
+bin-path: actionlint
+install: |
+  set -eu
+  echo "installing actionlint $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  # Release archives use Go's architecture names.
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=amd64 ;;
+    aarch64|arm64) release_arch=arm64 ;;
+    *)
+      echo "actionlint: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  # The tag has a leading v, while the archive and checksum file names do not.
+  release_version=${HACMAN_VERSION#v}
+  archive="actionlint_${release_version}_linux_${release_arch}.tar.gz"
+  base_url="https://github.com/rhysd/actionlint/releases/download/$HACMAN_VERSION"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+
+  curl -fsSL "$base_url/$archive" -o "$tmp/$archive"
+
+  # Every release publishes a checksum list with one `<sha256>  <file>` line
+  # per archive. It comes from the same host as the archive, so this catches
+  # a truncated or corrupted download rather than a compromised server.
+  curl -fsSL "$base_url/actionlint_${release_version}_checksums.txt" \
+    -o "$tmp/checksums.txt"
+  expected="$(awk -v f="$archive" '$2 == f { print $1; exit }' "$tmp/checksums.txt")"
+  if [ -z "$expected" ]; then
+    echo "actionlint: no checksum entry for $archive" >&2
+    exit 1
+  fi
+  actual="$(sha256sum "$tmp/$archive" | cut -d' ' -f1)"
+  if [ "$actual" != "$expected" ]; then
+    echo "actionlint: checksum mismatch for $archive" >&2
+    exit 1
+  fi
+
+  # The archive also holds docs and a man page; only the executable is needed.
+  tar -xzf "$tmp/$archive" -C "$tmp" actionlint
+  # Make sure the binary runs before it replaces the cached executable.
+  "$tmp/actionlint" -version >/dev/null
+  install -m755 "$tmp/actionlint" actionlint.next
+  mv actionlint.next actionlint
