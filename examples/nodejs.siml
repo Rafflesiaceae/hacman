@@ -1,7 +1,13 @@
 #!/usr/bin/env hacman
-# Keep a private Node.js current, then forward commands such as
-# `./examples/node.siml --version` to it.
-name: node
+# Keep one private Node.js current, then forward commands to its node or npm,
+# depending on the name this file is run under. node.siml and npm.siml beside
+# it are symlinks to this file, so `./examples/node.siml --version` and
+# `./examples/npm.siml install` both work; elsewhere, link it as `node` and
+# `npm` into a directory on PATH. A trailing .siml does not count, and every
+# name shares the one toolchain below: the project's record and work directory
+# belong to this file, not to the name it is run under. Running the file
+# itself selects the first entry, node.
+name: nodejs
 # nodejs.org/dist/latest/SHASUMS256.txt lists the checksum of every file of
 # the newest release, one `<sha256>  node-<version>-<platform>...` line each.
 # The first `node-` on the first line therefore sits right before the current
@@ -13,7 +19,12 @@ check: version
 version-prefix: node-
 version-suffix: -
 schedule: daily
-bin-path: node/bin/node
+# One program per name the file may be run under. Any other name is
+# rejected before the install could run.
+bin-path:
+  node: node/bin/node
+  npm: node/bin/npm
+  npx: node/bin/npx
 install: |
   set -eu
   echo "installing node $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
@@ -31,7 +42,7 @@ install: |
     x86_64|amd64) release_arch=x64 ;;
     aarch64|arm64) release_arch=arm64 ;;
     *)
-      echo "node: unsupported Linux architecture: $(uname -m)" >&2
+      echo "nodejs: unsupported Linux architecture: $(uname -m)" >&2
       exit 1
       ;;
   esac
@@ -43,7 +54,7 @@ install: |
   # The checksum list has `<sha256>  <file>` lines.
   expected="$(awk -v f="$archive" '$2 == f { print $1; exit }' "$HACMAN_RESPONSE")"
   if [ -z "$expected" ]; then
-    echo "node: no checksum entry for $archive" >&2
+    echo "nodejs: no checksum entry for $archive" >&2
     exit 1
   fi
 
@@ -54,12 +65,15 @@ install: |
     -o "$stage/$archive"
   actual="$(sha256sum "$stage/$archive" | cut -d' ' -f1)"
   if [ "$actual" != "$expected" ]; then
-    echo "node: checksum mismatch for $archive" >&2
+    echo "nodejs: checksum mismatch for $archive" >&2
     exit 1
   fi
   tar -xzf "$stage/$archive" -C "$stage"
   mv "$stage/$dir" "$stage/node"
+  # Every program a listed name selects must work before the swap. npm
+  # starts with `#!/usr/bin/env node`, so it needs the staged node on PATH.
   "$stage/node/bin/node" --version >/dev/null
+  PATH="$stage/node/bin:$PATH" "$stage/node/bin/npm" --version >/dev/null
 
   # Rotate only after the downloaded toolchain proves executable.
   if [ -d "$PWD/node" ]; then
@@ -73,3 +87,17 @@ install: |
     fi
     exit 1
   fi
+
+  # npm and the scripts it spawns start with `#!/usr/bin/env node`, which
+  # would fail without a node on PATH, so npm runs through a small wrapper
+  # that finds the toolchain next to itself and puts its node first on PATH.
+  cat > npm.next <<'WRAPPER'
+  #!/bin/sh
+  set -eu
+  base="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+  PATH="$base/node/bin:$PATH"
+  export PATH
+  exec "$base/node/bin/npm" "$@"
+  WRAPPER
+  chmod 755 npm.next
+  mv npm.next npm
