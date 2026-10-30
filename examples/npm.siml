@@ -1,0 +1,89 @@
+#!/usr/bin/env hacman
+# Keep a private npm current, then forward commands such as
+# `./examples/npm.siml install` to it.
+# npm is released inside the Node.js distribution, so this project caches a
+# complete Node.js toolchain of its own (see node.siml) and exposes its npm.
+# `npm` and the scripts it runs start with `#!/usr/bin/env node`, which would
+# fail without a node on PATH, so the project forwards through a small wrapper
+# that puts the bundled node first on PATH.
+name: npm
+# The first `node-` on the first line of the checksum list sits right before
+# the current version, which ends at the following `-` (e.g. v26.13.0).
+url: https://nodejs.org/dist/latest/SHASUMS256.txt
+check: version
+version-prefix: node-
+version-suffix: -
+schedule: daily
+bin-path: npm
+install: |
+  set -eu
+  echo "installing npm from node $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  # Recover the last good toolchain if a previous replacement was interrupted.
+  previous="$PWD/.node-previous"
+  if [ ! -d "$PWD/node" ] && [ -d "$previous" ]; then
+    mv "$previous" "$PWD/node"
+  fi
+  rm -rf "$previous"
+
+  # Node publishes separate archives for the supported Linux architectures,
+  # named after the x64 and arm64 spelling.
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=x64 ;;
+    aarch64|arm64) release_arch=arm64 ;;
+    *)
+      echo "npm: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  # The version already carries its leading v, e.g. v26.13.0.
+  dir="node-$HACMAN_VERSION-linux-$release_arch"
+  archive="$dir.tar.gz"
+
+  # The checksum list has `<sha256>  <file>` lines.
+  expected="$(awk -v f="$archive" '$2 == f { print $1; exit }' "$HACMAN_RESPONSE")"
+  if [ -z "$expected" ]; then
+    echo "npm: no checksum entry for $archive" >&2
+    exit 1
+  fi
+
+  # Stage and verify the archive before touching the installed toolchain.
+  stage="$(mktemp -d "$PWD/.node-update.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  curl -fsSL "https://nodejs.org/dist/$HACMAN_VERSION/$archive" \
+    -o "$stage/$archive"
+  actual="$(sha256sum "$stage/$archive" | cut -d' ' -f1)"
+  if [ "$actual" != "$expected" ]; then
+    echo "npm: checksum mismatch for $archive" >&2
+    exit 1
+  fi
+  tar -xzf "$stage/$archive" -C "$stage"
+  mv "$stage/$dir" "$stage/node"
+  PATH="$stage/node/bin:$PATH" "$stage/node/bin/npm" --version >/dev/null
+
+  # Rotate only after the downloaded toolchain proves executable.
+  if [ -d "$PWD/node" ]; then
+    mv "$PWD/node" "$previous"
+  fi
+  if mv "$stage/node" "$PWD/node"; then
+    rm -rf "$previous"
+  else
+    if [ -d "$previous" ]; then
+      mv "$previous" "$PWD/node"
+    fi
+    exit 1
+  fi
+
+  # The wrapper is what bin-path runs. It finds the toolchain next to itself
+  # and puts its node on PATH so npm and the scripts it spawns can use it.
+  cat > npm.next <<'WRAPPER'
+  #!/bin/sh
+  set -eu
+  base="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+  PATH="$base/node/bin:$PATH"
+  export PATH
+  exec "$base/node/bin/npm" "$@"
+  WRAPPER
+  chmod 755 npm.next
+  mv npm.next npm
