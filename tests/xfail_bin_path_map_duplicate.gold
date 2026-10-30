@@ -1,0 +1,1 @@
+hacman: tests/xfail_bin_path_map_duplicate.siml:6: duplicate bin-path name

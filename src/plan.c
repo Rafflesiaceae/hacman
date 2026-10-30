@@ -167,6 +167,9 @@ void hm_plan_print(const hm_project *p, const hm_cache *c)
     hm_out("cache-file: %s\n", c->path);
 
     if (p->bin_path[0] != '\0') {
+        /* A mapped bin-path reports which name selected the program. */
+        if (p->bin_choice == HM_BIN_NAMED) hm_out("bin-name: %S\n", p->bin_name);
+        if (p->bin_choice == HM_BIN_DEFAULT) hm_out("bin-name: %S (default)\n", p->bin_name);
         hm_out("bin-path: %s\n", p->bin_path);
         hm_out("exec: bin-path, with every argument that followed FILE\n");
     }

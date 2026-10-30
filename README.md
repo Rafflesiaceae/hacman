@@ -419,7 +419,7 @@ See [`examples/`](examples/) for one file per check scheme.
 | `version-prefix` | for `check: version` | — | text immediately before the version |
 | `version-suffix` | no | end of line | text immediately after the version |
 | `install` | no | — | shell script to run when the URL changed |
-| `bin-path` | no | — | program to exec afterwards (see [above](#options-before-file-arguments-after-it)) |
+| `bin-path` | no | — | program to exec afterwards, or a [mapping of names to programs](#one-file-several-programs) (see [above](#options-before-file-arguments-after-it)) |
 | `sandboxed` | no | `true` | confine install-script writes to the project's cache `.work` directory |
 | `sandbox-write-dirs` | no | `[]` | additional absolute directory templates that a sandboxed install script may write below |
 
@@ -450,7 +450,7 @@ schedule: 12h
 | `files` | no | — | files to materialize in a cache work directory before running the command |
 | `name` | no | the `command` | label used in output |
 | `schedule` | no | `daily` | when the command may run (below) |
-| `bin-path` | no | — | program to exec afterwards; a safe relative path resolves inside the sandbox work directory (see [above](#options-before-file-arguments-after-it)) |
+| `bin-path` | no | — | program to exec afterwards, or a [mapping of names to programs](#one-file-several-programs); a safe relative path resolves inside the sandbox work directory (see [above](#options-before-file-arguments-after-it)) |
 | `sandboxed` | no | `true` | confine command writes to the project's cache `.work` directory |
 | `sandbox-write-dirs` | no | `[]` | additional absolute directory templates that a sandboxed command may write below |
 
@@ -469,6 +469,51 @@ string, so a typo cannot silently point the shim at `/.cargo/bin/cargo`. A
 sandboxed project's `bin-path` may instead be a safe relative path beneath the
 generated work directory, such as `build/tool`; an unsandboxed project's
 `bin-path` must be absolute.
+
+#### One file, several programs
+
+`bin-path` may also be a mapping from names to programs. The name a project
+file is invoked under then selects the program, so one file can serve several
+commands through symlinks:
+
+```
+#!/usr/bin/env hacman
+name: multi
+command: ...builds or downloads both foo and bar into the work directory...
+bin-path:
+  foo: bin/foo    # the first entry is also the default
+  bar: bin/bar
+```
+
+```sh
+ln -s impl.siml ~/bin/foo   # foo ... -> <work directory>/bin/foo ...
+ln -s impl.siml ~/bin/bar   # bar ... -> <work directory>/bin/bar ...
+```
+
+The invoked name is the last component of `FILE` as it was given, before
+symlinks are resolved, without a trailing `.siml`: `~/bin/foo` and
+`./foo.siml` both select `foo`. Keys therefore contain no `/` and no `.siml`
+suffix, and each may appear only once. Every value is a `bin-path` of its own
+and may use `{{VAR}}` templates, which are only expanded for the selected
+entry.
+
+- **A listed name** runs its program. Like any cache-relative `bin-path`, a
+  program that is missing, for example after its work directory was removed,
+  makes hacman set the project up again; the setup must therefore provide
+  every listed program, or the setup runs again on every invocation of the
+  name it does not provide.
+- **The file's own name**, when it is not listed itself, runs the first
+  entry. This covers `hacman impl.siml`, `./impl.siml`, and a symlink that
+  keeps the target's name, such as `~/bin/impl.siml -> ~/src/impl.siml`.
+  Standard input has no name and also runs the first entry.
+- **Any other name** is rejected as a configuration error (exit 1) before any
+  setup, check or network request happens, and the message lists the allowed
+  names.
+
+All of a project file's names share its one record and work directory, since
+neither depends on the name it was run under (see [Cache](#cache)). Only a
+mapped project that falls back to its default entry checks the file's own
+name, and that costs at most one `readlink`; a plain `bin-path` is unaffected.
 
 There is no `install` and no `check`: the command *is* the work, and its exit
 status is the whole verdict. hacman records the run **only if the command

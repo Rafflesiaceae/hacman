@@ -2631,6 +2631,110 @@ schedule: always
         )
         self.missing("--plan did not start the program", "prog-ran")
         self.contains("--plan describes the hand-over", "exec: bin-path")
+        self.bin_map_tests()
+
+    def bin_map_tests(self) -> None:
+        """Verify that a bin-path mapping lets symlinked names select programs."""
+        cache = self.temp / "cache-bin-map"
+        multi = self.temp / "multi"
+        (multi / "other").mkdir(parents=True)
+        setup_log = self.temp / "bin-map-setup.log"
+        setup_log.write_text("", encoding="utf-8")
+        impl = multi / "impl.siml"
+        # The setup provides foo and bar but deliberately not qux, which is
+        # listed anyway to check that a listed but missing program keeps
+        # triggering the setup, like every missing cache-relative bin-path.
+        self.write(
+            impl,
+            f"""#!/usr/bin/env -S {self.binary} --cache {cache}
+name: multi-call
+command: echo setup >>"{setup_log}"; for t in foo bar; do printf '#!/bin/sh\\necho "%s:$*"\\n' "$t" > "$t"; chmod 755 "$t"; done
+sandbox-write-dirs: [{self.temp}]
+bin-path:
+  foo: foo
+  bar: bar
+  qux: qux
+schedule: weekly
+""",
+            executable=True,
+        )
+        for name in ("foo", "bar", "bar.siml", "qux", "baz"):
+            (multi / name).symlink_to("impl.siml")
+        # A symlink that keeps the target's name counts as the file itself.
+        (multi / "other" / "impl.siml").symlink_to("../impl.siml")
+        env = self.command_env()
+
+        def calls(name: str, argv: list[str | Path], output: str) -> None:
+            """Run one invocation and require the selected program's output."""
+            self.expect(f"{name} runs", 0, argv, env=env)
+            self.check(
+                f"{name} selects its program", self.output == output, self.output
+            )
+
+        calls("a listed name", [multi / "foo", "1"], "foo:1\n")
+        calls("another listed name", [multi / "bar", "2"], "bar:2\n")
+        self.check("both names share one setup", self.line_count(setup_log) == 1)
+        records = sorted(p.name for p in cache.glob("cmd-*") if p.suffix == "")
+        self.check("both names share one record", len(records) == 1, repr(records))
+        calls("a .siml suffix", [multi / "bar.siml", "s"], "bar:s\n")
+        calls("the file itself", [impl, "d"], "foo:d\n")
+        calls("a same-named symlink", [multi / "other" / "impl.siml", "o"], "foo:o\n")
+
+        # A name resolved via PATH arrives as an absolute path, while a
+        # relative FILE keeps its directory; only the last component counts.
+        path_env = self.command_env({"PATH": f"{multi}{os.pathsep}{env['PATH']}"})
+        self.expect("a name found via PATH runs", 0, ["bar", "p"], env=path_env)
+        self.check(
+            "the PATH lookup selected bar", self.output == "bar:p\n", self.output
+        )
+        result = self.run(
+            [self.binary, "--cache", cache, "multi/bar", "r"], env=env, cwd=self.temp
+        )
+        self.check(
+            "a relative FILE selects by its last component",
+            result.returncode == 0 and result.stdout == "bar:r\n",
+            result.stdout,
+        )
+        relative_default = self.run(
+            [self.binary, "--cache", cache, "multi/impl.siml", "r"],
+            env=env,
+            cwd=self.temp,
+        )
+        self.check(
+            "a relative FILE under its own name runs the default",
+            relative_default.returncode == 0 and relative_default.stdout == "foo:r\n",
+            relative_default.stdout,
+        )
+        self.expect_hacman(
+            "standard input runs the default",
+            0,
+            "--cache",
+            cache,
+            "-",
+            "i",
+            env=env,
+            stdin=impl.read_text(encoding="utf-8"),
+        )
+        self.check("standard input selected foo", self.output == "foo:i\n", self.output)
+        self.check("no selection reran the setup", self.line_count(setup_log) == 1)
+
+        self.expect("an unlisted name is rejected", 1, [multi / "baz"], env=env)
+        self.contains("the allowed names are listed", "'baz' is not one of")
+        self.contains("the list names every entry", "foo, bar, qux")
+        self.check("the rejected name ran no setup", self.line_count(setup_log) == 1)
+
+        # Removing the work directory must still be repaired automatically.
+        for workdir in cache.glob("cmd-*.work"):
+            shutil.rmtree(workdir)
+        calls("a removed work directory", [multi / "foo", "w"], "foo:w\n")
+        self.check("the removal reran the setup", self.line_count(setup_log) == 2)
+
+        self.expect("a listed but missing program", 127, [multi / "qux"], env=env)
+        self.expect("it stays missing", 127, [multi / "qux"], env=env)
+        self.check(
+            "a listed but missing program reruns the setup each time",
+            self.line_count(setup_log) == 4,
+        )
 
     def execute(self) -> int:
         """Run the complete suite and return its process exit status."""

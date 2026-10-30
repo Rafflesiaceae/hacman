@@ -1,0 +1,1 @@
+hacman: tests/xfail_bin_path_map_name.siml:4: a bin-path name must be a file name without '/' or a '.siml' suffix

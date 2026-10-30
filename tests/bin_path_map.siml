@@ -1,0 +1,9 @@
+# One project file, several symlinked names: the name FILE is invoked under
+# picks the program. This fixture runs under its own name, which is not
+# listed, so the first entry is the default.
+name: multi-call
+command: rustup update stable
+bin-path:
+  cargo: {{HOME}}/.cargo/bin/cargo
+  rustc: {{HOME}}/.cargo/bin/rustc
+schedule: weekly

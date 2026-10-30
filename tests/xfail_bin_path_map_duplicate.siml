@@ -1,0 +1,6 @@
+# Every bin-path name may appear only once, whichever name is invoked.
+command: rustup update stable
+bin-path:
+  cargo: {{HOME}}/.cargo/bin/cargo
+  rustc: {{HOME}}/.cargo/bin/rustc
+  rustc: {{HOME}}/.cargo/bin/rustc-nightly

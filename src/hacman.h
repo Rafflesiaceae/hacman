@@ -22,6 +22,8 @@
 #define HM_FILES_MAX              64   /* files embedded in one project */
 #define HM_FILE_PATH_MAX          128  /* SIML mapping-key limit       */
 #define HM_SANDBOX_WRITE_DIRS_MAX 16   /* extra writable host directories */
+#define HM_BIN_NAME_MAX           128  /* SIML mapping-key limit       */
+#define HM_BIN_NAMES_MAX          32   /* names in a bin-path mapping  */
 
 /* A borrowed, non-NUL-terminated string. Config values are slices into the
  * single buffer the .siml input was read into; nothing is ever copied. */
@@ -62,6 +64,16 @@ typedef struct {
     long   line;
 } hm_embedded_file;
 
+/* How the program to exec was chosen. A `bin-path` mapping lists the names a
+ * project file may be invoked under, each with its own program. */
+typedef enum {
+    HM_BIN_SINGLE = 0, /* a plain bin-path, or none at all                  */
+    HM_BIN_NAMED,      /* the invoked name is one of the mapping's keys     */
+    HM_BIN_DEFAULT     /* no key matched: the first entry, which is only
+                        * valid when the file runs under its own name or
+                        * from stdin (main.c confirms that)                 */
+} hm_bin_choice;
+
 /* One explicitly configured writable host directory. The template borrows
  * the input buffer while path holds its environment-expanded absolute form. */
 typedef struct {
@@ -84,6 +96,9 @@ typedef struct {
     hm_str        version_prefix;    /* HM_CHECK_VERSION: text before value  */
     hm_str        version_suffix;    /* HM_CHECK_VERSION: text after value   */
     hm_str        bin;               /* raw {{VAR}} or cache-relative path    */
+    hm_bin_choice bin_choice;        /* plain path, or which mapping entry    */
+    hm_str        bin_name;          /* the selected mapping key, if any      */
+    size_t        bin_name_count;    /* names in a bin-path mapping           */
     /* The program this project sets up. When set, hacman execs it once the
      * setup is done, forwarding everything that followed FILE. */
     char   bin_path[HM_PATH_MAX + 1];
@@ -97,6 +112,9 @@ typedef struct {
      * and leaves pages for unused files and writable directories unfaulted. */
     hm_embedded_file     files[HM_FILES_MAX];
     hm_sandbox_write_dir sandbox_write_dirs[HM_SANDBOX_WRITE_DIRS_MAX];
+    /* bin-path mapping keys, copied because parser key slices are transient.
+     * Written only by projects that use a mapping; the first is the default. */
+    char bin_names[HM_BIN_NAMES_MAX][HM_BIN_NAME_MAX + 1];
 } hm_project;
 
 /* --- env.c -------------------------------------------------------------- */
@@ -150,9 +168,16 @@ long hm_read_all(const char *path, char *buf, size_t cap, int *source_fd, int *c
  * Value slices point into `buf`, which must stay alive for as long as the
  * project is used; transient embedded-file keys are copied. Returns 0, or -1
  * on error (message already printed). Unpacking passes resolve_paths = 0 to
- * leave runtime environment templates untouched. */
-int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project *out,
-                    int resolve_paths);
+ * leave runtime environment templates untouched. `invoked` is the project
+ * file path exactly as given on the command line, symlinks unresolved, or NULL
+ * for standard input; only a `bin-path` mapping reads it. */
+int hm_config_parse(const char *buf, size_t len, const char *origin, const char *invoked,
+                    hm_project *out, int resolve_paths);
+
+/* The name a project file path stands for in a `bin-path` mapping: its last
+ * component without a trailing `.siml`, so `~/bin/npm` and `./npm.siml` both
+ * give `npm`. The result borrows `path`. */
+hm_str hm_bin_name_of(const char *path);
 
 const char *hm_check_name(hm_check_kind k);
 void        hm_sched_describe(const hm_project *p, char *out, size_t cap);

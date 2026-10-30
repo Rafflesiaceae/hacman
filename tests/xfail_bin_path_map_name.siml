@@ -1,0 +1,4 @@
+# Invoked names never contain '/', so such a key could never be selected.
+command: rustup update stable
+bin-path:
+  bin/cargo: {{HOME}}/.cargo/bin/cargo

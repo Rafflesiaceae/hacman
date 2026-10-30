@@ -64,6 +64,7 @@ static hm_str slice(siml_slice s)
 typedef struct {
     const char       *buf;
     const char       *origin;
+    const char       *invoked;    /* FILE as given, or NULL for stdin       */
     hm_project       *out;        /* the one project being built            */
     int               started;    /* its mapping has been opened            */
     int               finished;   /* ... and closed again                   */
@@ -78,7 +79,12 @@ typedef struct {
     int               pending_sandbox_write_dirs;
     int               in_files; /* inside the nested embedded-file map    */
     int               in_sandbox_write_dirs;
-    int               block_kind; /* 1 = install, 2 = embedded file         */
+    int               seen_bin;        /* bin-path given, as a path or a map  */
+    int               pending_bin_map; /* saw the header-only `bin-path:`     */
+    int               in_bin_map;      /* inside the bin-path name mapping    */
+    hm_str            bin_default;     /* its first entry's path              */
+    hm_str            invoked_name;    /* FILE's mapping name, once needed    */
+    int               block_kind;      /* 1 = install, 2 = embedded file         */
     hm_embedded_file *block_file;
     const char       *block_start; /* first raw byte of the current block    */
     const char       *block_end;   /* one past its last raw byte             */
@@ -245,6 +251,11 @@ static int apply_field(hm_cfg *c, hm_str key, hm_str value, long line)
         }
         p->command = value;
     } else if (hm_str_eq(key, "bin-path")) {
+        if (c->seen_bin) {
+            cfg_err(c, line, "duplicate 'bin-path'");
+            return -1;
+        }
+        c->seen_bin = 1;
         if (value.len > HM_PATH_MAX) {
             cfg_err(c, line, "bin-path is too long");
             return -1;
@@ -368,6 +379,86 @@ static int add_sandbox_write_dir(hm_cfg *c, hm_str source, long line)
     p->sandbox_write_dirs[p->sandbox_write_dir_count].source = source;
     p->sandbox_write_dirs[p->sandbox_write_dir_count].line   = line;
     p->sandbox_write_dir_count += 1;
+    return 0;
+}
+
+hm_str hm_bin_name_of(const char *path)
+{
+    static const char suffix[] = ".siml";
+    const char       *slash    = strrchr(path, '/');
+    hm_str            r;
+
+    r.ptr = (slash != NULL) ? slash + 1 : path;
+    r.len = strlen(r.ptr);
+    /* A file called just `.siml` keeps its name rather than becoming empty. */
+    if (r.len > sizeof(suffix) - 1 &&
+        memcmp(r.ptr + r.len - (sizeof(suffix) - 1), suffix, sizeof(suffix) - 1) == 0) {
+        r.len -= sizeof(suffix) - 1;
+    }
+    return r;
+}
+
+/* Records one `name: path` entry of a bin-path mapping. Only the names are
+ * copied, for duplicate detection and diagnostics; paths stay slices of the
+ * input buffer, and only the selected one and the default are kept. */
+static int add_bin_entry(hm_cfg *c, hm_str name, hm_str path, long line)
+{
+    hm_project *p = c->cur;
+    size_t      i;
+
+    /* Keys are compared with invocation names, which never contain a slash
+     * and have any `.siml` suffix removed, so such a key could never match. */
+    if (memchr(name.ptr, '/', name.len) != NULL ||
+        (name.len > 5 && memcmp(name.ptr + name.len - 5, ".siml", 5) == 0) ||
+        name.len > HM_BIN_NAME_MAX) {
+        cfg_err(c, line, "a bin-path name must be a file name without '/' or a '.siml' suffix");
+        return -1;
+    }
+    if (path.len == 0 || path.len > HM_PATH_MAX) {
+        cfg_err(c, line, "a bin-path entry is empty or too long");
+        return -1;
+    }
+
+    for (i = 0; i < p->bin_name_count; ++i) {
+        if (hm_str_eq_str(name, (hm_str){p->bin_names[i], strlen(p->bin_names[i])})) {
+            cfg_err(c, line, "duplicate bin-path name");
+            return -1;
+        }
+    }
+    if (p->bin_name_count == HM_BIN_NAMES_MAX) {
+        cfg_err(c, line, "too many bin-path names");
+        return -1;
+    }
+
+    hm_str_copy(p->bin_names[p->bin_name_count], sizeof(p->bin_names[0]), name);
+    if (p->bin_name_count == 0) c->bin_default = path;
+    if (c->invoked_name.len > 0 && hm_str_eq_str(name, c->invoked_name)) {
+        p->bin        = path;
+        p->bin_name   = c->invoked_name;
+        p->bin_choice = HM_BIN_NAMED;
+    }
+    p->bin_name_count += 1;
+    return 0;
+}
+
+/* Settles which mapping entry runs once all of them are known. Without a
+ * matching key the first entry is the candidate; main.c rejects it unless
+ * the file was run under its own name. */
+static int finish_bin_map(hm_cfg *c, long line)
+{
+    hm_project *p = c->cur;
+
+    c->in_bin_map = 0;
+    if (p->bin_name_count == 0) {
+        cfg_err(c, line, "a bin-path mapping needs at least one entry");
+        return -1;
+    }
+    if (p->bin_choice != HM_BIN_NAMED) {
+        p->bin          = c->bin_default;
+        p->bin_name.ptr = p->bin_names[0];
+        p->bin_name.len = strlen(p->bin_names[0]);
+        p->bin_choice   = HM_BIN_DEFAULT;
+    }
     return 0;
 }
 
@@ -512,6 +603,11 @@ static int finish_project(hm_cfg *c)
         }
     }
 
+    if (c->pending_bin_map) {
+        cfg_err(c, p->line, "'bin-path' needs a path or a mapping of names to paths");
+        return -1;
+    }
+
     if (p->sandbox_write_dir_count > 0 && !p->sandboxed) {
         cfg_err(c, p->line, "'sandbox-write-dirs' requires 'sandboxed: true'");
         return -1;
@@ -566,8 +662,8 @@ static void block_line(hm_cfg *c, const siml_event *ev)
     c->block_end = ev->value.ptr + ev->value.len;
 }
 
-int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project *out,
-                    int resolve_paths)
+int hm_config_parse(const char *buf, size_t len, const char *origin, const char *invoked,
+                    hm_project *out, int resolve_paths)
 {
     hm_line_reader reader;
     siml_parser    parser;
@@ -577,6 +673,7 @@ int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project 
     memset(&c, 0, sizeof(c));
     c.buf           = buf;
     c.origin        = origin;
+    c.invoked       = invoked;
     c.out           = out;
     c.resolve_paths = resolve_paths;
 
@@ -598,9 +695,22 @@ int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project 
             break;
 
         case SIML_EVENT_MAPPING_ENTRY_HEADER:
+            if (c.in_bin_map) {
+                cfg_err(&c, ev.line, "a bin-path entry must map a name to a path");
+                return -1;
+            }
             if (c.in_files || c.in_sandbox_write_dirs) {
                 cfg_err(&c, ev.line, "an embedded file must be a literal block scalar");
                 return -1;
+            }
+            if (c.cur != NULL && hm_str_eq(slice(ev.key), "bin-path")) {
+                if (c.seen_bin) {
+                    cfg_err(&c, ev.line, "duplicate 'bin-path'");
+                    return -1;
+                }
+                c.seen_bin        = 1;
+                c.pending_bin_map = 1;
+                break;
             }
             if (c.cur != NULL && hm_str_eq(slice(ev.key), "files")) {
                 c.seen_files    = 1;
@@ -655,6 +765,14 @@ int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project 
                 c.in_files      = 1;
                 break;
             }
+            if (c.cur != NULL && c.pending_bin_map) {
+                c.pending_bin_map = 0;
+                c.in_bin_map      = 1;
+                /* The invoked name is derived only for projects that map
+                 * names, keeping plain projects free of the work. */
+                if (c.invoked != NULL) c.invoked_name = hm_bin_name_of(c.invoked);
+                break;
+            }
             if (c.cur != NULL && c.pending_sandbox_write_dirs) {
                 cfg_err(&c, ev.line, "'sandbox-write-dirs' must be a sequence");
                 return -1;
@@ -669,6 +787,10 @@ int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project 
         case SIML_EVENT_MAPPING_END:
             if (c.in_files) {
                 c.in_files = 0;
+                break;
+            }
+            if (c.in_bin_map) {
+                if (finish_bin_map(&c, ev.line) != 0) return -1;
                 break;
             }
             if (finish_project(&c) != 0) return -1;
@@ -686,6 +808,10 @@ int hm_config_parse(const char *buf, size_t len, const char *origin, hm_project 
                 }
                 cfg_err(&c, ev.line, "bare sequence items are not supported");
                 return -1;
+            }
+            if (c.in_bin_map) {
+                if (add_bin_entry(&c, slice(ev.key), slice(ev.value), ev.line) != 0) return -1;
+                break;
             }
             if (c.in_files) {
                 cfg_err(&c, ev.line, "an embedded file must be a literal block scalar");

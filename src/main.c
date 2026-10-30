@@ -488,6 +488,50 @@ static void release_source_path(char *path)
     if (path != NULL && path != canonical_source_path) free(path);
 }
 
+/* A bin-path mapping without an entry for the invoked name falls back to its
+ * first entry only when FILE is the project file itself rather than a
+ * symlink under another name: a symlink must be listed to be allowed. This
+ * runs only for such projects, before any setup, and costs at most one
+ * readlink: `known` reuses an already resolved path, and a FILE that openat2
+ * proved free of symlinks needs no resolution at all. */
+static int confirm_default_bin(const hm_project *p, const char *file, int fd, int canonical,
+                               const char *known)
+{
+    const char *own      = known;
+    char       *resolved = NULL;
+    hm_str      invoked  = hm_bin_name_of(file);
+    int         same;
+
+    if (canonical) return 0;
+    if (own == NULL) own = resolved = resolve_source_path(fd, file);
+    if (own == NULL) {
+        hm_err("hacman: %s: cannot resolve input path\n", file);
+        return -1;
+    }
+    same = hm_str_eq_str(invoked, hm_bin_name_of(own));
+    release_source_path(resolved);
+    if (!same) {
+        /* Name the allowed choices so a mistyped or unlisted symlink is
+         * obvious. The list is bounded by the mapping limits. */
+        char   names[HM_BIN_NAMES_MAX * (HM_BIN_NAME_MAX + 2)];
+        size_t i, n = 0;
+
+        for (i = 0; i < p->bin_name_count; ++i) {
+            size_t k = strlen(p->bin_names[i]);
+            if (i > 0) {
+                names[n++] = ',';
+                names[n++] = ' ';
+            }
+            memcpy(names + n, p->bin_names[i], k);
+            n += k;
+        }
+        names[n] = '\0';
+        hm_err("hacman: %s: '%S' is not one of the names in bin-path: %s\n", file, invoked, names);
+        return -1;
+    }
+    return 0;
+}
+
 /* A command project: run it, and remember that only if it succeeded. */
 static int run_command_project(const hm_project *p, hm_opts *o, long now, const char *cache_dir)
 {
@@ -531,6 +575,7 @@ int main(int argc, char **argv)
     char              old_mark[HM_MARK_MAX + 1];
     long              len, now, wait = 0;
     int               rc, changed, missing_bin, source_fd, source_canonical, exec_check;
+    int               is_stdin;
     int               lock_fd = -1;
 
     rc = parse_args(argc, argv, &o);
@@ -556,11 +601,13 @@ int main(int argc, char **argv)
 
     /* Startup usage stays plain; project diagnostics need line prefixes. */
     hm_err_prefix();
-    len = hm_read_all(o.file, config_buf, sizeof(config_buf), &source_fd, &source_canonical);
+    is_stdin = strcmp(o.file, "-") == 0;
+    len      = hm_read_all(o.file, config_buf, sizeof(config_buf), &source_fd, &source_canonical);
     if (len < 0) return HM_EXIT_USAGE;
 
-    if (hm_config_parse(config_buf, (size_t)len, (strcmp(o.file, "-") != 0) ? o.file : "<stdin>",
-                        &project, !o.unpack) != 0) {
+    /* Standard input has neither a display name nor an invoked name. */
+    if (hm_config_parse(config_buf, (size_t)len, is_stdin ? "<stdin>" : o.file,
+                        is_stdin ? NULL : o.file, &project, !o.unpack) != 0) {
         if (source_fd >= 0) close(source_fd);
         return HM_EXIT_USAGE;
     }
@@ -605,6 +652,12 @@ int main(int argc, char **argv)
             release_source_path(source_path);
             return HM_EXIT_USAGE;
         }
+    }
+    if (project.bin_choice == HM_BIN_DEFAULT && !is_stdin &&
+        confirm_default_bin(p, o.file, source_fd, source_canonical, source_path) != 0) {
+        if (source_fd >= 0) close(source_fd);
+        release_source_path(source_path);
+        return HM_EXIT_USAGE;
     }
     if (source_fd >= 0) close(source_fd);
 
