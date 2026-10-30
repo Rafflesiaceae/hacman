@@ -1,0 +1,75 @@
+#!/usr/bin/env hacman
+# Keep a private Node.js current, then forward commands such as
+# `./examples/node.siml --version` to it.
+name: node
+# nodejs.org/dist/latest/SHASUMS256.txt lists the checksum of every file of
+# the newest release, one `<sha256>  node-<version>-<platform>...` line each.
+# The first `node-` on the first line therefore sits right before the current
+# version, which ends at the following `-` (e.g. v26.13.0). The install block
+# verifies its archive against the same response, so it needs no second
+# request for the checksum.
+url: https://nodejs.org/dist/latest/SHASUMS256.txt
+check: version
+version-prefix: node-
+version-suffix: -
+schedule: daily
+bin-path: node/bin/node
+install: |
+  set -eu
+  echo "installing node $HACMAN_VERSION (was: ${HACMAN_PREVIOUS:-none})"
+
+  # Recover the last good toolchain if a previous replacement was interrupted.
+  previous="$PWD/.node-previous"
+  if [ ! -d "$PWD/node" ] && [ -d "$previous" ]; then
+    mv "$previous" "$PWD/node"
+  fi
+  rm -rf "$previous"
+
+  # Node publishes separate archives for the supported Linux architectures,
+  # named after the x64 and arm64 spelling.
+  case "$(uname -m)" in
+    x86_64|amd64) release_arch=x64 ;;
+    aarch64|arm64) release_arch=arm64 ;;
+    *)
+      echo "node: unsupported Linux architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  # The version already carries its leading v, e.g. v26.13.0.
+  dir="node-$HACMAN_VERSION-linux-$release_arch"
+  archive="$dir.tar.gz"
+
+  # The checksum list has `<sha256>  <file>` lines.
+  expected="$(awk -v f="$archive" '$2 == f { print $1; exit }' "$HACMAN_RESPONSE")"
+  if [ -z "$expected" ]; then
+    echo "node: no checksum entry for $archive" >&2
+    exit 1
+  fi
+
+  # Stage and verify the archive before touching the installed toolchain.
+  stage="$(mktemp -d "$PWD/.node-update.XXXXXX")"
+  trap 'rm -rf "$stage"' EXIT
+  curl -fsSL "https://nodejs.org/dist/$HACMAN_VERSION/$archive" \
+    -o "$stage/$archive"
+  actual="$(sha256sum "$stage/$archive" | cut -d' ' -f1)"
+  if [ "$actual" != "$expected" ]; then
+    echo "node: checksum mismatch for $archive" >&2
+    exit 1
+  fi
+  tar -xzf "$stage/$archive" -C "$stage"
+  mv "$stage/$dir" "$stage/node"
+  "$stage/node/bin/node" --version >/dev/null
+
+  # Rotate only after the downloaded toolchain proves executable.
+  if [ -d "$PWD/node" ]; then
+    mv "$PWD/node" "$previous"
+  fi
+  if mv "$stage/node" "$PWD/node"; then
+    rm -rf "$previous"
+  else
+    if [ -d "$previous" ]; then
+      mv "$previous" "$PWD/node"
+    fi
+    exit 1
+  fi
