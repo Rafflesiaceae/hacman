@@ -65,7 +65,7 @@ Rules the fast path follows, and that changes to it must keep:
 
 - **Static musl by default.** A static binary has no dynamic loader to run
   before `main()`. This is the single largest startup win and the reason
-  `build.sh` looks for a musl toolchain first.
+  hacman requires a musl toolchain for every build.
 - **No allocator on normal cached launches.** Buffers are in BSS or on the
   stack (see the `HM_*` limits in `src/hacman.h`). Optional embedded-file and
   sandbox-directory storage is initialized only for entries actually used,
@@ -132,16 +132,16 @@ sudo apt install musl-tools meson ninja-build
 file build/hacman   # ... statically linked ...
 ```
 
-If no musl compiler is present, `build.sh` warns and falls back to the system
-compiler (still statically linked). Set `HACMAN_GLIBC=0` to make that a hard
-error instead.
+If no musl compiler is present, the build fails. glibc is not supported.
+Both `build.sh` and direct Meson builds check for musl, including when a
+compiler is selected explicitly. Use a fresh build directory when changing
+compilers, since Meson keeps the compiler selected during initial setup.
 
 | variable | default | meaning |
 |---|---|---|
 | `BUILD_DIR` | `./build` | build directory |
-| `HACMAN_CC` | autodetected | compiler to use |
+| `HACMAN_CC` | autodetected | musl compiler to use |
 | `HACMAN_STATIC` | `1` | `0` builds a dynamically linked binary |
-| `HACMAN_GLIBC` | `1` | `0` refuses to build without musl |
 | `BUILDTYPE` | `release` | Meson buildtype |
 | `DEBUG` | unset | trace the build script |
 
@@ -244,7 +244,7 @@ including when the performance assertion fails. Run
 
 ### Dependencies
 
-- Build: a C99 compiler, Meson ≥ 0.60, Ninja.
+- Build: a C99 compiler targeting musl, Meson ≥ 0.60, Ninja.
 - Tests: Python ≥ 3.8 and `curl`.
 - Runtime: `curl` and `/bin/sh`. The SIML parser is vendored in
   `vendor/siml/` (see `vendor.py`); nothing else is linked in.
@@ -292,9 +292,8 @@ environment exported to setup code:
   HACMAN_RESPONSE     downloaded response path when available
 
 build.sh environment:
-  HACMAN_CC           compiler to use
+  HACMAN_CC           musl compiler to use
   HACMAN_STATIC=0|1   disable or enable static linking
-  HACMAN_GLIBC=0|1    disallow or allow fallback from musl to glibc
 ```
 
 `FILE` is required; pass `-` to read the project from standard input:

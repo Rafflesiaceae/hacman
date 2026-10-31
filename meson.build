@@ -12,6 +12,12 @@ project('hacman', 'c',
 
 cc = meson.get_compiler('c')
 
+# Enforce the libc requirement for direct Meson builds and cached compilers
+# too: reconfiguring an existing build does not switch its compiler via CC.
+if not cc.links(files('tools/check-musl.c'), name: 'musl libc')
+  error('hacman requires musl libc; select a musl toolchain (e.g. CC=musl-gcc) and use a fresh build directory if changing compilers')
+endif
+
 # hacman is a POSIX/XSI program: it needs fork/execvp, clock/time, mkstemp and
 # realpath's allocation form for canonical input paths.
 add_project_arguments(

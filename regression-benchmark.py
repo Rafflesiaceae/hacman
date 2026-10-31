@@ -157,7 +157,6 @@ def benchmark() -> None:
             HACMAN_BENCHMARK_CC=env["HACMAN_CC"],
             BUILD_DIR=str(temp / "build"),
             HACMAN_STATIC="1",
-            HACMAN_GLIBC="0",
             BUILDTYPE="release",
         )
         run([ROOT_DIR / "build.sh"], env)
