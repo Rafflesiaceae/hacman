@@ -41,6 +41,12 @@ files:
     typedef struct { char *label, *path; bool desktop; } Entry;
     typedef struct { xcb_keysym_t sym; char *key, *command; } Shortcut;
     typedef struct { int entry, score; } Match;
+    /* Cache opened fallback faces and failed lookups for this popup's lifetime. */
+    typedef struct FontFallback {
+        XftFont *base, *font;
+        FcChar32 missing;
+        struct FontFallback *next;
+    } FontFallback;
     enum { GC_BG, GC_BORDER, GC_SELECT, GC_ACCENT, GC_CURSOR,
            GC_BUTTON, GC_BUTTON_HOVER, GC_ROW_HOVER, GC_ROW_HOVER_ACCENT,
            GC_COUNT };
@@ -55,6 +61,8 @@ files:
         xcb_gcontext_t gc[GC_COUNT];
         XftDraw *draw;
         XftFont *font, *bold_font;
+        bool font_ascii, bold_ascii;
+        FontFallback *fallbacks;
         XftColor ink[TEXT_COUNT];
         xcb_get_keyboard_mapping_reply_t *keymap;
         uint8_t mincode;
@@ -479,23 +487,112 @@ files:
         xcb_rectangle_t r={(int16_t)x,(int16_t)y,(uint16_t)w,(uint16_t)h};
         xcb_poly_fill_rectangle(a->conn,a->paint_target,a->gc[gc],1,&r);
     }
+    static XftFont *font_for_char(App *a, XftFont *base, FcChar32 codepoint) {
+        if (XftCharExists(a->dpy,base,codepoint)) return base;
+        for (FontFallback *f=a->fallbacks;f;f=f->next) {
+            if (f->base!=base) continue;
+            if (f->font && XftCharExists(a->dpy,f->font,codepoint)) return f->font;
+            if (!f->font && f->missing==codepoint) return base;
+        }
+        /* Match from the user's request, not the resolved face's file/charset.
+           Keep the actual pixel size and the shortcut button's bold weight. */
+        FcPattern *pattern=FcNameParse((const FcChar8*)a->font_pattern);
+        FcCharSet *charset=FcCharSetCreate();
+        if (!pattern || !charset) fatal("font fallback");
+        FcPatternDel(pattern,FC_FILE);
+        FcPatternDel(pattern,FC_INDEX);
+        FcPatternDel(pattern,FC_CHARSET);
+        FcCharSetAddChar(charset,codepoint);
+        FcPatternAddCharSet(pattern,FC_CHARSET,charset);
+        FcCharSetDestroy(charset);
+        double pixels=a->font_size;
+        FcPatternGetDouble(base->pattern,FC_PIXEL_SIZE,0,&pixels);
+        FcPatternDel(pattern,FC_SIZE);
+        FcPatternDel(pattern,FC_PIXEL_SIZE);
+        FcPatternAddDouble(pattern,FC_PIXEL_SIZE,pixels);
+        if (base==a->bold_font && base!=a->font) {
+            FcPatternDel(pattern,FC_WEIGHT);
+            FcPatternAddInteger(pattern,FC_WEIGHT,FC_WEIGHT_BOLD);
+        }
+        FcResult result;
+        FcPattern *match=XftFontMatch(a->dpy,DefaultScreen(a->dpy),pattern,&result);
+        FcPatternDestroy(pattern);
+        XftFont *font=match ? XftFontOpenPattern(a->dpy,match) : NULL;
+        /* Xft owns the matched pattern only after a successful open. Fontconfig
+           can return a best match even when no installed face has the glyph. */
+        if (match && !font) FcPatternDestroy(match);
+        if (font && !XftCharExists(a->dpy,font,codepoint)) {
+            XftFontClose(a->dpy,font);
+            font=NULL;
+        }
+        FontFallback *fallback=malloc(sizeof *fallback);
+        if (!fallback) fatal("malloc");
+        *fallback=(FontFallback){base,font,codepoint,a->fallbacks};
+        a->fallbacks=fallback;
+        return font ? font : base;
+    }
+    /* Both measuring and painting consume identical UTF-8 font runs. Invalid
+       bytes still advance, so arbitrary executable names cannot stall redraw. */
+    static int text_run(App *a, XftFont *base, const FcChar8 *s, int len,
+                        XftFont **font) {
+        bool ascii=base==a->font ? a->font_ascii :
+                   base==a->bold_font && a->bold_ascii;
+        int end=0;
+        while (end<len) {
+            int n=1;
+            XftFont *next=base;
+            /* Covered ASCII only needs a byte scan; defer decoding and glyph
+               lookup to Unicode text or fonts with incomplete ASCII coverage. */
+            if (!ascii || s[end]<0x20 || s[end]>0x7e) {
+                FcChar32 codepoint;
+                n=FcUtf8ToUcs4(s+end,&codepoint,len-end);
+                if (n>0) next=font_for_char(a,base,codepoint);
+                else n=1;
+            }
+            if (end && next!=*font) break;
+            *font=next;
+            end+=n;
+        }
+        return end;
+    }
     static int text_width_n(App *a, const char *s, int len) {
-        if (len<=0) return 0;
-        XGlyphInfo ext;
-        XftTextExtentsUtf8(a->dpy,a->font,(const FcChar8*)s,len,&ext);
-        return ext.xOff;
+        int width=0;
+        for (int offset=0;offset<len;) {
+            XftFont *font;
+            int n=text_run(a,a->font,(const FcChar8*)s+offset,len-offset,&font);
+            XGlyphInfo ext;
+            XftTextExtentsUtf8(a->dpy,font,(const FcChar8*)s+offset,n,&ext);
+            width+=ext.xOff;
+            offset+=n;
+        }
+        return width;
     }
     static void draw_text_font(App *a, XftFont *font, int color, int x, int baseline,
                                const char *s, int max_width) {
         if (max_width<=0) return;
-        int len=(int)strlen(s);
-        /* Use Xft clipping instead of measuring/copying every result label. */
-        XRectangle clip={(short)x,(short)(baseline-font->ascent),
-                         (unsigned short)max_width,
-                         (unsigned short)(font->ascent+font->descent+2)};
-        XftDrawSetClipRectangles(a->draw,0,0,&clip,1);
-        XftDrawStringUtf8(a->draw,&a->ink[color],font,x,baseline,
-                          (const FcChar8*)s,len);
+        int len=(int)strlen(s), origin=x;
+        for (int offset=0;offset<len && x-origin<max_width;) {
+            XftFont *run_font;
+            int n=text_run(a,font,(const FcChar8*)s+offset,len-offset,&run_font);
+            /* Keep one horizontal clip across runs, allowing taller fallback
+               glyphs (including color emoji) to use their own vertical metrics. */
+            int ascent=run_font->ascent>font->ascent ? run_font->ascent : font->ascent;
+            int descent=run_font->descent>font->descent ? run_font->descent : font->descent;
+            XRectangle clip={(short)origin,(short)(baseline-ascent),
+                             (unsigned short)max_width,
+                             (unsigned short)(ascent+descent+2)};
+            XftDrawSetClipRectangles(a->draw,0,0,&clip,1);
+            XftDrawStringUtf8(a->draw,&a->ink[color],run_font,x,baseline,
+                              (const FcChar8*)s+offset,n);
+            offset+=n;
+            /* Only another run needs an advance. Single-font labels retain
+               clipped drawing without a separate text measurement. */
+            if (offset<len) {
+                XGlyphInfo ext;
+                XftTextExtentsUtf8(a->dpy,run_font,(const FcChar8*)s+offset-n,n,&ext);
+                x+=ext.xOff;
+            }
+        }
     }
     static void draw_text(App *a, int color, int x, int baseline,
                           const char *s, int max_width) {
@@ -775,6 +872,14 @@ files:
         a->dirty_rows=0;
         a->button_hover_dirty=false;
     }
+    static bool font_covers_ascii(XftFont *font) {
+        FcChar32 map[FC_CHARSET_MAP_SIZE], next;
+        if (FcCharSetFirstPage(font->charset,map,&next)!=0) return false;
+        /* In Unicode page zero, printable ASCII (U+0020..U+007E) occupies
+           words 1 and 2 and the low 31 bits of word 3. No glyphs are loaded. */
+        return map[1]==UINT32_MAX && map[2]==UINT32_MAX &&
+               (map[3]&0x7fffffffU)==0x7fffffffU;
+    }
     static void init_xft(App *a) {
         int screen=DefaultScreen(a->dpy);
         a->font=XftFontOpenName(a->dpy,screen,a->font_pattern);
@@ -790,6 +895,9 @@ files:
         a->bold_font=XftFontOpenName(a->dpy,screen,bold_pattern);
         free(bold_pattern);
         if (!a->bold_font) a->bold_font=a->font;
+        a->font_ascii=font_covers_ascii(a->font);
+        a->bold_ascii=a->bold_font==a->font ? a->font_ascii :
+                      font_covers_ascii(a->bold_font);
         a->draw=XftDrawCreate(a->dpy,a->paint_target,DefaultVisual(a->dpy,screen),
                               DefaultColormap(a->dpy,screen));
         if (!a->draw) { fputs("pathpop: XftDrawCreate failed\n",stderr); exit(1); }
@@ -1587,9 +1695,10 @@ files:
     x11 = dependency('x11', required: true)
     x11_xcb = dependency('x11-xcb', required: true)
     xft = dependency('xft', required: true)
+    fontconfig = dependency('fontconfig', required: true)
 
     executable('pathpop', 'main.c',
-      dependencies: [xcb, randr, x11, x11_xcb, xft],
+      dependencies: [xcb, randr, x11, x11_xcb, xft, fontconfig],
       c_args: ['-O2', '-DHAVE_RANDR'],
       install: false,
     )
