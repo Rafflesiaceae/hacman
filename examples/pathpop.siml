@@ -39,7 +39,7 @@ files:
            WHEEL_LINES=3 };
 
     typedef struct { char *label, *path; bool desktop; } Entry;
-    typedef struct { xcb_keysym_t sym; char *key, *command; } Shortcut;
+    typedef struct { xcb_keysym_t sym; char *key, *command, *label; } Shortcut;
     typedef struct { int entry, score; } Match;
     /* Cache opened fallback faces and failed lookups for this popup's lifetime. */
     typedef struct FontFallback {
@@ -692,10 +692,12 @@ files:
                 int x,y,bw,bh;
                 shortcut_rect(a,i,&x,&y,&bw,&bh);
                 int base=y+(bh-bf->ascent-bf->descent)/2+bf->ascent;
-                int key_slot=50;
-                draw_text_font(a,bf,TEXT_BLUE,x+12,base,a->shorts[i].key,key_slot-12);
+                /* Click-only buttons use the key column for their label. */
+                int key_slot=a->shorts[i].sym ? 50 : 12;
+                if (a->shorts[i].sym)
+                    draw_text_font(a,bf,TEXT_BLUE,x+12,base,a->shorts[i].key,38);
                 draw_text_font(a,bf,TEXT_MAIN,x+key_slot,base,
-                               a->shorts[i].command,bw-key_slot-10);
+                               a->shorts[i].label,bw-key_slot-10);
             }
         }
         if (!a->no_count) {
@@ -756,9 +758,12 @@ files:
         shortcut_rect(a,(size_t)index,&x,&y,&w,&h);
         XftFont *font=a->bold_font ? a->bold_font : a->font;
         int base=y+(h-font->ascent-font->descent)/2+font->ascent;
-        draw_text_font(a,font,TEXT_BLUE,x+12,base,a->shorts[index].key,38);
-        draw_text_font(a,font,TEXT_MAIN,x+50,base,
-                       a->shorts[index].command,w-60);
+        /* Match the full paint's layout when only hover text is redrawn. */
+        int key_slot=a->shorts[index].sym ? 50 : 12;
+        if (a->shorts[index].sym)
+            draw_text_font(a,font,TEXT_BLUE,x+12,base,a->shorts[index].key,38);
+        draw_text_font(a,font,TEXT_MAIN,x+key_slot,base,
+                       a->shorts[index].label,w-key_slot-10);
     }
     static void copy_region(App *a,int x,int y,int w,int h) {
         if (!a->no_double_buffering && w>0 && h>0)
@@ -954,6 +959,7 @@ files:
           "  -h, --help                 Show this help\n"
           "  ~/.config/pathpop          Optional startup options, one argument per line\n"
           "                             Config is loaded first; CLI options take precedence\n"
+          "                             A line containing \"\" supplies an empty argument\n"
           "  --list                     Print candidate names without opening X11\n"
           "  --desktop                  Include and launch .desktop applications\n"
           "  --fuzz-char-swap           Match one adjacent-character transposition\n"
@@ -963,6 +969,8 @@ files:
           "  --font FONT                Xft/Fontconfig pattern, e.g. 'Consolas:pixelsize=16'\n"
           "                             Also accepts 'Consolas 16' for compatibility\n"
           "  --short KEY PROGRAM       Bind F1..F35 or case-sensitive A..Z/a..z/0..9\n"
+          "                             Empty KEY creates a clickable button without a hotkey\n"
+          "                             PROGRAM::LABEL sets the button's display text\n"
           "                             Repeat --short; clickable buttons appear in 3 columns\n\n"
           "Config example (~/.config/pathpop):\n"
           "  --short\n  F1\n  thunar\n\n"
@@ -1014,8 +1022,9 @@ files:
         }
     }
     /* ~/.config/pathpop: one argument per line, not shell syntax.
-       Blank lines and full-line # comments are ignored.  Parse config
-       arguments BEFORE the real command line so explicit flags win. */
+       Blank lines and full-line # comments are ignored; "" means an empty
+       argument. Parse config arguments BEFORE the real command line so
+       explicit flags win. */
     typedef struct { char **args; size_t count, capacity; } ConfigArgs;
     static void free_config_args(ConfigArgs *c) {
         for (size_t i=0;i<c->count;i++) free(c->args[i]);
@@ -1047,6 +1056,8 @@ files:
             size_t n=strlen(arg);
             while (n && (arg[n-1]==' ' || arg[n-1]=='\t')) arg[--n]=0;
             if (!*arg || *arg=='#') continue;
+            /* Explicit empty arguments survive the blank-line filtering. */
+            if (!strcmp(arg,"\"\"")) arg[0]=0;
             if (c->count>=4096 || n>65536) {
                 fprintf(stderr,"pathpop: %s:%lu: config limit exceeded\n",path,line_no);
                 free(line); fclose(f); free(path); free_config_args(c); exit(2);
@@ -1086,18 +1097,24 @@ files:
                 if (i+2>=argc) { fputs("pathpop: --short needs KEY PROGRAM\n",stderr); exit(2); }
                 const char *key=argv[++i];
                 xcb_keysym_t sym=parse_shortkey(key);
-                if (!sym) { fprintf(stderr,"pathpop: invalid shortcut key: %s\n",key); exit(2); }
+                if (*key && !sym) { fprintf(stderr,"pathpop: invalid shortcut key: %s\n",key); exit(2); }
                 const char *cmd=argv[++i];
-                if (!*cmd) { fputs("pathpop: empty shortcut program\n",stderr); exit(2); }
-                Shortcut item={ .sym=sym, .key=strdup(key), .command=strdup(cmd) };
-                if (!item.key || !item.command) fatal("strdup");
+                /* Keep the executable separate from its optional display label. */
+                const char *separator=strstr(cmd,"::");
+                size_t command_len=separator ? (size_t)(separator-cmd) : strlen(cmd);
+                if (!command_len) { fputs("pathpop: empty shortcut program\n",stderr); exit(2); }
+                Shortcut item={ .sym=sym, .key=strdup(key),
+                    .command=strndup(cmd,command_len),
+                    .label=strdup(separator ? separator+2 : cmd) };
+                if (!item.key || !item.command || !item.label) fatal("strdup");
                 /* Last definition wins, including CLI over config.  Preserve
-                   its footer position rather than creating duplicate buttons. */
+                   its footer position. Click-only buttons have no key to replace. */
                 bool replaced=false;
                 for (size_t j=0;j<a->short_count;j++) {
-                    if (a->shorts[j].sym!=sym) continue;
+                    if (!sym || a->shorts[j].sym!=sym) continue;
                     free(a->shorts[j].key);
                     free(a->shorts[j].command);
+                    free(a->shorts[j].label);
                     a->shorts[j]=item;
                     replaced=true;
                     break;
@@ -1249,7 +1266,7 @@ files:
         if (!a->qlen && !ctrl && !alt &&
             !(ev->state & (XCB_MOD_MASK_4|XCB_MOD_MASK_5))) {
             for (size_t i=0;i<a->short_count;i++)
-                if (k==a->shorts[i].sym) { launch_program(a,NULL,a->shorts[i].command); return; }
+                if (a->shorts[i].sym && k==a->shorts[i].sym) { launch_program(a,NULL,a->shorts[i].command); return; }
         }
         if (k==XK_Escape) _exit(0);
         if (k==XK_Return || k==XK_KP_Enter) {
