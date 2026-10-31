@@ -960,6 +960,7 @@ files:
           "  ~/.config/pathpop          Optional startup options, one argument per line\n"
           "                             Config is loaded first; CLI options take precedence\n"
           "                             A line containing \"\" supplies an empty argument\n"
+          "  --no-config                Skip loading ~/.config/pathpop\n"
           "  --list                     Print candidate names without opening X11\n"
           "  --desktop                  Include and launch .desktop applications\n"
           "  --fuzz-char-swap           Match one adjacent-character transposition\n"
@@ -1083,6 +1084,7 @@ files:
         for (int i=1;i<argc;i++) {
             const char *v=argv[i];
             if (!strcmp(v,"-h") || !strcmp(v,"--help")) { usage(stdout); exit(0); }
+            if (!strcmp(v,"--no-config")) continue; /* Handled before loading config. */
             if (!strcmp(v,"--list")) { *list=true; continue; }
             if (!strcmp(v,"--desktop")) { a->desktop_mode=true; continue; }
             if (!strcmp(v,"--fuzz-char-swap")) { a->fuzz_char_swap=true; continue; }
@@ -1134,7 +1136,15 @@ files:
 
     static void parse_config_and_args(App *a, int argc, char **argv, bool *list) {
         ConfigArgs c={0};
-        load_config_args(&c);
+        /* Inspect CLI options before opening config, skipping option values. */
+        bool no_config=false;
+        for (int i=1;i<argc;i++) {
+            if (!strcmp(argv[i],"--no-config")) { no_config=true; break; }
+            int values=!strcmp(argv[i],"--font") ? 1 :
+                       !strcmp(argv[i],"--short") ? 2 : 0;
+            while (values-- && i+1<argc) i++;
+        }
+        if (!no_config) load_config_args(&c);
         if (!c.count) {
             parse_args(a,argc,argv,list);
             free_config_args(&c);
